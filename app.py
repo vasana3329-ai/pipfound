@@ -302,6 +302,21 @@ h1{font-size:22px;margin:0;font-weight:700;letter-spacing:.2px}
 .go:hover{filter:brightness(1.08)}
 .go:disabled{opacity:.55;cursor:not-allowed}
 .chips{display:flex;gap:7px;flex-wrap:wrap;margin-top:14px}
+/* پنلِ تنظیماتِ بک‌تست */
+.btpanel{margin-top:14px;border-top:1px dashed var(--line);padding-top:14px;display:flex;
+  flex-direction:column;gap:10px}
+.btrow{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.btlbl{color:var(--muted);font-size:13px;font-weight:600;white-space:nowrap}
+.btinp{background:var(--panel2);border:1px solid var(--line);border-radius:10px;color:var(--txt);
+  padding:9px 12px;font-size:14px;font-family:inherit;min-width:150px;direction:ltr;text-align:right}
+.btinp:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(77,163,255,.18);outline:none}
+.btinp.wide{min-width:260px;flex:1}
+.btinp.narrow{min-width:90px;width:90px}
+.bthint{color:var(--muted);font-size:11px;opacity:.8}
+.sideseg{display:flex;gap:5px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:4px}
+.sideseg button{background:transparent;border:0;color:var(--muted);padding:8px 14px;border-radius:8px;
+  cursor:pointer;font-size:13px;font-weight:600;font-family:inherit;transition:.15s}
+.sideseg button.active{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#04121f}
 .chip{background:var(--panel2);border:1px solid var(--line);color:var(--muted);font-size:12px;
   padding:6px 11px;border-radius:20px;cursor:pointer;transition:.15s}
 .chip:hover{border-color:var(--accent);color:var(--txt)}
@@ -447,6 +462,31 @@ tr.on td{background:rgba(34,197,94,.05)}
       <button id="bt" class="go" style="background:#334155">بک‌تست</button>
     </div>
     <div class="chips" id="chips"></div>
+
+    <!-- پنلِ تنظیماتِ بک‌تست: کاربر خودش محدوده/تایم‌فریم/جهت را انتخاب می‌کند -->
+    <div id="btPanel" class="btpanel">
+      <div class="btrow">
+        <span class="btlbl">بازه‌ی بک‌تست (تاریخِ روی چارت):</span>
+        <input id="btFrom" class="btinp" type="text" placeholder="از — مثل 2026-06-01" autocomplete="off">
+        <input id="btTo" class="btinp" type="text" placeholder="تا — مثل 2026-08-13" autocomplete="off">
+        <span class="bthint">خالی = خودکار (کندل‌های اخیر)</span>
+      </div>
+      <div class="btrow">
+        <span class="btlbl">تایم‌فریمِ دلخواه (فرکتالی):</span>
+        <input id="btTfs" class="btinp wide" type="text" placeholder="مثلاً 4h,1h,15m,5m — خالی = طبقِ سبک">
+        <span class="bthint">اولی = بایاسِ بالا، آخری = ورود</span>
+      </div>
+      <div class="btrow">
+        <span class="btlbl">جهتِ مجاز:</span>
+        <div class="sideseg" id="btSide">
+          <button data-s="both" class="active">هر دو</button>
+          <button data-s="long">فقط خرید</button>
+          <button data-s="short">فقط فروش</button>
+        </div>
+        <span class="btlbl" style="margin-inline-start:14px">عمقِ پیمایش:</span>
+        <input id="btWalk" class="btinp narrow" type="number" min="100" max="8000" step="100" value="600">
+      </div>
+    </div>
   </div>
 
   <div id="result"></div>
@@ -513,13 +553,33 @@ symIn.addEventListener("keydown",e=>{if(e.key==="Enter")run();});
 
 const btBtn = $("#bt"), btRes = $("#btresult");
 btBtn.onclick = runBacktest;
+
+// جهتِ مجاز (both/long/short)
+let btSide = "both";
+$("#btSide").addEventListener("click", e=>{
+  const b=e.target.closest("button"); if(!b) return;
+  document.querySelectorAll("#btSide button").forEach(x=>x.classList.remove("active"));
+  b.classList.add("active"); btSide=b.dataset.s;
+});
+
 async function runBacktest(){
   const sym=symIn.value.trim();
   if(!sym){symIn.focus();return;}
+  // خواندنِ انتخاب‌های کاربر
+  const from=$("#btFrom").value.trim();
+  const to=$("#btTo").value.trim();
+  const tfs=$("#btTfs").value.trim();
+  let walk=parseInt($("#btWalk").value,10); if(!walk||walk<100) walk=600;
   btBtn.disabled=true;
-  btRes.innerHTML='<div class="status">در حالِ بک‌تستِ walk-forward روی چارت‌های پیشین… (چند ثانیه) <span class="spin"></span></div>';
+  const scope = (from||to) ? `بازه‌ی ${from||"…"} تا ${to||"…"}` : "کندل‌های اخیر";
+  const sideLbl = btSide==="long"?"فقط خرید":btSide==="short"?"فقط فروش":"هر دو جهت";
+  btRes.innerHTML=`<div class="status">در حالِ بک‌تستِ walk-forward — ${scope} · ${sideLbl}${tfs?` · تایم‌فریم ${tfs}`:""}… <span class="spin"></span></div>`;
   try{
-    const r=await fetch(`/api/backtest?symbol=${encodeURIComponent(sym)}&style=${style}&walk=600`);
+    const qs=new URLSearchParams({symbol:sym, style, walk:String(walk), side:btSide});
+    if(from) qs.set("from", from);
+    if(to)   qs.set("to", to);
+    if(tfs)  qs.set("tfs", tfs);
+    const r=await fetch(`/api/backtest?${qs.toString()}`);
     const d=await r.json();
     if(d.error){btRes.innerHTML=`<div class="err">خطا در بک‌تستِ «${sym}»: ${d.error}</div>`;return;}
     renderBacktest(d);
@@ -547,12 +607,19 @@ function renderBacktest(d){
   const empty = d.trades===0
     ? `<div class="err" style="margin-top:8px">هیچ سیگنالِ واجدِ شرایطی در این بازه پیدا نشد — معیارها سخت‌گیرند (درجه‌ی خوب + RR≥۱:۲ + پرشدنِ ورود). این خودش یعنی اپ کورکورانه ورود نمی‌سازد.</div>`
     : "";
+  // برچسبِ تنظیماتِ به‌کاررفته
+  const sideMap={both:"هر دو جهت",long:"فقط خرید",short:"فقط فروش"};
+  const sideTxt=sideMap[d.side_used]||"هر دو جهت";
+  const rangeTxt=(d.range_from||d.range_to)
+    ? `بازه: ${d.range_from||"ابتدای داده"} تا ${d.range_to||"انتهای داده"}`
+    : "بازه: کندل‌های اخیر (خودکار)";
   btRes.innerHTML=`
   <div class="plan" style="margin-top:14px">
     <h3>🔬 نتیجه‌ی بک‌تست — ${d.symbol} · سبک ${d.style} · ${(d.timeframes||[]).join(" ")}</h3>
-    <p style="color:var(--muted);font-size:13px;margin:4px 0 12px">
+    <p style="color:var(--muted);font-size:13px;margin:4px 0 4px">
       این وین‌ریت از همان منطقِ ورودی‌ای می‌آید که اپ الان زنده پیشنهاد می‌دهد
       (walk-forward، بدونِ نگاه به آینده). سیگنال‌های هم‌پوشان حذف شده‌اند.</p>
+    <p style="color:var(--muted);font-size:12px;margin:0 0 12px">🎯 ${sideTxt} · 📅 ${rangeTxt}</p>
     <div class="pgrid">
       <div class="pcell"><span>تعدادِ معاملات</span><b>${d.trades}</b></div>
       <div class="pcell"><span>برد / باخت</span><b>${d.wins} / ${d.losses}</b></div>
@@ -917,6 +984,13 @@ class Handler(BaseHTTPRequestHandler):
             sym = (q.get("symbol", [""])[0]).strip()
             style = (q.get("style", ["day"])[0]).strip()
             grades = (q.get("grades", ["A+,A,B"])[0]).strip()
+            side = (q.get("side", ["both"])[0]).strip() or "both"
+            # tfs دلخواهِ کاربر (فرکتالی): "4h,1h,15m,5m" — بر style اولویت دارد
+            tfs_raw = (q.get("tfs", [""])[0]).strip()
+            user_tfs = [t.strip() for t in tfs_raw.split(",") if t.strip()] or None
+            # بازه‌ی تاریخیِ انتخابیِ کاربر روی چارت (epoch ثانیه یا رشته‌ی تاریخ)
+            df_raw = (q.get("from", [""])[0]).strip()
+            dt_raw = (q.get("to", [""])[0]).strip()
             try:
                 walk = int(q.get("walk", ["600"])[0])
             except Exception:
@@ -927,8 +1001,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps({"error": "موتورِ بک‌تست در دسترس نیست"}, ensure_ascii=False))
             try:
                 gr = tuple(g.strip() for g in grades.split(",") if g.strip())
+                if side not in ("both", "long", "short"):
+                    side = "both"
+                try:
+                    date_from = BT._parse_when(df_raw) if df_raw else None
+                    date_to = BT._parse_when(dt_raw) if dt_raw else None
+                except ValueError as ex:
+                    return self._send(200, json.dumps({"error": str(ex)}, ensure_ascii=False))
                 res = BT.backtest(sym.upper(), style=style, grades=gr,
-                                  walk=walk, fill_window=48, max_hold=400)
+                                  walk=walk, fill_window=48, max_hold=400,
+                                  side=side, tfs=user_tfs,
+                                  date_from=date_from, date_to=date_to)
+                # بازتابِ تنظیماتِ به‌کاررفته برای نمایش در UI
+                if isinstance(res, dict) and "error" not in res:
+                    res.setdefault("side_used", side)
+                    res.setdefault("tfs_used", user_tfs or BT.__dict__.get("tf_map", {}))
+                    res["range_from"] = df_raw or None
+                    res["range_to"] = dt_raw or None
                 return self._send(200, json.dumps(res, ensure_ascii=False))
             except Exception as e:
                 traceback.print_exc()
