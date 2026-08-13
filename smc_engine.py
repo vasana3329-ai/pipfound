@@ -213,14 +213,18 @@ def structure(bars, sw):
     if lows and price<lows[-1][1]:
         b2=("bearish_BOS",lows[-1][1],lows[-1][0])
         if not bos: bos=b2
-    # CHoCH: trend flip signal (break against recent trend)
+    # CHoCH: trend flip signal (break against recent trend).
+    # اصلاحِ همان باگِ BOS که این‌جا باقی مانده بود: CHoCH باید شکستِ
+    # **نزدیک‌ترین** سوینگِ مخالف باشد، نه هر سوینگِ کهنه. قبلاً حلقه به عقب
+    # می‌رفت و اولین سوینگِ قدیمی‌ای که قیمت آن را رد کرده بود CHoCH اعلام
+    # می‌شد؛ چون قیمتِ فعلی تقریباً همیشه بالای یک سقفِ خیلی قدیمی است،
+    # در ترندِ نزولی یک bullish_CHoCH جعلی می‌ساخت و بایاسِ نزولیِ واقعی را
+    # خنثی می‌کرد → روی فارکس همه‌چیز «نامشخص/صعودی» می‌شد.
     if len(labeled)>=3:
-        if trend=="up":
-            for s in reversed(lows):
-                if price<s[1]: choch=("bearish_CHoCH",s[1],s[0]); break
-        elif trend=="down":
-            for s in reversed(highs):
-                if price>s[1]: choch=("bullish_CHoCH",s[1],s[0]); break
+        if trend=="up" and lows and price<lows[-1][1]:
+            choch=("bearish_CHoCH",lows[-1][1],lows[-1][0])
+        elif trend=="down" and highs and price>highs[-1][1]:
+            choch=("bullish_CHoCH",highs[-1][1],highs[-1][0])
     return trend, labeled[-6:], bos, choch
 
 def fvgs(bars, lookback=60):
