@@ -317,6 +317,12 @@ h1{font-size:22px;margin:0;font-weight:700;letter-spacing:.2px}
 .sideseg button{background:transparent;border:0;color:var(--muted);padding:8px 14px;border-radius:8px;
   cursor:pointer;font-size:13px;font-weight:600;font-family:inherit;transition:.15s}
 .sideseg button.active{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#04121f}
+/* راهنمای تقدم‌وتأخر: بعد از انتخابِ نماد، سبک و دکمه‌ی تحلیل چشمک بزنند */
+.styles.awaiting{box-shadow:0 0 0 2px rgba(77,163,255,.35);border-radius:12px}
+@keyframes gopulse{0%,100%{box-shadow:0 0 0 0 rgba(77,163,255,.0)}50%{box-shadow:0 0 0 4px rgba(77,163,255,.28)}}
+.go.pulse{animation:gopulse 1.6s ease-in-out infinite}
+.stephint{color:var(--muted);font-size:12px;margin-top:10px;line-height:1.7;
+  border-inline-start:3px solid var(--accent);padding-inline-start:10px;opacity:.9}
 .chip{background:var(--panel2);border:1px solid var(--line);color:var(--muted);font-size:12px;
   padding:6px 11px;border-radius:20px;cursor:pointer;transition:.15s}
 .chip:hover{border-color:var(--accent);color:var(--txt)}
@@ -462,8 +468,12 @@ tr.on td{background:rgba(34,197,94,.05)}
       <button id="bt" class="go" style="background:#334155">بک‌تست</button>
     </div>
     <div class="chips" id="chips"></div>
-
-    <!-- پنلِ تنظیماتِ بک‌تست: کاربر خودش محدوده/تایم‌فریم/جهت را انتخاب می‌کند -->
+    <div class="stephint" id="stepHint">
+      ۱) یک نماد را بنویس یا از میان‌برهای بالا انتخاب کن &nbsp;·&nbsp;
+      ۲) سبک را انتخاب کن (اسکالپ / روزانه / سوینگ) &nbsp;·&nbsp;
+      ۳) اگر خواستی بازه و تایم‌فریمِ بک‌تست را تنظیم کن &nbsp;·&nbsp;
+      ۴) «تحلیل کن» یا «بک‌تست» را بزن. هیچ‌چیز خودکار اجرا نمی‌شود.
+    </div>
     <div id="btPanel" class="btpanel">
       <div class="btrow">
         <span class="btlbl">بازه‌ی بک‌تست (تاریخِ روی چارت):</span>
@@ -537,15 +547,24 @@ SUGGESTIONS.forEach(s=>{const o=document.createElement("option");o.value=s;dl.ap
 const chips = $("#chips");
 ["XAUUSD","XAGUSD","EURUSD","GBPUSD","AUDUSD","USDJPY","BTCUSDT","ETHUSDT"].forEach(s=>{
   const c=document.createElement("span");c.className="chip";c.textContent=s;
-  c.onclick=()=>{symIn.value=s;run();};chips.appendChild(c);
+  // فقط نماد را پُر کن؛ اجرا نکن. کاربر اول سبک و بازه را انتخاب می‌کند.
+  c.onclick=()=>{ symIn.value=s; symIn.focus(); markReady(); };
+  chips.appendChild(c);
 });
 
-// style toggle
+// وقتی نمادی انتخاب/تایپ شد، کاربر را به انتخابِ سبک/بازه هدایت کن (بدونِ اجرای خودکار)
+function markReady(){
+  const has = symIn.value.trim().length>0;
+  $("#styles").classList.toggle("awaiting", has);
+  goBtn.classList.toggle("pulse", has);
+}
+symIn.addEventListener("input", markReady);
+
+// style toggle — فقط سبک را عوض کن؛ تحلیل را خودکار اجرا نکن
 $("#styles").addEventListener("click",e=>{
   const b=e.target.closest("button");if(!b)return;
   document.querySelectorAll("#styles button").forEach(x=>x.classList.remove("active"));
   b.classList.add("active");style=b.dataset.k;
-  if(symIn.value.trim())run();
 });
 
 goBtn.onclick=run;
