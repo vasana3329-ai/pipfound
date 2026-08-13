@@ -96,21 +96,77 @@ def _simulate(entry_bars, start_idx, direction, entry, sl, tp,
     return None  # تا انتهای داده نه TP نه SL — معامله‌ی ناتمام، حساب نمی‌شود
 
 
+_FA_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+
+
 def _parse_when(s):
     """رشته‌ی تاریخ/زمان کاربر → epoch ثانیه (UTC). None اگر خالی.
-    قالب‌های مجاز: 'YYYY-MM-DD'، 'YYYY-MM-DD HH:MM'، یا epochِ خام."""
+    قالب‌های مجاز و منعطف: 'YYYY-MM-DD'، 'YYYY-MM-DD HH:MM'، epochِ خام.
+    ارقامِ فارسی/عربی، و جداکننده‌های / یا . یا فاصله هم پذیرفته می‌شوند."""
     if s is None or str(s).strip() == "":
         return None
-    s = str(s).strip()
-    if s.isdigit():
+    s = str(s).strip().translate(_FA_DIGITS)  # ۱۴۰۵ → 1405، ارقامِ عربی هم
+    if s.isdigit() and len(s) >= 9:            # epochِ خام (۹+ رقم)
         return int(s)
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+    # یکدست‌سازیِ جداکننده‌های تاریخ: / و . و _ → -
+    norm = s.replace("/", "-").replace(".", "-").replace("_", "-")
+    # حذفِ خط‌تیره‌های تکراری
+    while "--" in norm:
+        norm = norm.replace("--", "-")
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d %H",
+                "%Y-%m-%d", "%Y-%m", "%Y"):
         try:
-            dt = datetime.datetime.strptime(s, fmt).replace(tzinfo=datetime.timezone.utc)
+            dt = datetime.datetime.strptime(norm, fmt).replace(tzinfo=datetime.timezone.utc)
             return int(dt.timestamp())
         except ValueError:
             continue
-    raise ValueError(f"قالبِ تاریخِ نامعتبر: {s} (نمونه: 2025-01-15 یا 2025-01-15 14:30)")
+    raise ValueError(
+        f"قالبِ تاریخِ نامعتبر: «{s}». نمونه‌های درست: 2026-08-13 یا "
+        f"2026-08-13 14:30 (سالِ میلادی، با خط‌تیره یا اسلش). "
+        f"تاریخ را از کادرِ پیشنهادیِ زیرِ فرم کپی کن.")
+
+
+def suggest_range(symbol, style="day", tfs=None, walk=600):
+    """بر اساسِ عمقِ پیمایشِ walk و دیتای در دسترسِ تایم‌فریمِ ورود،
+    یک بازه‌ی پیشنهادیِ معتبر (from/to به‌صورتِ 'YYYY-MM-DD HH:MM') برمی‌گرداند
+    تا کاربر بداند حداقل از چه تاریخی می‌تواند بازه انتخاب کند."""
+    tf_map = {
+        "scalp": ["1h", "15m", "5m", "1m"],
+        "day":   ["1d", "4h", "1h", "15m"],
+        "swing": ["1w", "1d", "4h", "1h"],
+    }
+    if tfs:
+        tfs = [t.strip() for t in tfs if str(t).strip()]
+    else:
+        tfs = tf_map.get(style, tf_map["day"])
+    ltf = tfs[-1]
+    limit_map = {"1m": 5000, "5m": 8000, "15m": 8000, "1h": 6000,
+                 "4h": 3000, "1d": 1500, "1w": 400}
+    lim = limit_map.get(ltf, 500)
+    src, sym, dsp, bars = EG.fetch(symbol, ltf, lim)
+    if not bars or len(bars) < 80:
+        return {"error": f"دیتای کافی برای {ltf} نیست ({len(bars) if bars else 0} کندل)."}
+
+    def _fa(ts, with_time=True):
+        dt = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+        return dt.strftime("%Y-%m-%d %H:%M" if with_time else "%Y-%m-%d")
+
+    n = len(bars)
+    data_from = bars[0]["t"]
+    data_to = bars[-1]["t"]
+    # حداقلِ شروعِ معتبر برای عمقِ walk: کندلِ (n-walk) اگر داده کافی باشد،
+    # وگرنه ۶۰ کندلِ اولِ داده (به‌خاطرِ نیازِ ساختار به سابقه).
+    walk = max(100, int(walk or 600))
+    idx = max(60, n - walk)
+    walk_from = bars[idx]["t"]
+    return {
+        "symbol": dsp, "ltf": ltf, "timeframes": tfs, "walk": walk,
+        "bars": n,
+        "data_from": _fa(data_from),          # کهن‌ترین کندلِ در دسترس
+        "data_to": _fa(data_to),              # تازه‌ترین کندل (پیشنهادِ «تا»)
+        "suggested_from": _fa(walk_from),     # پیشنهادِ «از» برای عمقِ walk
+        "suggested_to": _fa(data_to),
+    }
 
 
 def backtest(symbol, style="day", grades=("A+", "A", "B"),

@@ -323,6 +323,16 @@ h1{font-size:22px;margin:0;font-weight:700;letter-spacing:.2px}
 .go.pulse{animation:gopulse 1.6s ease-in-out infinite}
 .stephint{color:var(--muted);font-size:12px;margin-top:10px;line-height:1.7;
   border-inline-start:3px solid var(--accent);padding-inline-start:10px;opacity:.9}
+.btsug{background:var(--panel2);border:1px solid var(--accent);color:var(--accent);
+  padding:7px 12px;border-radius:9px;cursor:pointer;font-size:12px;font-weight:600;
+  font-family:inherit;transition:.15s;white-space:nowrap}
+.btsug:hover{background:var(--accent);color:#04121f}
+.btsug:disabled{opacity:.5;cursor:default}
+.btsughint{color:var(--muted);font-size:12px;line-height:1.7;margin:2px 0 4px;
+  padding-inline-start:2px}
+.btsughint.ok{color:var(--txt)}
+.btsughint b{color:var(--accent)}
+.sugpick{color:var(--accent);cursor:pointer;text-decoration:underline;font-weight:700}
 .chip{background:var(--panel2);border:1px solid var(--line);color:var(--muted);font-size:12px;
   padding:6px 11px;border-radius:20px;cursor:pointer;transition:.15s}
 .chip:hover{border-color:var(--accent);color:var(--txt)}
@@ -479,7 +489,11 @@ tr.on td{background:rgba(34,197,94,.05)}
         <span class="btlbl">بازه‌ی بک‌تست (تاریخِ روی چارت):</span>
         <input id="btFrom" class="btinp" type="text" placeholder="از — مثل 2026-06-01" autocomplete="off">
         <input id="btTo" class="btinp" type="text" placeholder="تا — مثل 2026-08-13" autocomplete="off">
-        <span class="bthint">خالی = خودکار (کندل‌های اخیر)</span>
+        <button id="btSuggest" class="btsug" type="button">بازه‌ی پیشنهادی ↧</button>
+      </div>
+      <div class="btsughint" id="btSugHint">
+        برای بازه، نماد و سبک را انتخاب کن، سپس «بازه‌ی پیشنهادی» را بزن تا حداقلِ تاریخِ معتبر
+        بر اساسِ عمقِ پیمایش پیشنهاد شود. خالی گذاشتن = خودکار (کندل‌های اخیر).
       </div>
       <div class="btrow">
         <span class="btlbl">تایم‌فریمِ دلخواه (فرکتالی):</span>
@@ -580,6 +594,36 @@ $("#btSide").addEventListener("click", e=>{
   document.querySelectorAll("#btSide button").forEach(x=>x.classList.remove("active"));
   b.classList.add("active"); btSide=b.dataset.s;
 });
+
+// دکمه‌ی «بازه‌ی پیشنهادی»: بر اساسِ عمقِ walk و دیتای در دسترس،
+// حداقلِ تاریخِ معتبر را به کاربر پیشنهاد می‌دهد.
+const btSug = $("#btSuggest"), btSugHint = $("#btSugHint");
+btSug.onclick = async ()=>{
+  const sym=symIn.value.trim();
+  if(!sym){ symIn.focus(); btSugHint.textContent="اول یک نماد انتخاب کن."; return; }
+  const tfs=$("#btTfs").value.trim();
+  let walk=parseInt($("#btWalk").value,10); if(!walk||walk<100) walk=600;
+  btSug.disabled=true; const old=btSug.textContent; btSug.textContent="در حالِ محاسبه…";
+  try{
+    const qs=new URLSearchParams({symbol:sym, style, walk:String(walk)});
+    if(tfs) qs.set("tfs", tfs);
+    const r=await fetch(`/api/suggest-range?${qs.toString()}`);
+    const d=await r.json();
+    if(d.error){ btSugHint.className="btsughint"; btSugHint.textContent="خطا: "+d.error; return; }
+    // پیشنهاد را داخلِ کادرها بگذار + راهنمای قابلِ‌کلیک
+    $("#btFrom").value=d.suggested_from;
+    $("#btTo").value=d.suggested_to;
+    btSugHint.className="btsughint ok";
+    btSugHint.innerHTML=
+      `برای عمقِ پیمایشِ <b>${d.walk}</b> کندلِ <b>${d.ltf}</b> (${d.timeframes.join(" ")})، `+
+      `حداقلِ تاریخِ معتبر <b>${d.suggested_from}</b> است و تا <b>${d.suggested_to}</b> داده هست. `+
+      `کهن‌ترین دیتای در دسترس: ${d.data_from}. `+
+      `<span class="sugpick" id="pickFull">استفاده از کلِ دیتا (${d.data_from} → ${d.data_to})</span>`;
+    const pf=document.getElementById("pickFull");
+    if(pf) pf.onclick=()=>{ $("#btFrom").value=d.data_from; $("#btTo").value=d.data_to; };
+  }catch(err){ btSugHint.className="btsughint"; btSugHint.textContent="ارتباط با سرور ناموفق بود: "+err; }
+  finally{ btSug.disabled=false; btSug.textContent=old; }
+};
 
 async function runBacktest(){
   const sym=symIn.value.trim();
@@ -1037,6 +1081,28 @@ class Handler(BaseHTTPRequestHandler):
                     res.setdefault("tfs_used", user_tfs or BT.__dict__.get("tf_map", {}))
                     res["range_from"] = df_raw or None
                     res["range_to"] = dt_raw or None
+                return self._send(200, json.dumps(res, ensure_ascii=False))
+            except Exception as e:
+                traceback.print_exc()
+                return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
+
+        if u.path == "/api/suggest-range":
+            # بر اساسِ عمقِ walk و دیتای در دسترس، بازه‌ی پیشنهادیِ معتبر بده
+            q = parse_qs(u.query)
+            sym = (q.get("symbol", [""])[0]).strip()
+            style = (q.get("style", ["day"])[0]).strip()
+            tfs_raw = (q.get("tfs", [""])[0]).strip()
+            user_tfs = [t.strip() for t in tfs_raw.split(",") if t.strip()] or None
+            try:
+                walk = int(q.get("walk", ["600"])[0])
+            except Exception:
+                walk = 600
+            if not sym:
+                return self._send(400, json.dumps({"error": "نماد وارد نشده"}, ensure_ascii=False))
+            if BT is None or not hasattr(BT, "suggest_range"):
+                return self._send(200, json.dumps({"error": "موتورِ بک‌تست در دسترس نیست"}, ensure_ascii=False))
+            try:
+                res = BT.suggest_range(sym.upper(), style=style, tfs=user_tfs, walk=walk)
                 return self._send(200, json.dumps(res, ensure_ascii=False))
             except Exception as e:
                 traceback.print_exc()
