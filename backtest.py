@@ -1,0 +1,346 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+موتورِ بک‌تستِ walk-forward برای pipfound.
+
+اصلِ کار: **صفر تکرارِ منطق**. همان `score()`ِ تصحیح‌شده‌ی confluence.py و همان
+`analyze_bars()`ِ smc_engine.py که در تحلیلِ زنده استفاده می‌شوند، اینجا هم روی
+هر برشِ تاریخی صدا زده می‌شوند. پس وین‌ریتی که بیرون می‌آید، دقیقاً بازتابِ رفتارِ
+همان چرخه‌ی ورودی است که اپ الان به کاربر پیشنهاد می‌دهد — نه یک منطقِ موازیِ جعلی.
+
+مکانیزم:
+  ۱) یک‌بار برای هر تایم‌فریم، بیشترین تعدادِ کندلِ تاریخی گرفته می‌شود (بدون API key).
+  ۲) روی کندل‌های تایم‌فریمِ ورود (LTF) گام‌به‌گام جلو می‌رویم. در هر گام، «اکنون» = زمانِ
+     آن کندل است؛ هر تایم‌فریم فقط تا آن لحظه بریده می‌شود (هیچ نگاهی به آینده — no look-ahead).
+  ۳) با برشِ هر تایم‌فریم، دیکشنریِ d ساخته و به score() تزریق می‌شود → دقیقاً همان پلن/درجه.
+  ۴) اگر پلنِ معتبر با درجه‌ی واجدِ شرایط ساخته شد: ورودِ بازار همان لحظه پر می‌شود؛ ورودِ
+     لیمیتِ OTE تا سقفِ N کندلِ بعد منتظرِ لمسِ قیمت می‌ماند (وگرنه کنسل).
+  ۵) بعد از پرشدن، کندل‌های بعدیِ LTF را دنبال می‌کنیم: اول به SL خورد → لاس؛ اول به TP خورد →
+     وین. اگر در یک کندل هر دو لمس شد، محافظه‌کارانه SL اول فرض می‌شود.
+  ۶) معاملاتِ هم‌پوشان مجاز نیست: تا بسته‌نشدنِ پوزیشنِ باز، سیگنالِ تازه نادیده گرفته می‌شود.
+  ۷) خروجی: تعدادِ معامله، وین‌ریت، میانگینِ R، اکسپکتنسی، و لیستِ معاملات.
+
+فقط stdlib؛ دیتای رایگانِ Binance/Yahoo از طریقِ smc_engine.fetch.
+"""
+import sys, json, argparse, datetime
+
+import smc_engine as EG
+import confluence as CF
+
+
+def _slice_upto(bars, t_now):
+    """برشِ کندل‌ها تا زمانِ t_now (شامل). خروجی مرجعِ تازه‌ی سبک است."""
+    # bars مرتب بر اساسِ زمان است؛ آخرین ایندکسی که t <= t_now.
+    out = []
+    for b in bars:
+        if b["t"] <= t_now:
+            out.append(b)
+        else:
+            break
+    return out
+
+
+def _build_d(series, tfs, t_now, warm=40):
+    """دیکشنریِ d که score() انتظار دارد: {tf: analyze_bars(برشِ آن تایم‌فریم)}.
+    اگر یک تایم‌فریم کندلِ کافی تا این لحظه ندارد، آن گام skip می‌شود (None)."""
+    d = {}
+    for tf in tfs:
+        sl = _slice_upto(series[tf], t_now)
+        if len(sl) < warm:
+            return None  # هنوز گرم نشده
+        try:
+            d[tf] = EG.analyze_bars(sl, tf, disp=series["_disp"], src="backtest")
+        except Exception as ex:
+            d[tf] = {"error": str(ex)}
+    return d
+
+
+def _simulate(entry_bars, start_idx, direction, entry, sl, tp,
+              entry_type, fill_window=24, max_hold=400):
+    """
+    شبیه‌سازیِ نتیجه‌ی معامله روی کندل‌های تایم‌فریمِ ورود از start_idx به بعد.
+    برمی‌گرداند: (result, exit_price, r, bars_held, filled_idx)  یا  None اگر پر نشد.
+    result ∈ {"win","loss"}.
+    """
+    n = len(entry_bars)
+    filled_idx = None
+    if entry_type == "market":
+        filled_idx = start_idx  # همان کندلِ سیگنال، روی کلوز پر می‌شود
+    else:
+        # limit_ote: منتظرِ لمسِ قیمتِ ورود طیِ fill_window کندلِ بعد
+        for k in range(start_idx + 1, min(start_idx + 1 + fill_window, n)):
+            b = entry_bars[k]
+            if b["l"] <= entry <= b["h"]:
+                filled_idx = k
+                break
+        if filled_idx is None:
+            return None  # لیمیت پر نشد → معامله‌ای رخ نداد
+
+    risk = abs(entry - sl)
+    if risk <= 0:
+        return None
+
+    # از کندلِ بعدِ پرشدن، حرکت را دنبال کن
+    for k in range(filled_idx + 1, min(filled_idx + 1 + max_hold, n)):
+        b = entry_bars[k]
+        hit_sl = (b["l"] <= sl) if direction == 1 else (b["h"] >= sl)
+        hit_tp = (b["h"] >= tp) if direction == 1 else (b["l"] <= tp)
+        if hit_sl and hit_tp:
+            # هر دو در یک کندل → محافظه‌کارانه: SL اول
+            return ("loss", sl, -1.0, k - filled_idx, filled_idx)
+        if hit_sl:
+            return ("loss", sl, -1.0, k - filled_idx, filled_idx)
+        if hit_tp:
+            r = round(abs(tp - entry) / risk, 2)
+            return ("win", tp, r, k - filled_idx, filled_idx)
+    return None  # تا انتهای داده نه TP نه SL — معامله‌ی ناتمام، حساب نمی‌شود
+
+
+def _parse_when(s):
+    """رشته‌ی تاریخ/زمان کاربر → epoch ثانیه (UTC). None اگر خالی.
+    قالب‌های مجاز: 'YYYY-MM-DD'، 'YYYY-MM-DD HH:MM'، یا epochِ خام."""
+    if s is None or str(s).strip() == "":
+        return None
+    s = str(s).strip()
+    if s.isdigit():
+        return int(s)
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+        try:
+            dt = datetime.datetime.strptime(s, fmt).replace(tzinfo=datetime.timezone.utc)
+            return int(dt.timestamp())
+        except ValueError:
+            continue
+    raise ValueError(f"قالبِ تاریخِ نامعتبر: {s} (نمونه: 2025-01-15 یا 2025-01-15 14:30)")
+
+
+def backtest(symbol, style="day", grades=("A+", "A", "B"),
+             walk=350, fill_window=24, max_hold=400, side="both",
+             tfs=None, date_from=None, date_to=None, verbose=False):
+    """
+    بک‌تستِ کاملِ walk-forward.
+    style تعیینِ تایم‌فریم‌ها (همان نگاشتِ اپ): scalp/day/swing.
+    grades: کدام درجه‌ها را به‌عنوانِ سیگنالِ قابلِ‌اجرا بپذیریم.
+    walk: چند کندلِ آخرِ تایم‌فریمِ ورود را پیمایش کنیم (اگر بازه‌ی تاریخی داده نشود).
+    side: جهتِ مجاز — "both" | "long" (صعودی) | "short" (نزولی).
+
+    انتخابِ محدوده توسطِ کاربر (فرکتالی):
+      tfs: لیستِ دلخواهِ تایم‌فریم‌ها مثلِ ["4h","1h","15m","5m"] که نگاشتِ style را
+           می‌شکند — هر ترکیبی از HTF→LTF مجاز است (چون روش‌ها فرکتال‌اند و روی
+           هر مقیاسی یکسان کار می‌کنند). tfs[0]=HTF بایاس، tfs[-1]=تایم‌فریمِ ورود.
+      date_from/date_to: epochِ ثانیه (UTC). فقط سیگنال‌هایی که «اکنون»شان داخلِ این
+           بازه است شبیه‌سازی می‌شوند — یعنی کاربر همان پنجره‌ای را که روی چارت
+           انتخاب کرده بک‌تست می‌گیرد.
+    """
+    tf_map = {
+        "scalp": ["1h", "15m", "5m", "1m"],
+        "day":   ["1d", "4h", "1h", "15m"],
+        "swing": ["1w", "1d", "4h", "1h"],
+    }
+    # tfs دلخواهِ کاربر بر نگاشتِ style اولویت دارد (تاییدِ فرکتال‌بودن).
+    if tfs:
+        tfs = [t.strip() for t in tfs if str(t).strip()]
+    else:
+        tfs = tf_map.get(style, tf_map["day"])
+    ltf = tfs[-1]
+
+    # حداکثر کندلِ ممکن برای هر تایم‌فریم.
+    # برای منابعِ صفحه‌بندی‌شونده (Binance) می‌توان بسیار عمیق‌تر رفت.
+    limit_map = {"1m": 5000, "5m": 8000, "15m": 8000, "1h": 6000,
+                 "4h": 3000, "1d": 1500, "1w": 400}
+
+    series = {}
+    disp = symbol
+    for tf in tfs:
+        lim = limit_map.get(tf, 500)
+        src, sym, dsp, bars = EG.fetch(symbol, tf, lim)
+        disp = dsp
+        series[tf] = bars
+        if verbose:
+            print(f"[data] {tf}: {len(bars)} کندل  (منبع {src}, {dsp})", file=sys.stderr)
+    series["_disp"] = disp
+
+    entry_bars = series[ltf]
+    if len(entry_bars) < 80:
+        return {"error": f"دیتای کافی برای {ltf} نیست ({len(entry_bars)} کندل)."}
+
+    n = len(entry_bars)
+
+    # --- انتخابِ محدوده‌ی بک‌تست ---
+    # اگر کاربر بازه‌ی تاریخی داد، ایندکس‌های شروع/پایانِ پیمایش را از روی زمان
+    # پیدا کن؛ وگرنه به رفتارِ walk (N کندلِ آخر) برگرد.
+    if date_from is not None or date_to is not None:
+        data_lo = entry_bars[0]["t"]
+        data_hi = entry_bars[-1]["t"]
+        lo_i, hi_i = 0, n
+        if date_from is not None:
+            lo_i = 0
+            while lo_i < n and entry_bars[lo_i]["t"] < date_from:
+                lo_i += 1
+        if date_to is not None:
+            hi_i = 0
+            for j in range(n - 1, -1, -1):
+                if entry_bars[j]["t"] <= date_to:
+                    hi_i = j + 1
+                    break
+        start = max(60, lo_i)
+        end = min(n - 2, hi_i)
+        if start >= end:
+            def _fa(ts):
+                return datetime.datetime.fromtimestamp(
+                    ts, datetime.timezone.utc).strftime("%Y-%m-%d")
+            return {"error": (
+                f"بازه‌ی درخواستی با دیتای موجودِ {ltf} تقاطع ندارد. "
+                f"دیتای در دسترس: {_fa(data_lo)} تا {_fa(data_hi)}. "
+                f"برای بازه‌های قدیمی‌تر باید تایم‌فریمِ ورودِ بزرگ‌تر انتخاب کنی "
+                f"(مثلاً tfs بدونِ 1m/5m/15m).")}
+    else:
+        start = max(60, n - walk)  # از این ایندکسِ LTF شروع به پیمایش کن
+        end = n - 2
+
+    trades = []
+    i = start
+    while i < end:
+        t_now = entry_bars[i]["t"]
+        d = _build_d(series, tfs, t_now)
+        if d is None:
+            i += 1
+            continue
+        try:
+            r = CF.score(symbol, tfs, d=d)
+        except Exception:
+            i += 1
+            continue
+
+        plan = r.get("plan")
+        grade = r.get("grade")
+        if plan and grade in grades and plan.get("rr", 0) >= 2.0:
+            direction = 1 if plan["direction"] == "صعودی" else -1
+            # فیلترِ جهت: side=long فقط صعودی، side=short فقط نزولی
+            if (side == "long" and direction != 1) or (side == "short" and direction != -1):
+                i += 1
+                continue
+            sim = _simulate(entry_bars, i, direction,
+                            plan["entry"], plan["sl"], plan["tp"],
+                            plan.get("entry_type", "market"),
+                            fill_window=fill_window, max_hold=max_hold)
+            if sim is not None:
+                result, exitp, rr_real, held, filled_idx = sim
+                t_sig = datetime.datetime.fromtimestamp(
+                    t_now, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
+                trades.append({
+                    "time": t_sig,
+                    "grade": grade,
+                    "dir": plan["direction"],
+                    "entry_type": plan.get("entry_type"),
+                    "entry": plan["entry"], "sl": plan["sl"], "tp": plan["tp"],
+                    "planned_rr": plan["rr"],
+                    "result": result,
+                    "r": rr_real,
+                    "bars_held": held,
+                })
+                # جلو بپر تا انتهای این معامله (بدونِ هم‌پوشانی)
+                i = filled_idx + held + 1
+                continue
+        i += 1
+
+    return _summarize(disp, style, tfs, trades)
+
+
+def _summarize(disp, style, tfs, trades):
+    n = len(trades)
+    wins = sum(1 for t in trades if t["result"] == "win")
+    losses = n - wins
+    winrate = round(wins / n * 100, 1) if n else 0.0
+    total_r = round(sum(t["r"] for t in trades), 2)
+    avg_r = round(total_r / n, 2) if n else 0.0
+    avg_win_r = round(sum(t["r"] for t in trades if t["result"] == "win") / wins, 2) if wins else 0.0
+    # اکسپکتنسی = (وین‌ریت×میانگینِ R وین) − (لاس‌ریت×۱)
+    p = wins / n if n else 0
+    expectancy = round(p * avg_win_r - (1 - p) * 1.0, 2) if n else 0.0
+    return {
+        "symbol": disp,
+        "style": style,
+        "timeframes": tfs,
+        "range_from": trades[0]["time"] if trades else None,
+        "range_to": trades[-1]["time"] if trades else None,
+        "trades": n,
+        "wins": wins,
+        "losses": losses,
+        "winrate_pct": winrate,
+        "total_R": total_r,
+        "avg_R_per_trade": avg_r,
+        "avg_win_R": avg_win_r,
+        "expectancy_R": expectancy,
+        "trade_log": trades,
+    }
+
+
+def _fmt_fa(res):
+    if "error" in res:
+        return "خطا: " + res["error"]
+    L = []
+    L.append(f"نتیجه‌ی بک‌تست — {res['symbol']}  ·  سبک {res['style']}  ·  "
+             + " ".join(res["timeframes"]))
+    L.append("-" * 56)
+    L.append(f"تعدادِ معاملات:        {res['trades']}")
+    L.append(f"برد / باخت:           {res['wins']} / {res['losses']}")
+    L.append(f"وین‌ریت:              {res['winrate_pct']}٪")
+    L.append(f"مجموعِ R:             {res['total_R']}")
+    L.append(f"میانگینِ R هر معامله:  {res['avg_R_per_trade']}")
+    L.append(f"میانگینِ R بردها:      {res['avg_win_R']}")
+    L.append(f"اکسپکتنسی (R):        {res['expectancy_R']}")
+    L.append("-" * 56)
+    if res["trades"] == 0:
+        L.append("هیچ سیگنالِ واجدِ شرایطی در این بازه پیدا نشد — "
+                 "معیارها سخت‌گیرند (درجه‌ی خوب + RR≥۱:۲ + پرشدنِ ورود).")
+    else:
+        L.append("چند معامله‌ی آخر:")
+        for t in res["trade_log"][-8:]:
+            mark = "برد " if t["result"] == "win" else "باخت"
+            L.append(f"  {t['time']}  {t['dir']:<5} {mark} "
+                     f"R={t['r']:<5} (پلن {t['planned_rr']}, {t['entry_type']})")
+    return "\n".join(L)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="بک‌تستِ walk-forward با اسکیل‌های تصحیح‌شده‌ی pipfound")
+    ap.add_argument("symbol")
+    ap.add_argument("--style", default="day", choices=["scalp", "day", "swing"])
+    ap.add_argument("--grades", default="A+,A,B",
+                    help="درجه‌های قابلِ‌قبول، جداشده با ویرگول")
+    ap.add_argument("--walk", type=int, default=350)
+    ap.add_argument("--fill-window", type=int, default=24)
+    ap.add_argument("--max-hold", type=int, default=400)
+    ap.add_argument("--side", default="both", choices=["both", "long", "short"],
+                    help="جهتِ معاملات: both/long(صعودی)/short(نزولی)")
+    ap.add_argument("--tfs", default="",
+                    help="تایم‌فریم‌های دلخواه با ویرگول، HTF→LTF (مثل 4h,1h,15m,5m). "
+                         "نگاشتِ --style را می‌شکند؛ تاییدِ فرکتال‌بودن.")
+    ap.add_argument("--from", dest="date_from", default="",
+                    help="شروعِ بازه‌ی بک‌تست: YYYY-MM-DD یا 'YYYY-MM-DD HH:MM' (UTC)")
+    ap.add_argument("--to", dest="date_to", default="",
+                    help="پایانِ بازه‌ی بک‌تست: YYYY-MM-DD یا 'YYYY-MM-DD HH:MM' (UTC)")
+    ap.add_argument("--json", action="store_true")
+    ap.add_argument("-v", "--verbose", action="store_true")
+    a = ap.parse_args()
+    grades = tuple(g.strip() for g in a.grades.split(",") if g.strip())
+    tfs = [t.strip() for t in a.tfs.split(",") if t.strip()] or None
+    try:
+        date_from = _parse_when(a.date_from)
+        date_to = _parse_when(a.date_to)
+    except ValueError as ex:
+        print(json.dumps({"error": str(ex)}, ensure_ascii=False) if a.json else f"خطا: {ex}")
+        return
+    res = backtest(a.symbol, style=a.style, grades=grades,
+                   walk=a.walk, fill_window=a.fill_window,
+                   max_hold=a.max_hold, side=a.side,
+                   tfs=tfs, date_from=date_from, date_to=date_to,
+                   verbose=a.verbose)
+    if a.json:
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+    else:
+        print(_fmt_fa(res))
+
+
+if __name__ == "__main__":
+    main()
