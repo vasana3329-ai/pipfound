@@ -343,6 +343,11 @@ h1{font-size:22px;margin:0;font-weight:700;letter-spacing:.2px}
   border-radius:50%;animation:sp .7s linear infinite;vertical-align:-4px;margin-left:8px}
 @keyframes sp{to{transform:rotate(360deg)}}
 .err{color:var(--bad);text-align:center;padding:20px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);border-radius:12px}
+.warn{color:#eab308;padding:10px 14px;background:rgba(234,179,8,.08);border:1px solid rgba(234,179,8,.35);border-radius:10px;font-size:13px;line-height:1.7}
+.btbreak{display:flex;flex-wrap:wrap;gap:16px;margin-top:12px}
+.btbcol{flex:1;min-width:220px}
+.btbtitle{color:var(--muted);font-size:12px;font-weight:600;margin-bottom:4px}
+.bttable.small{margin-top:0;font-size:11.5px}
 /* result head */
 .rhead{display:flex;flex-wrap:wrap;align-items:center;gap:14px;margin-bottom:16px}
 .sym{font-size:26px;font-weight:800}
@@ -508,7 +513,8 @@ tr.on td{background:rgba(34,197,94,.05)}
           <button data-s="short">فقط فروش</button>
         </div>
         <span class="btlbl" style="margin-inline-start:14px">عمقِ پیمایش:</span>
-        <input id="btWalk" class="btinp narrow" type="number" min="100" max="8000" step="100" value="600">
+        <input id="btWalk" class="btinp narrow" type="number" min="100" max="8000" step="100" value="2000">
+        <span class="btlbl" style="font-size:11px;color:var(--muted)">(برای نمونه‌ی معتبر ≥ ۲۰۰۰ توصیه می‌شود)</span>
       </div>
     </div>
   </div>
@@ -676,13 +682,58 @@ function renderBacktest(d){
   const rangeTxt=(d.range_from||d.range_to)
     ? `بازه: ${d.range_from||"ابتدای داده"} تا ${d.range_to||"انتهای داده"}`
     : "بازه: کندل‌های اخیر (خودکار)";
+  // بنرِ کفایتِ نمونه (مورد ۲) — وقتی معامله کم است هشدار بده
+  let sampleBanner="";
+  if(d.sample && !d.sample.ok){
+    const cls = d.sample.level==="empty" ? "err" : "warn";
+    sampleBanner=`<div class="${cls}" style="margin:8px 0">⚠️ ${d.sample.msg}</div>`;
+  } else if(d.sample && d.sample.ok){
+    sampleBanner=`<div style="color:var(--good);font-size:12px;margin:6px 0">✔️ ${d.sample.msg}</div>`;
+  }
+  // هشدارِ سبکِ کم‌سیگنال برای این نماد (مورد ۴)
+  let styleWarn="";
+  if(d.style_advice){
+    styleWarn=`<div class="warn" style="margin:8px 0">💡 ${d.style_advice}</div>`;
+  }
+  // تفکیکِ وین‌ریت بر اساسِ نوعِ ورود و جهت (مورد ۳)
+  function segTable(obj, labelMap){
+    if(!obj||!Object.keys(obj).length) return "";
+    let r="";
+    for(const k of Object.keys(obj)){
+      const s=obj[k];
+      const c=s.winrate_pct>=55?"var(--good)":s.winrate_pct>=45?"var(--half)":"var(--bad)";
+      r+=`<tr><td>${labelMap[k]||k}</td><td>${s.trades}</td>
+        <td style="color:${c}">${s.winrate_pct}٪</td>
+        <td>${s.total_R>0?"+":""}${s.total_R}R</td></tr>`;
+    }
+    return r;
+  }
+  const entLbl={market:"ورودِ بازار",limit_ote:"لیمیت OTE"};
+  const dirLbl={"صعودی":"خرید (صعودی)","نزولی":"فروش (نزولی)"};
+  const entRows=segTable(d.by_entry_type, entLbl);
+  const dirRows=segTable(d.by_direction, dirLbl);
+  const breakdown = d.trades>0 ? `
+    <div class="btbreak">
+      <div class="btbcol">
+        <div class="btbtitle">تفکیک بر اساسِ نوعِ ورود</div>
+        <table class="bttable small"><thead><tr><th>نوع</th><th>تعداد</th><th>وین‌ریت</th><th>مجموع R</th></tr></thead>
+        <tbody>${entRows}</tbody></table>
+      </div>
+      <div class="btbcol">
+        <div class="btbtitle">تفکیک بر اساسِ جهت</div>
+        <table class="bttable small"><thead><tr><th>جهت</th><th>تعداد</th><th>وین‌ریت</th><th>مجموع R</th></tr></thead>
+        <tbody>${dirRows}</tbody></table>
+      </div>
+    </div>` : "";
   btRes.innerHTML=`
   <div class="plan" style="margin-top:14px">
     <h3>🔬 نتیجه‌ی بک‌تست — ${d.symbol} · سبک ${d.style} · ${(d.timeframes||[]).join(" ")}</h3>
     <p style="color:var(--muted);font-size:13px;margin:4px 0 4px">
       این وین‌ریت از همان منطقِ ورودی‌ای می‌آید که اپ الان زنده پیشنهاد می‌دهد
       (walk-forward، بدونِ نگاه به آینده). سیگنال‌های هم‌پوشان حذف شده‌اند.</p>
-    <p style="color:var(--muted);font-size:12px;margin:0 0 12px">🎯 ${sideTxt} · 📅 ${rangeTxt}</p>
+    <p style="color:var(--muted);font-size:12px;margin:0 0 8px">🎯 ${sideTxt} · 📅 ${rangeTxt}</p>
+    ${sampleBanner}
+    ${styleWarn}
     <div class="pgrid">
       <div class="pcell"><span>تعدادِ معاملات</span><b>${d.trades}</b></div>
       <div class="pcell"><span>برد / باخت</span><b>${d.wins} / ${d.losses}</b></div>
@@ -691,6 +742,7 @@ function renderBacktest(d){
       <div class="pcell"><span>میانگینِ R</span><b>${d.avg_R_per_trade}</b></div>
       <div class="pcell"><span>اکسپکتنسی</span><b style="color:${expColor}">${d.expectancy_R}R</b></div>
     </div>
+    ${breakdown}
     ${empty}
     ${d.trades>0?`<table class="bttable"><thead><tr>
       <th>زمانِ سیگنال</th><th>جهت</th><th>نوعِ ورود</th><th>ورود</th><th>استاپ</th><th>هدف</th><th>نتیجه</th><th>R</th>
@@ -1055,9 +1107,9 @@ class Handler(BaseHTTPRequestHandler):
             df_raw = (q.get("from", [""])[0]).strip()
             dt_raw = (q.get("to", [""])[0]).strip()
             try:
-                walk = int(q.get("walk", ["600"])[0])
+                walk = int(q.get("walk", ["2000"])[0])
             except Exception:
-                walk = 600
+                walk = 2000
             if not sym:
                 return self._send(400, json.dumps({"error": "نماد وارد نشده"}, ensure_ascii=False))
             if BT is None:
@@ -1081,6 +1133,33 @@ class Handler(BaseHTTPRequestHandler):
                     res.setdefault("tfs_used", user_tfs or BT.__dict__.get("tf_map", {}))
                     res["range_from"] = df_raw or None
                     res["range_to"] = dt_raw or None
+                    # مورد ۴: اگر نمونه کم بود و کاربر تایم‌فریمِ دلخواه نداده،
+                    # سبک‌های دیگر را سریع بسنج و بهترین را پیشنهاد بده.
+                    try:
+                        smp = res.get("sample") or {}
+                        if (not smp.get("ok")) and not user_tfs and not df_raw and not dt_raw:
+                            alts = [s for s in ("scalp", "day", "swing") if s != style]
+                            best = None
+                            for st in alts:
+                                a = BT.backtest(sym.upper(), style=st, grades=gr,
+                                                walk=walk, fill_window=48,
+                                                max_hold=400, side=side)
+                                if isinstance(a, dict) and "error" not in a \
+                                        and a.get("trades", 0) >= 5 \
+                                        and a.get("expectancy_R", -9) > 0:
+                                    # اولویت: بیشترین تعدادِ معامله، سپس اکسپکتنسی
+                                    cand = (a["trades"], a["expectancy_R"], st)
+                                    if best is None or (cand[0], cand[1]) > (best[0], best[1]):
+                                        best = cand
+                            if best:
+                                st_fa = {"scalp": "اسکالپ", "day": "روزانه",
+                                         "swing": "سوینگ"}.get(best[2], best[2])
+                                res["style_advice"] = (
+                                    f"سبکِ «{style}» روی {sym.upper()} کم‌سیگنال است. "
+                                    f"سبکِ «{st_fa}» برای همین نماد نمونه‌ی بهتری می‌دهد "
+                                    f"({best[0]} معامله، اکسپکتنسی {best[1]}R) — امتحانش کن.")
+                    except Exception:
+                        pass
                 return self._send(200, json.dumps(res, ensure_ascii=False))
             except Exception as e:
                 traceback.print_exc()

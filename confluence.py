@@ -317,10 +317,16 @@ def score(symbol, tfs, d=None):
         in_ote = bool(ote and ote.get("inside"))
         if in_ote:
             entry = round(poi_mid, 5); entry_type = "market"
-        elif ote:
-            # ورود را روی میدِ ناحیه‌ی OTE بگذار (لیمیت؛ منتظرِ پولبک به دیسکانت/پریمیوم)
-            entry = round((ote["low"] + ote["high"]) / 2, 5); entry_type = "limit_ote"
+        elif ote and htf_conf:
+            # اصلاحِ باگِ وین‌ریتِ پایین: لیمیتِ OTE فقط وقتی مجاز است که همین لحظه
+            # قیمت روی POIِ تایم‌فریمِ بالا هم باشد (کانفلوئنسِ HTF). آن‌وقت به‌جای میدِ
+            # عمیقِ ناحیه، لبه‌ی کم‌عمقِ OTE (سمتِ ۰.۶۲، نزدیک‌ترین به قیمت) را ورود بگذار
+            # تا هم شانسِ پرشدن بالا برود، هم درست وسطِ شکستِ ساختار وارد نشویم.
+            entry = round(ote["high"] if direction == 1 else ote["low"], 5)
+            entry_type = "limit_ote"
         else:
+            # بدونِ کانفلوئنسِ HTF، صبر برای پولبکِ عمیق ارزشِ آماری ندارد (بک‌تست: OTE
+            # تنها ~۱۲–۴۰٪ وین می‌داد در برابرِ ~۸۰٪ ورودِ بازار) → ورودِ بازار روی POI.
             entry = round(poi_mid, 5); entry_type = "market"
         if direction == 1:
             struct_low = min(z["bottom"], ote["low"] if ote else z["bottom"])

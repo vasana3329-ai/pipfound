@@ -313,6 +313,40 @@ def _summarize(disp, style, tfs, trades):
     # اکسپکتنسی = (وین‌ریت×میانگینِ R وین) − (لاس‌ریت×۱)
     p = wins / n if n else 0
     expectancy = round(p * avg_win_r - (1 - p) * 1.0, 2) if n else 0.0
+
+    # --- تفکیکِ وین‌ریت بر اساسِ نوعِ ورود و جهت (مورد ۳) ---
+    def _seg(key_fn):
+        agg = {}
+        for t in trades:
+            k = key_fn(t)
+            a = agg.setdefault(k, {"n": 0, "w": 0, "R": 0.0})
+            a["n"] += 1
+            a["R"] += t["r"]
+            if t["result"] == "win":
+                a["w"] += 1
+        return {k: {"trades": v["n"], "wins": v["w"],
+                    "winrate_pct": round(v["w"] / v["n"] * 100, 1) if v["n"] else 0.0,
+                    "total_R": round(v["R"], 2)}
+                for k, v in agg.items()}
+
+    by_entry = _seg(lambda t: t.get("entry_type") or "market")
+    by_dir = _seg(lambda t: t.get("dir") or "?")
+
+    # --- پرچمِ کفایتِ نمونه (مورد ۲) ---
+    MIN_TRADES = 20
+    if n == 0:
+        sample = {"ok": False, "level": "empty", "trades": n, "min": MIN_TRADES,
+                  "msg": "هیچ معامله‌ای در این بازه پیدا نشد — نمونه‌ی خالی؛ "
+                         "بازه را بزرگ‌تر کن یا سبک/تایم‌فریمِ دیگری امتحان کن."}
+    elif n < MIN_TRADES:
+        sample = {"ok": False, "level": "low", "trades": n, "min": MIN_TRADES,
+                  "msg": (f"نمونه کوچک است ({n} معامله < {MIN_TRADES}) — وین‌ریت آماری "
+                          f"معتبر نیست و می‌تواند گمراه‌کننده باشد. برای قضاوتِ درست، "
+                          f"بازه‌ی بک‌تست را بزرگ‌تر کن یا عمقِ پیمایش را افزایش بده.")}
+    else:
+        sample = {"ok": True, "level": "ok", "trades": n, "min": MIN_TRADES,
+                  "msg": f"نمونه‌ی کافی ({n} معامله) — نتیجه آماری قابلِ‌اتکاست."}
+
     return {
         "symbol": disp,
         "style": style,
@@ -327,6 +361,9 @@ def _summarize(disp, style, tfs, trades):
         "avg_R_per_trade": avg_r,
         "avg_win_R": avg_win_r,
         "expectancy_R": expectancy,
+        "by_entry_type": by_entry,
+        "by_direction": by_dir,
+        "sample": sample,
         "trade_log": trades,
     }
 
