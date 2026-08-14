@@ -340,20 +340,20 @@ def score(symbol, tfs, d=None):
             _rng = _rt - _rb
             gp = round(_rb + _rng * 0.295, 5) if direction == 1 else round(_rt - _rng * 0.295, 5)
         in_ote = bool(ote and ote.get("inside"))
+        # منطقِ ورودِ ICT-درست (بازنگری پس از افشای C8):
+        # ورودِ «بازار» فقط وقتی مجاز است که قیمت همین حالا در ناحیه‌ی معتبر باشد
+        # (داخلِ OTE). در غیرِ این‌صورت هرگز قله/کف را «چیس» نمی‌کنیم — به‌جایش پلنِ
+        # «لیمیت در گلدن‌پاکتِ ۰.۷۰۵» می‌گذاریم و منتظرِ پولبک می‌مانیم. این همان
+        # کاری است که یک ترِیدرِ اسمارت‌مانی می‌کند؛ چیسِ بازار در محلِ بد، طبقِ
+        # بک‌تستِ واقع‌گرایانه (کلوزِ کندل) لبه‌ی منفی می‌دهد.
         if in_ote:
-            # قیمت داخلِ OTE است → ورودِ بازار روی لبه‌ی پروگزیمالِ POI (نزدیک‌ترین به قیمت)
-            entry = round(poi_prox, 5); entry_type = "market"
-        elif ote and htf_conf:
-            # کانفلوئنسِ HTF هست → لیمیتِ OTE روی گلدن‌پاکتِ ۰.۷۰۵ (وسطِ ناحیه‌ی موفق)،
-            # وگرنه لبه‌ی کم‌عمقِ OTE. گلدن‌پاکت شانسِ پرشدن و کیفیتِ ورود را متعادل می‌کند.
-            if gp is not None:
-                entry = gp
-            else:
-                entry = round(ote["high"] if direction == 1 else ote["low"], 5)
-            entry_type = "limit_ote"
+            entry = round(price, 5); entry_type = "market"
+        elif gp is not None:
+            entry = gp; entry_type = "limit_ote"
         else:
-            # بدونِ کانفلوئنسِ HTF → ورودِ بازار روی لبه‌ی پروگزیمال (نه میدِ عمیق)
-            entry = round(poi_prox, 5); entry_type = "market"
+            entry = round(ote["high"] if (ote and direction == 1)
+                          else (ote["low"] if ote else poi_prox), 5)
+            entry_type = "limit_ote"
         # فیکس C10: استاپ پشتِ سطحِ نقضِ ساختاری (کفِ اوبی/سوینگ برای خرید) + بافرِ
         # کوچکِ اسپرد، نه یک درصدِ ثابت که سطح را جابه‌جا کند. بافر = کسری از خودِ
         # اندازه‌ی POI (نه درصدِ خامِ قیمت) تا با نوسانِ نماد بخواند.

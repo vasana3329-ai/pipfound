@@ -140,7 +140,7 @@ def suggest_range(symbol, style="day", tfs=None, walk=600):
     یک بازه‌ی پیشنهادیِ معتبر (from/to به‌صورتِ 'YYYY-MM-DD HH:MM') برمی‌گرداند
     تا کاربر بداند حداقل از چه تاریخی می‌تواند بازه انتخاب کند."""
     tf_map = {
-        "scalp": ["1h", "15m", "5m", "1m"],
+        "scalp": ["1h", "30m", "15m", "5m"],   # فیکس S1: هم‌راستا با اپِ زنده
         "day":   ["1d", "4h", "1h", "15m"],
         "swing": ["1w", "1d", "4h", "1h"],
     }
@@ -149,7 +149,7 @@ def suggest_range(symbol, style="day", tfs=None, walk=600):
     else:
         tfs = tf_map.get(style, tf_map["day"])
     ltf = tfs[-1]
-    limit_map = {"1m": 5000, "5m": 8000, "15m": 8000, "1h": 6000,
+    limit_map = {"1m": 5000, "5m": 8000, "15m": 8000, "30m": 6000, "1h": 6000,
                  "4h": 3000, "1d": 1500, "1w": 400}
     lim = limit_map.get(ltf, 500)
     src, sym, dsp, bars = EG.fetch(symbol, ltf, lim)
@@ -197,7 +197,9 @@ def backtest(symbol, style="day", grades=("A+", "A", "B"),
            انتخاب کرده بک‌تست می‌گیرد.
     """
     tf_map = {
-        "scalp": ["1h", "15m", "5m", "1m"],
+        # فیکس S1: استکِ اسکالپ با اپِ زنده (app.STYLES) یکسان شد تا وین‌ریتِ بک‌تست
+        # دقیقاً همان استکی را بازتاب دهد که اپ به کاربر پیشنهاد می‌دهد.
+        "scalp": ["1h", "30m", "15m", "5m"],
         "day":   ["1d", "4h", "1h", "15m"],
         "swing": ["1w", "1d", "4h", "1h"],
     }
@@ -210,7 +212,7 @@ def backtest(symbol, style="day", grades=("A+", "A", "B"),
 
     # حداکثر کندلِ ممکن برای هر تایم‌فریم.
     # برای منابعِ صفحه‌بندی‌شونده (Binance) می‌توان بسیار عمیق‌تر رفت.
-    limit_map = {"1m": 5000, "5m": 8000, "15m": 8000, "1h": 6000,
+    limit_map = {"1m": 5000, "5m": 8000, "15m": 8000, "30m": 6000, "1h": 6000,
                  "4h": 3000, "1d": 1500, "1w": 400}
 
     series = {}
@@ -341,6 +343,9 @@ def _summarize(disp, style, tfs, trades):
 
     by_entry = _seg(lambda t: t.get("entry_type") or "market")
     by_dir = _seg(lambda t: t.get("dir") or "?")
+    # فیکس C15: تفکیکِ وین‌ریت بر پایه‌ی درجه (A+/A/B جدا) تا کیفیتِ خالص دیده شود؛
+    # قاطی‌کردنِ Bها با A+ می‌تواند لبه‌ی واقعیِ درجه‌های بالا را رقیق و پنهان کند.
+    by_grade = _seg(lambda t: t.get("grade") or "?")
 
     # --- پرچمِ کفایتِ نمونه (مورد ۲) ---
     MIN_TRADES = 20
@@ -373,6 +378,7 @@ def _summarize(disp, style, tfs, trades):
         "expectancy_R": expectancy,
         "by_entry_type": by_entry,
         "by_direction": by_dir,
+        "by_grade": by_grade,
         "sample": sample,
         "trade_log": trades,
     }

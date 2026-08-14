@@ -263,18 +263,32 @@ def structure(bars, sw):
     return trend, labeled[-6:], bos, choch, meta
 
 def fvgs(bars, lookback=60):
-    """Unfilled fair value gaps (3-candle imbalance)."""
+    """Unfilled fair value gaps (3-candle imbalance).
+
+    فیکس C14: فقط فیرولیوگپ‌هایی که از یک کندلِ **دیسپلیسمنت** زاده شده‌اند نگه
+    داشته می‌شوند. گپِ ۳کندلی در چوپِ کم‌حجم گپِ باکیفیت نیست؛ گپِ واقعی وقتی
+    شکل می‌گیرد که کندلِ میانی بدنه‌ای ≥ ۱.۵×میانگینِ رِنجِ اخیر داشته باشد.
+    """
     out=[]; n=len(bars); price=bars[-1]["c"]
     start=max(2,n-lookback)
+    def _avg_body(i):
+        lo=max(0,i-20)
+        seg=bars[lo:i+1]
+        return sum(abs(x["c"]-x["o"]) for x in seg)/max(1,len(seg))
     for i in range(start,n):
         a,b,c=bars[i-2],bars[i-1],bars[i]
-        # bullish FVG: a.high < c.low
-        if a["h"]<c["l"]:
+        avgb=_avg_body(i)
+        # کندلِ میانی باید دیسپلیسمنت باشد: بدنه‌اش ≥ ۱.۳×میانگینِ بدنه‌های اخیر
+        # (مقایسه‌ی بدنه با بدنه، نه بدنه با رِنجِ کاملِ شاملِ فتیله).
+        b_body=abs(b["c"]-b["o"])
+        disp_body = b_body >= 1.3*avgb if avgb>0 else False
+        # bullish FVG: a.high < c.low، با کندلِ میانیِ دیسپلیسمنتِ صعودی
+        if a["h"]<c["l"] and disp_body and b["c"]>b["o"]:
             lo,hi=a["h"],c["l"]
             filled = any(x["l"]<=lo for x in bars[i+1:])
             if not filled and price>lo:
                 out.append({"type":"bullish","top":hi,"bottom":lo,"idx":i})
-        if a["l"]>c["h"]:
+        if a["l"]>c["h"] and disp_body and b["c"]<b["o"]:
             lo,hi=c["h"],a["l"]
             filled = any(x["h"]>=hi for x in bars[i+1:])
             if not filled and price<hi:
