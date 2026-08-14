@@ -129,20 +129,71 @@ def _simulate(entry_bars, start_idx, direction, entry, sl, tp,
     if risk <= 0:
         return None
 
-    # از کندلِ بعدِ پرشدن، حرکت را دنبال کن
+    # ── فیکس C18: مدیریتِ پله‌ایِ پوزیشن (اسکیل‌اوت + برگشت‌به‌سربه‌سر) ──────────
+    # مشکلِ افشاشده (کلاهِ ترِیدر): استاپِ تنگِ فتیله‌ی سوئیپ + هدفِ لیکوئیدیتیِ دور
+    # = RRِ زیبا اما وین‌ریتِ ۰٪، چون قیمت مسیرِ درست را می‌رود ولی قبل از هدفِ دور
+    # به استاپ برمی‌گردد. یک ترِیدرِ واقعی all-or-nothing نمی‌گیرد؛ پله‌ای خارج می‌شود.
+    #
+    # مدل: TP1 روی ۱R (فاصله‌ی = ریسک) → tp1_frac از پوزیشن بسته می‌شود و استاپِ
+    # مابقی به سربه‌سر (BE) می‌رود. مابقی تا هدفِ اصلی (tp) می‌دود. نتیجه در واحدِ R
+    # وزنیِ کسری برگردانده می‌شود — نه صرفاً win/loss. این تورم نیست: یک ترِیدِ
+    # «سوئیپ‌شده اما نرسیده به هدف» حالا به‌جای -۱R به +جزئی/سربه‌سر تبدیل می‌شود،
+    # دقیقاً همان‌طور که در اجرای زنده رخ می‌دهد.
+    tp1_R = 1.0
+    tp1_frac = 0.5
+    tp1 = fill_price + direction * risk * tp1_R
+    # حالتِ نتیجه: 0=هنوز باز، به‌ترتیبِ رخداد پردازش می‌شود
+    booked_R = 0.0            # R قفل‌شده از پله‌ی TP1
+    remaining = 1.0           # کسرِ بازِ پوزیشن
+    stop_now = sl_used        # استاپِ فعالِ مابقی (بعد از TP1 → BE=fill_price)
+    tp1_done = False
+
     for k in range(filled_idx + 1, min(filled_idx + 1 + max_hold, n)):
         b = entry_bars[k]
-        hit_sl = (b["l"] <= sl_used) if direction == 1 else (b["h"] >= sl_used)
-        hit_tp = (b["h"] >= tp) if direction == 1 else (b["l"] <= tp)
-        if hit_sl and hit_tp:
-            # هر دو در یک کندل → محافظه‌کارانه: SL اول
-            return ("loss", sl_used, -1.0, k - filled_idx, filled_idx, fill_price, sl_used)
-        if hit_sl:
-            return ("loss", sl_used, -1.0, k - filled_idx, filled_idx, fill_price, sl_used)
-        if hit_tp:
-            r = round(abs(tp - fill_price) / risk, 2)
-            return ("win", tp, r, k - filled_idx, filled_idx, fill_price, sl_used)
-    return None  # تا انتهای داده نه TP نه SL — معامله‌ی ناتمام، حساب نمی‌شود
+        hit_stop = (b["l"] <= stop_now) if direction == 1 else (b["h"] >= stop_now)
+        hit_tp1 = (not tp1_done) and (
+            (b["h"] >= tp1) if direction == 1 else (b["l"] <= tp1))
+        hit_final = (b["h"] >= tp) if direction == 1 else (b["l"] <= tp)
+
+        # پیش از TP1: اگر استاپ و TP1 در یک کندل → محافظه‌کارانه استاپ اول
+        if not tp1_done:
+            if hit_stop and not hit_tp1:
+                # کلِ پوزیشن با -۱R خورد
+                total = round(-1.0, 2)
+                res = "loss"
+                return (res, stop_now, total, k - filled_idx, filled_idx, fill_price, sl_used)
+            if hit_stop and hit_tp1:
+                # هر دو در یک کندل، پیش از TP1 → محافظه‌کارانه: استاپ اول
+                return ("loss", stop_now, round(-1.0, 2), k - filled_idx,
+                        filled_idx, fill_price, sl_used)
+            if hit_tp1:
+                booked_R += tp1_frac * tp1_R      # قفلِ سودِ پله‌ی اول
+                remaining -= tp1_frac
+                stop_now = fill_price             # مابقی → سربه‌سر (BE)
+                tp1_done = True
+                # ممکن است هدفِ اصلی هم در همین کندل خورده باشد
+                if hit_final:
+                    r_final = abs(tp - fill_price) / risk
+                    total = round(booked_R + remaining * r_final, 2)
+                    return ("win", tp, total, k - filled_idx, filled_idx, fill_price, sl_used)
+                continue
+
+        # پس از TP1: مابقی با استاپِ BE مدیریت می‌شود
+        hit_be = (b["l"] <= stop_now) if direction == 1 else (b["h"] >= stop_now)
+        if hit_be and hit_final:
+            # محافظه‌کارانه: BE اول (مابقی سربه‌سر بسته)
+            total = round(booked_R, 2)
+            res = "win" if total > 0 else ("loss" if total < 0 else "be")
+            return (res, stop_now, total, k - filled_idx, filled_idx, fill_price, sl_used)
+        if hit_be:
+            total = round(booked_R, 2)            # مابقی سربه‌سر → فقط سودِ TP1 می‌ماند
+            res = "win" if total > 0 else "be"
+            return (res, stop_now, total, k - filled_idx, filled_idx, fill_price, sl_used)
+        if hit_final:
+            r_final = abs(tp - fill_price) / risk
+            total = round(booked_R + remaining * r_final, 2)
+            return ("win", tp, total, k - filled_idx, filled_idx, fill_price, sl_used)
+    return None  # تا انتهای داده نه هدف نه استاپ — معامله‌ی ناتمام، حساب نمی‌شود
 
 
 _FA_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
@@ -356,15 +407,20 @@ def backtest(symbol, style="day", grades=("A+", "A", "B"),
 
 def _summarize(disp, style, tfs, trades):
     n = len(trades)
-    wins = sum(1 for t in trades if t["result"] == "win")
-    losses = n - wins
+    # فیکس C18: با اسکیل‌اوت، «برد» یعنی هر بستنِ با R مثبت (شاملِ پله‌ی TP1 که
+    # مابقی سربه‌سر خورد). «باخت» = R منفی. سربه‌سرِ کامل (R≈0) جدا شمرده می‌شود.
+    wins = sum(1 for t in trades if t["r"] > 0)
+    losses = sum(1 for t in trades if t["r"] < 0)
+    scratch = n - wins - losses          # سربه‌سرِ کامل
     winrate = round(wins / n * 100, 1) if n else 0.0
     total_r = round(sum(t["r"] for t in trades), 2)
     avg_r = round(total_r / n, 2) if n else 0.0
-    avg_win_r = round(sum(t["r"] for t in trades if t["result"] == "win") / wins, 2) if wins else 0.0
-    # اکسپکتنسی = (وین‌ریت×میانگینِ R وین) − (لاس‌ریت×۱)
-    p = wins / n if n else 0
-    expectancy = round(p * avg_win_r - (1 - p) * 1.0, 2) if n else 0.0
+    avg_win_r = round(sum(t["r"] for t in trades if t["r"] > 0) / wins, 2) if wins else 0.0
+    avg_loss_r = round(sum(t["r"] for t in trades if t["r"] < 0) / losses, 2) if losses else 0.0
+    # اکسپکتنسیِ صادقانه = میانگینِ R واقعیِ هر معامله (total_R / n). این تنها عددی
+    # است که در واحدِ ریسک می‌گوید «هر معامله به‌طورِ متوسط چقدر ساخت» — نه فرمولِ
+    # تقریبیِ win/loss که با اسکیل‌اوتِ کسری دیگر دقیق نیست.
+    expectancy = avg_r
 
     # --- تفکیکِ وین‌ریت بر اساسِ نوعِ ورود و جهت (مورد ۳) ---
     def _seg(key_fn):
@@ -374,7 +430,7 @@ def _summarize(disp, style, tfs, trades):
             a = agg.setdefault(k, {"n": 0, "w": 0, "R": 0.0})
             a["n"] += 1
             a["R"] += t["r"]
-            if t["result"] == "win":
+            if t["r"] > 0:
                 a["w"] += 1
         return {k: {"trades": v["n"], "wins": v["w"],
                     "winrate_pct": round(v["w"] / v["n"] * 100, 1) if v["n"] else 0.0,
@@ -411,10 +467,12 @@ def _summarize(disp, style, tfs, trades):
         "trades": n,
         "wins": wins,
         "losses": losses,
+        "scratch": scratch,
         "winrate_pct": winrate,
         "total_R": total_r,
         "avg_R_per_trade": avg_r,
         "avg_win_R": avg_win_r,
+        "avg_loss_R": avg_loss_r,
         "expectancy_R": expectancy,
         "by_entry_type": by_entry,
         "by_direction": by_dir,
