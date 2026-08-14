@@ -59,24 +59,33 @@ def _simulate(entry_bars, start_idx, direction, entry, sl, tp,
               entry_type, fill_window=24, max_hold=400):
     """
     شبیه‌سازیِ نتیجه‌ی معامله روی کندل‌های تایم‌فریمِ ورود از start_idx به بعد.
-    برمی‌گرداند: (result, exit_price, r, bars_held, filled_idx)  یا  None اگر پر نشد.
+    برمی‌گرداند: (result, exit_price, r, bars_held, filled_idx, fill_price)  یا None اگر پر نشد.
     result ∈ {"win","loss"}.
+
+    فیکس C8: ورودِ «market» دیگر کورکورانه روی planِ poi_mid پر نمی‌شود (که می‌تواند
+    دور از قیمتِ واقعیِ کندلِ سیگنال باشد و نتیجه را متورم کند). حالا روی **کلوزِ
+    کندلِ سیگنال** پر می‌شود — همان قیمتی که در زمانِ واقعی در دسترس است. ریسک/هدف/
+    وین‌لاس نسبت به همین قیمتِ واقعی سنجیده می‌شود، نه قیمتِ آرمانی.
+    ورودِ «limit_ote» همچنان منتظرِ لمسِ قیمتِ لیمیت طیِ fill_window می‌ماند.
     """
     n = len(entry_bars)
     filled_idx = None
+    fill_price = entry
     if entry_type == "market":
-        filled_idx = start_idx  # همان کندلِ سیگنال، روی کلوز پر می‌شود
+        filled_idx = start_idx
+        fill_price = entry_bars[start_idx]["c"]   # فیکس C8: کلوزِ واقعیِ کندلِ سیگنال
     else:
         # limit_ote: منتظرِ لمسِ قیمتِ ورود طیِ fill_window کندلِ بعد
         for k in range(start_idx + 1, min(start_idx + 1 + fill_window, n)):
             b = entry_bars[k]
             if b["l"] <= entry <= b["h"]:
                 filled_idx = k
+                fill_price = entry   # لیمیت دقیقاً روی قیمتِ سفارش پر می‌شود
                 break
         if filled_idx is None:
             return None  # لیمیت پر نشد → معامله‌ای رخ نداد
 
-    risk = abs(entry - sl)
+    risk = abs(fill_price - sl)
     if risk <= 0:
         return None
 
@@ -87,12 +96,12 @@ def _simulate(entry_bars, start_idx, direction, entry, sl, tp,
         hit_tp = (b["h"] >= tp) if direction == 1 else (b["l"] <= tp)
         if hit_sl and hit_tp:
             # هر دو در یک کندل → محافظه‌کارانه: SL اول
-            return ("loss", sl, -1.0, k - filled_idx, filled_idx)
+            return ("loss", sl, -1.0, k - filled_idx, filled_idx, fill_price)
         if hit_sl:
-            return ("loss", sl, -1.0, k - filled_idx, filled_idx)
+            return ("loss", sl, -1.0, k - filled_idx, filled_idx, fill_price)
         if hit_tp:
-            r = round(abs(tp - entry) / risk, 2)
-            return ("win", tp, r, k - filled_idx, filled_idx)
+            r = round(abs(tp - fill_price) / risk, 2)
+            return ("win", tp, r, k - filled_idx, filled_idx, fill_price)
     return None  # تا انتهای داده نه TP نه SL — معامله‌ی ناتمام، حساب نمی‌شود
 
 
@@ -280,7 +289,7 @@ def backtest(symbol, style="day", grades=("A+", "A", "B"),
                             plan.get("entry_type", "market"),
                             fill_window=fill_window, max_hold=max_hold)
             if sim is not None:
-                result, exitp, rr_real, held, filled_idx = sim
+                result, exitp, rr_real, held, filled_idx, fill_price = sim
                 t_sig = datetime.datetime.fromtimestamp(
                     t_now, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
                 trades.append({
@@ -288,7 +297,8 @@ def backtest(symbol, style="day", grades=("A+", "A", "B"),
                     "grade": grade,
                     "dir": plan["direction"],
                     "entry_type": plan.get("entry_type"),
-                    "entry": plan["entry"], "sl": plan["sl"], "tp": plan["tp"],
+                    "entry": plan["entry"], "fill": round(fill_price, 5),
+                    "sl": plan["sl"], "tp": plan["tp"],
                     "planned_rr": plan["rr"],
                     "result": result,
                     "r": rr_real,
