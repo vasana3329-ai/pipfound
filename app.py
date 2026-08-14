@@ -484,12 +484,6 @@ tr.on td{background:rgba(34,197,94,.05)}
       <button id="bt" class="go" style="background:#334155" title="بک‌تستِ walk-forward روی داده‌ی تاریخی؛ پنلِ تنظیماتِ بازه/تایم‌فریم/جهت را باز می‌کند.">بک‌تست</button>
     </div>
     <div class="chips" id="chips"></div>
-    <div class="stephint" id="stepHint">
-      ۱) یک نماد را بنویس یا از میان‌برهای بالا انتخاب کن &nbsp;·&nbsp;
-      ۲) سبک را انتخاب کن (اسکالپ / روزانه / سوینگ) &nbsp;·&nbsp;
-      ۳) اگر خواستی بازه و تایم‌فریمِ بک‌تست را تنظیم کن &nbsp;·&nbsp;
-      ۴) «تحلیل کن» یا «بک‌تست» را بزن. هیچ‌چیز خودکار اجرا نمی‌شود.
-    </div>
     <div id="btPanel" class="btpanel">
       <div class="btrow">
         <span class="btlbl">بازه‌ی بک‌تست (تاریخِ روی چارت):</span>
@@ -500,15 +494,11 @@ tr.on td{background:rgba(34,197,94,.05)}
         <button id="btSuggest" class="btsug" type="button"
                 title="بر اساسِ عمقِ پیمایش و دیتای در دسترس، حداقلِ تاریخِ معتبر را در کادرها پیشنهاد می‌دهد. اول نماد و سبک را انتخاب کن.">بازه‌ی پیشنهادی ↧</button>
       </div>
-      <div class="btsughint" id="btSugHint">
-        برای بازه، نماد و سبک را انتخاب کن، سپس «بازه‌ی پیشنهادی» را بزن تا حداقلِ تاریخِ معتبر
-        بر اساسِ عمقِ پیمایش پیشنهاد شود. خالی گذاشتن = خودکار (کندل‌های اخیر).
-      </div>
+      <div class="btsughint" id="btSugHint"></div>
       <div class="btrow">
         <span class="btlbl">تایم‌فریمِ دلخواه (فرکتالی):</span>
         <input id="btTfs" class="btinp wide" type="text" placeholder="مثلاً 4h,1h,15m,5m — خالی = طبقِ سبک"
                title="تایم‌فریم‌های دلخواهِ فرکتالی، با کاما جدا: «4h,1h,15m,5m». اولی = بایاسِ بالا، آخری = ورود. بر سبک اولویت دارد؛ خالی = طبقِ سبک.">
-        <span class="bthint">اولی = بایاسِ بالا، آخری = ورود</span>
       </div>
       <div class="btrow">
         <span class="btlbl">جهتِ مجاز:</span>
@@ -520,7 +510,6 @@ tr.on td{background:rgba(34,197,94,.05)}
         <span class="btlbl" style="margin-inline-start:14px">عمقِ پیمایش:</span>
         <input id="btWalk" class="btinp narrow" type="number" min="100" max="8000" step="100" value="2000"
                title="عمقِ پیمایشِ walk-forward = تعدادِ کندلِ ورودی که ماشین روی آن قدم‌به‌قدم جلو می‌رود. برای نمونه‌ی آماریِ معتبر ≥ ۲۰۰۰ توصیه می‌شود.">
-        <span class="btlbl" style="font-size:11px;color:var(--muted)">(برای نمونه‌ی معتبر ≥ ۲۰۰۰ توصیه می‌شود)</span>
       </div>
     </div>
   </div>
