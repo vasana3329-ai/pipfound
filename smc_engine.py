@@ -392,10 +392,40 @@ def displacement(bars, lookback=10):
                 best=cand
     return best or {"present":False}
 
-def killzone_now():
-    """Current ICT killzone based on New York time."""
-    et=datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(hours=4)  # approx EDT
-    h=et.hour+et.minute/60
+def _is_us_dst(dt_utc):
+    """آیا این لحظه (UTC) در بازه‌ی ساعتِ تابستانیِ آمریکا (EDT) است؟
+
+    قاعده‌ی آمریکا: از یکشنبه‌ی دومِ مارس تا یکشنبه‌ی اولِ نوامبر. تعیینِ آفستِ
+    درستِ نیویورک (EDT=-4 در تابستان، EST=-5 در زمستان) لازم است تا پنجره‌های
+    کیل‌زون نیم‌سالِ سال یک ساعت جابه‌جا نباشند (فیکس C9).
+    """
+    y = dt_utc.year
+    # یکشنبه‌ی دومِ مارس، ساعت ۰۷:۰۰ UTC (۰۲:۰۰ محلیِ EST) شروعِ EDT
+    mar1 = datetime.datetime(y, 3, 1, tzinfo=datetime.timezone.utc)
+    first_sun_mar = 1 + (6 - mar1.weekday()) % 7      # weekday(): Mon=0..Sun=6
+    dst_start = datetime.datetime(y, 3, first_sun_mar + 7, 7, 0, tzinfo=datetime.timezone.utc)
+    # یکشنبه‌ی اولِ نوامبر، ساعت ۰۶:۰۰ UTC (۰۲:۰۰ محلیِ EDT) پایانِ EDT
+    nov1 = datetime.datetime(y, 11, 1, tzinfo=datetime.timezone.utc)
+    first_sun_nov = 1 + (6 - nov1.weekday()) % 7
+    dst_end = datetime.datetime(y, 11, first_sun_nov, 6, 0, tzinfo=datetime.timezone.utc)
+    return dst_start <= dt_utc < dst_end
+
+
+def killzone_at(ts=None):
+    """کیل‌زونِ ICT بر اساسِ زمانِ نیویورک برای یک لحظه‌ی مشخص.
+
+    فیکس C2: به‌جای «اکنونِ» ساعتِ دیوار، تایم‌استمپِ کندل را می‌گیرد تا بک‌تست
+    بازتولیدپذیر باشد (هر سیگنالِ تاریخی با کیل‌زونِ زمانِ خودش سنجیده شود، نه
+    زمانِ اجرای بک‌تست). ts=None ⇒ اکنون (رفتارِ زنده، سازگاریِ عقب‌رو).
+    فیکس C9: آفستِ EST/EDT بر پایه‌ی DST محاسبه می‌شود، نه ثابتِ -۴.
+    """
+    if ts is None:
+        dt_utc = datetime.datetime.now(datetime.timezone.utc)
+    else:
+        dt_utc = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+    offset = 4 if _is_us_dst(dt_utc) else 5
+    et = dt_utc - datetime.timedelta(hours=offset)
+    h = et.hour + et.minute/60
     if 2<=h<5:   return "London Open KZ (02:00-05:00 ET)"
     if 8.5<=h<11:return "New York AM KZ (08:30-11:00 ET)"
     if 10<=h<12: return "London Close KZ (10:00-12:00 ET)"
@@ -403,12 +433,20 @@ def killzone_now():
     if 19<=h<24 or 0<=h<2: return "Asian Range (19:00-24:00 ET)"
     return f"Outside primary killzone (NY time ~{int(h):02d}:00)"
 
+
+def killzone_now():
+    """سازگاریِ عقب‌رو: کیل‌زونِ لحظه‌ی فعلی (= killzone_at(None))."""
+    return killzone_at(None)
+
 def analyze_bars(bars, tf, disp=None, src="backtest", sym=None):
     """تحلیلِ ساختار روی آرایه‌ی کندلِ ازپیش‌آماده (بدونِ fetch).
     هسته‌ی مشترکِ analyze و بک‌تست — دقیقاً همان منطقِ تصحیح‌شده روی هر برشِ تاریخی."""
     if len(bars)<30: raise RuntimeError("not enough bars")
     sw=swings(bars,2)
     trend,labels,bos,choch=structure(bars,sw)
+    # فیکس C2: کیل‌زون از تایم‌استمپِ آخرین کندلِ همین برش حساب می‌شود (بازتولیدپذیر
+    # در بک‌تست)، نه ساعتِ دیوارِ لحظه‌ی اجرا.
+    kz = killzone_at(bars[-1]["t"])
     return {
         "symbol":disp,"resolved":sym or disp,"source":src,"tf":tf,
         "bars":len(bars),"last_price":bars[-1]["c"],
@@ -422,7 +460,7 @@ def analyze_bars(bars, tf, disp=None, src="backtest", sym=None):
         "displacement":displacement(bars),
         "FVG_unfilled":fvgs(bars),
         "order_blocks":order_blocks(bars),
-        "killzone":killzone_now(),
+        "killzone":kz,
     }
 
 def analyze(symbol, tf, limit=300):
