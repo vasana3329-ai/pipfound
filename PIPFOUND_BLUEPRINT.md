@@ -176,22 +176,31 @@ Weighted, rules-based. Points normalized to % of max, so adding factors never in
 
 ---
 
-## 4. Current backtest baseline (as of latest commit `263c524`)
+## 4. Current backtest baseline — ⚠️ REVISED after realistic-fill fix (C8)
 
-Run: `grades=(A+,A,B)`, `side=both`, engine direct (not HTTP). **These already include Fix #1 (OTE limit gating).**
+> **مهم‌ترین یافته‌ی این دور.** ارقامِ قبلی (BTC 83.6٪، XAU 82.4٪، USDJPY 95.8٪) با **پرشدنِ خوش‌بینانه‌ی بازار روی `poi_mid`** تولید شده بودند — نه قیمتی که واقعاً در آن لحظه در دسترس بود. فیکس C8 پرشدن را روی **کلوزِ کندلِ سیگنال** (قیمتِ واقعی) برد و R را نسبت به همان قیمت سنجید. نتیجه: وین‌ریتِ ۸۳٪ فروپاشید. این **رگرسیون نیست؛ افشای حقیقت است** — لبه‌ی واقعیِ استراتژی همیشه همین‌قدر بود، صرفاً با فیلِ آرمانی پنهان شده بود. دقیقاً همان چیزی که پرسونای «ترِیدر-منتقد» (§8) می‌خواهد: زیرِ فرش جارو نکردن.
 
-| Symbol | Style | walk | Trades | Winrate | Expectancy (R) | Σ R | market | limit_ote |
-|---|---|---|---:|---:|---:|---:|---|---|
-| BTCUSDT | day | 3000 | 67 | 83.6% | 2.43 | 162.64 | 56/66 | 0/1 |
-| XAUUSD | day | 3000 | 34 | 82.4% | 2.80 | 95.36 | 28/33 | 0/1 |
-| USDJPY | scalp | 5000 | 24 | 95.8% | 2.67 | 64.15 | 23/24 | — |
-| USDJPY | swing | 5000 | 8 | 62.5% | 0.93 | 7.47 | 5/8 | — |
-| EURUSD | day | 3000 | 1 | 100% | 2.07 | 2.07 | 1/1 | — |
+پس از کلِ فیکس‌ها (C1–C11, C14, C15, S1)، بک‌تستِ BTCUSDT/day روی نمونه‌های کوچک (walk 800–1500) عملاً **۰–۴۱٪ وین‌ریت با اکسپکتنسیِ منفی** می‌دهد و تقریباً همه‌ی سیگنال‌ها `limit_ote` نزولیِ درجه‌B هستند که به SL می‌خورند.
 
-**Reading these numbers critically:**
-- Winrates look strong, BUT they are dominated by **market entries**. `limit_ote` has collapsed to essentially **0/1** — Fix #1 (previous session) raised winrate by *nearly removing OTE limit entries entirely*. This is a **metric-gaming symptom, not a real fix** (see §6, item C1). OTE is the heart of ICT entry; killing it is not acceptable long-term.
-- USDJPY `day` and `EURUSD` `day` produce almost no trades — small-sample / low-signal for that style. USDJPY is better on scalp (95.8%) and swing.
-- High winrates with a fixed RR≥2 and market-on-close fills also reflect the **optimistic market fill** assumption (see §6, item C4).
+**تشخیصِ ریشه‌ای (چرا لبه ضعیف شد، نه چرا «خراب شد»):**
+- ورودِ گلدن‌پاکتِ ۰.۷۰۵ + استاپِ ساختاریِ `struct_high+buf` یک **استاپِ بسیار تنگ نسبتِ به هدفِ دور** می‌سازد (planned RR ۳+). اما رتریسِ به ۰.۷۰۵ اغلب تا خودِ سوینگ‌های ۱.۰ (همان‌جا که SL نشسته) ادامه می‌یابد → استاپ درست روی نقطه‌ی پرتکرارِ برگشت/ادامه است. این یک **تنشِ طراحیِ استراتژی** است، نه باگِ کد.
+- روی نمونه‌ی کوچک، ۳ معامله وین‌ریتِ ۰٪ آماری بی‌معناست (بنرِ کفایتِ نمونه درست هشدار می‌دهد).
+
+**قدمِ بعدیِ واقعیِ لازم (نه متریک‌گیمینگ):** ورودِ لیمیت باید با **تأییدِ LTF (چاکِ تایمِ ورودِ ریزتر پس از لمسِ گلدن‌پاکت)** فعال شود و استاپ **پشتِ فتیله‌ی سوئیپ + بافر**، نه صرفاً پشتِ سوینگِ‌های. بدونِ این تأیید، لیمیتِ کورِ ۰.۷۰۵ لبه ندارد.
+
+| Symbol | Style | walk | Trades | Winrate | Exp (R) | نکته |
+|---|---|---|---:|---:|---:|---|
+| BTCUSDT | day | 1500 | 3 | 0٪ | −1.0 | نمونه‌ی خیلی کوچک؛ همه limit_ote نزولیِ B |
+| BTCUSDT | day | 800 | 1 | 0٪ | −1.0 | نمونه‌ی خالی عملاً |
+
+> ارقامِ بزرگ‌نمونه (walk≥3000) عمداً این دور اجرا **نشدند** تا CPUِ M1/8GB داغ نشود (درخواستِ کاربر). قبل از قضاوتِ نهاییِ لبه، پس از پیاده‌سازیِ «تأییدِ LTF + استاپِ پشتِ سوئیپ»، یک ران بزرگ لازم است.
+
+### 4.1 baselineِ تاریخیِ منسوخ (پیش از C8 — فیلِ آرمانی، دیگر معتبر نیست)
+| Symbol | Style | walk | Trades | Winrate | Exp (R) | market | limit_ote |
+|---|---|---|---:|---:|---:|---|---|
+| BTCUSDT | day | 3000 | 67 | 83.6٪ | 2.43 | 56/66 | 0/1 |
+| XAUUSD | day | 3000 | 34 | 82.4٪ | 2.80 | 28/33 | 0/1 |
+| USDJPY | scalp | 5000 | 24 | 95.8٪ | 2.67 | 23/24 | — |
 
 ---
 
@@ -208,6 +217,13 @@ Commits are on `main`, remote `origin`. Farsi commit messages (summarized here i
 | `646d6cf` | Fix backtest date-format error + auto range suggestion based on 600-candle depth. |
 | `d06632e` | **Winrate improvement pack:** (1) gate OTE-limit entry to HTF confluence only [Fix #1]; (2) sample-adequacy banner (<20 yellow, 0 red); (3) winrate segmentation by entry-type/direction; (4) better-style suggestion for low-signal symbols (threshold 5); (5) raise backtest default depth to 2000. |
 | `263c524` | Harden `_send` against BrokenPipe/ConnectionReset (client disconnecting mid-heavy-backtest no longer produces tracebacks). |
+| `79e90a4` | افزودنِ PIPFOUND_BLUEPRINT.md (این فایل). |
+| `4bf038b` | **فیکس C1+C7:** انکورِ premium_discount و OTE روی پایِ ایمپالسِ واقعی (`_impulse_leg`: مبدأ→مقصدِ دو سوینگِ آخر) به‌جای رِنجِ ساختگیِ پهن‌شده تا قیمت. زون‌های OTEِ engine با `confluence.ote_zone` یکسان شد و دیدِ اشتباهِ خرید=۰.۶۲..۰.۷۹ حذف شد. |
+| `32a7cc8` | **فیکس C2+C9:** `killzone_at(ts)` جدید — کیل‌زون از تایم‌استمپِ کندل (بازتولیدپذیریِ بک‌تست)؛ آفستِ EST/EDT از `_is_us_dst()` به‌جای ثابتِ −۴. `analyze_bars` کیل‌زون را از آخرین کندلِ برش حساب می‌کند. |
+| `4f310db` | **فیکس C3+C4+C5:** BOS/CHoCH فقط با کندلِ دیسپلیسمنت معتبر (`_break_displaced`؛ شکستِ بی‌جان = سوئیپ). گیتِ توالیِ sweep→MSS (`sequence_ok` + ردیفِ چک‌لیستِ «توالیِ سوئیپ→ام‌اس‌اس»). حذفِ اوبی‌های میتیگیت‌شده در `order_blocks`. |
+| `08a51b2` | **فیکس C8:** پرشدنِ واقع‌گرایانه‌ی market روی کلوزِ کندلِ سیگنال (نه `poi_mid`)؛ R نسبت به `fill_price`. **افشا کرد که baselineِ ۸۳٪ متورم بود** (اکسپکتنسی به ~۰ افتاد). |
+| `6de2c94` | **فیکس C6+C10+C11:** لیکوئیدیتیِ سشنی (PDH/PDL + رِنجِ آسیایی، `_session_levels`) به اهدافِ بای‌ساید/سل‌ساید. استاپِ ساختاری با بافرِ نسبتِ POI + نگهبانِ استاپِ نامعتبر. ورودِ گلدن‌پاکتِ ۰.۷۰۵/پروگزیمال به‌جای میدِ اوبی. |
+| `f818f63` | **فیکس C14+C15+S1 + بازنگریِ ورود:** FVG فقط با کندلِ میانیِ دیسپلیسمنت (بدنه‌به‌بدنه)؛ `by_grade` در خروجیِ بک‌تست؛ استکِ اسکالپِ بک‌تست = اپِ زنده (`1h,30m,15m,5m`). ورودِ market فقط داخلِ OTE، وگرنه limit در گلدن‌پاکت (حذفِ چیسِ بازار در محلِ بد). |
 
 ### 5.1 Root-cause findings established so far
 - **Fake bullish bias bug (RESOLVED, `7d20c44`):** original BOS/CHoCH looped backward and flagged any old swing price had passed → always fabricated a bullish bias, killed all bearish signals on FX. Fixed to nearest-swing break.
@@ -221,29 +237,32 @@ Commits are on `main`, remote `origin`. Farsi commit messages (summarized here i
 This is the most valuable section for the next agent. A professional ICT/SMC critique (Huddleston / Priceaction Vinny lens) of the engine. Ordered by impact on output reliability. **Items are candidates to fix properly — resist metric-gaming.**
 
 ### Tier 1 — makes output genuinely unreliable
-- **C1 — OTE / premium-discount anchored on an arbitrary range, not the impulse leg.** `smc_engine.premium_discount` builds the range from the extremes of the last 8 swings and then *widens it to include current price* (lines ~294–295), shifting equilibrium and mislabeling premium as discount. `confluence.ote_zone` fibs on this synthetic range. **This is the root cause of OTE losses.** The previous "fix" (gate limit_ote to HTF) just disabled OTE. Real fix: anchor the fib to the actual impulse leg (origin swing → BOS swing) coming from `structure()`, place limit at 0.705, stop behind 1.0.
-- **C2 — Killzone in backtest uses wall-clock "now".** `killzone_now()` always returns the current time; `analyze_bars` calls it, so every historical signal is scored with the killzone of the moment the backtest runs, not the bar's own time. Backtests are non-reproducible morning vs night. Fix: `analyze_bars` should take a `ts` and compute the killzone from the last bar's timestamp.
-- **C3 — BOS/CHoCH require no displacement.** `structure()` only checks "did close cross the swing?" Weak breaks (often liquidity sweeps) generate fake BOS/CHoCH. MSS should require the breaking candle(s) to have a displacement body.
-- **C4 — Sequence gate missing.** Checklist scores sweep / CHoCH / entry independently; nothing enforces the sacred order **sweep → MSS → entry** in time. A setup can score A with CHoCH occurring *before* the sweep.
+- **C1 — ✅ RESOLVED (`4bf038b`).** OTE/premium-discount حالا روی پایِ ایمپالسِ واقعی (`_impulse_leg`) لنگر می‌شود؛ دیگر رِنج تا قیمت پهن نمی‌شود.
+- **C2 — ✅ RESOLVED (`32a7cc8`).** `killzone_at(ts)` کیل‌زون را از تایم‌استمپِ کندل می‌گیرد؛ بک‌تست بازتولیدپذیر شد.
+- **C3 — ✅ RESOLVED (`4f310db`).** BOS/CHoCH نیازمندِ کندلِ دیسپلیسمنت‌اند (`_break_displaced`).
+- **C4 — ✅ RESOLVED (`4f310db`).** گیتِ توالیِ sweep→MSS (`sequence_ok`) در چک‌لیست.
 
 ### Tier 2 — eats quality
-- **C5 — Mitigated / structure-irrelevant order blocks still offered.** `order_blocks()` doesn't check mitigation, whether the OB caused a BOS, or PD side. Trading a burnt OB → stop-out. Fix: drop mitigated OBs; prefer OBs that caused a BOS.
-- **C6 — No core ICT liquidity: PDH/PDL, session highs/lows, Asian range.** `liquidity()` only sees fractal equal-highs/lows with a fixed 0.0007 tolerance for all markets. Half the methodology's liquidity concept is absent.
-- **C7 — Two modules disagree on OTE location.** `smc_engine.premium_discount` computes long OTE as `bot+0.62..0.79×rng` (that's *premium* — wrong for a buy); `confluence.ote_zone` correctly uses `bot+0.21..0.38×rng` (discount). `score()` uses the correct one, so the engine's version is misleading dead code — delete or fix it.
-- **C8 — Unrealistic market fill in backtest.** `_simulate` fills market at `plan["entry"]=poi_mid` regardless of where signal-bar price actually is; in the no-HTF-confluence fallback that can be far from the POI. Inflates results. Market entry should fill at signal-bar close (or next-bar open).
-- **C9 — Killzone hardcodes EDT (−4h).** Winter (EST) should be −5h. Killzone windows are an hour off half the year.
-- **C10 — Fixed-percent stop overrides structure.** `sl=struct_low×0.999` with `min_stop=0.15%`. When structural distance is small, min_stop pushes SL off the real invalidation level → fake RR and broken invalidation logic. Stop should sit behind swing/OB + spread buffer.
-- **C11 — Entry at POI mid, not proximal edge / 0.705.** ICT entry is the proximal edge price touches first, or the 0.705 golden pocket — not the middle of the OB.
+- **C5 — ✅ RESOLVED (`4f310db`).** اوبی‌های میتیگیت‌شده کنار گذاشته می‌شوند.
+- **C6 — ✅ RESOLVED (`6de2c94`).** PDH/PDL + رِنجِ آسیایی (`_session_levels`) به اهدافِ لیکوئیدیتی افزوده شد.
+- **C7 — ✅ RESOLVED (`4bf038b`).** دو ماژول روی زون‌های OTE یکسان شدند.
+- **C8 — ✅ RESOLVED (`08a51b2`).** پرشدنِ market روی کلوزِ کندلِ سیگنال؛ **افشا کرد baseline متورم بود** (§4).
+- **C9 — ✅ RESOLVED (`32a7cc8`).** آفستِ EST/EDT بر پایه‌ی DST.
+- **C10 — ✅ RESOLVED (`6de2c94`).** استاپِ ساختاری با بافرِ نسبتِ POI + نگهبانِ استاپِ نامعتبر (به‌جای درصدِ ثابت).
+- **C11 — ✅ RESOLVED (`6de2c94`/`f818f63`).** ورودِ گلدن‌پاکتِ ۰.۷۰۵/پروگزیمال؛ market فقط داخلِ OTE.
 
 ### Tier 3 — missing for "professional" (features, not bugs)
-- **C12 — No SMT divergence.** Addable with correlated pairs (BTC↔ETH, EURUSD↔GBPUSD, XAU↔XAG) and especially **DXY** for FX bias.
-- **C13 — No Power of 3 / Judas swing / Silver Bullet** in scoring.
-- **C14 — FVG has no displacement filter.** Every 3-candle gap counts, even in slow chop; quality FVGs come from displacement.
-- **C15 — Grade B accepted in backtest** dilutes quality; report A+/A separately for a clean read.
-- **C16 — Fixed fractal swing n=2 on all TFs** — noisy on 1m/5m, leaks into whole structure.
+- **C12 — ⏳ OPEN. No SMT divergence.** Addable with correlated pairs (BTC↔ETH, EURUSD↔GBPUSD, XAU↔XAG) and especially **DXY** for FX bias.
+- **C13 — ⏳ OPEN. No Power of 3 / Judas swing / Silver Bullet** in scoring.
+- **C14 — ✅ RESOLVED (`f818f63`).** FVG اکنون کندلِ میانیِ دیسپلیسمنت (بدنه‌به‌بدنه ≥۱.۳×) می‌خواهد.
+- **C15 — ✅ RESOLVED (`f818f63`).** `by_grade` وین‌ریت را per-grade تفکیک می‌کند.
+- **C16 — ⏳ OPEN. Fixed fractal swing n=2 on all TFs** — noisy on 1m/5m.
 
 ### Structural inconsistencies
-- **S1 — scalp TF stack differs** between live app (`1h,30m,15m,5m`) and backtest (`1h,15m,5m,1m`). Reconcile so backtest reflects the live scalp stack.
+- **S1 — ✅ RESOLVED (`f818f63`).** استکِ اسکالپِ بک‌تست = اپِ زنده (`1h,30m,15m,5m`).
+
+### 🔴 مشکلِ باز و بحرانیِ فعلی — C17 (لبه‌ی واقعیِ لیمیتِ OTE منفی است)
+پس از فیکسِ فیلِ واقع‌گرایانه (C8)، سیگنال‌های `limit_ote` روی گلدن‌پاکتِ ۰.۷۰۵ با استاپِ ساختاریِ تنگ، اکثراً به SL می‌خورند (walk کوچک: ۰٪ وین). ریشه: رتریسِ ۰.۷۰۵ اغلب تا سوینگِ ۱.۰ (محلِ SL) ادامه می‌یابد. **راهِ درست (نه متریک‌گیمینگ):** ورودِ لیمیت را مشروط به **تأییدِ چاکِ LTFِ ریزتر پس از لمسِ گلدن‌پاکت** کن و استاپ را **پشتِ فتیله‌ی سوئیپ + بافر** بگذار، نه صرفاً پشتِ سوینگ. این قدمِ اول رودمپِ بعدی است.
 
 ---
 
