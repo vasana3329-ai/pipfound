@@ -95,6 +95,16 @@ def _simulate(entry_bars, start_idx, direction, entry, sl, tp,
         lo = max(0, touch_idx - 20)
         seg = entry_bars[lo:touch_idx + 1]
         avg_body = sum(abs(x["c"] - x["o"]) for x in seg) / max(1, len(seg))
+        # فیکس C20: ATRِ محلی (True Range میانگین) روی همان پنجره — برای بافرِ استاپ
+        # که با نوسانِ واقعیِ بازار مقیاس بخورد، نه یک درصدِ خامِ ثابت.
+        _trs = []
+        for i in range(1, len(seg)):
+            _pc = seg[i - 1]["c"]
+            _tr = max(seg[i]["h"] - seg[i]["l"],
+                      abs(seg[i]["h"] - _pc),
+                      abs(seg[i]["l"] - _pc))
+            _trs.append(_tr)
+        atr = (sum(_trs) / len(_trs)) if _trs else abs(entry_bars[touch_idx]["c"]) * 0.001
 
         # فازِ تأیید: دنبالِ کندلِ رجکشنِ دیسپلیسمنت + ردگیریِ فتیله‌ی سوئیپ
         sweep_ext = entry_bars[touch_idx]["l"] if direction == 1 else entry_bars[touch_idx]["h"]
@@ -115,8 +125,13 @@ def _simulate(entry_bars, start_idx, direction, entry, sl, tp,
 
         filled_idx = confirm_idx
         fill_price = entry_bars[confirm_idx]["c"]   # ورود روی کلوزِ کندلِ تأیید
-        # فیکس C17: استاپ پشتِ فتیله‌ی سوئیپِ واقعیِ فازِ پولبک + بافرِ کوچک
-        buf = abs(fill_price) * 0.0003
+        # فیکس C17+C20: استاپ پشتِ فتیله‌ی سوئیپِ واقعیِ فازِ پولبک + بافرِ ATR.
+        # مشکلِ افشاشده در C19 (کلاهِ ترِیدر): بافرِ ثابتِ ۰.۰۳٪ استاپ را چنان تنگ
+        # می‌کرد که نویزِ عادیِ بازار پیش از رسیدن به هدف آن را می‌زد (planRR تا ۱۰۹،
+        # وین‌ریت ۲۲٪). بافر حالا با نوسانِ واقعی (۰.۵×ATR) مقیاس می‌خورد تا استاپ
+        # پشتِ کلِ ساختارِ سوئیپ بنشیند، نه فقط نوکِ فتیله. این planRRِ توهمی را هم
+        # واقعی می‌کند (مخرجِ ریسک دیگر بیمارگونه کوچک نیست).
+        buf = max(abs(fill_price) * 0.0003, 0.5 * atr)
         dyn_sl = (sweep_ext - buf) if direction == 1 else (sweep_ext + buf)
         # فقط اگر استاپِ داینامیک سمتِ درست و با فاصله‌ی معنادار باشد از آن استفاده کن؛
         # وگرنه به استاپِ پلنِ ساختاری برگرد (نگهبان در برابرِ ریسکِ صفر/معکوس).
