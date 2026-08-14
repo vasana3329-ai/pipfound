@@ -328,14 +328,28 @@ def fvgs(bars, lookback=60):
         # bullish FVG: a.high < c.low، با کندلِ میانیِ دیسپلیسمنتِ صعودی
         if a["h"]<c["l"] and disp_body and b["c"]>b["o"]:
             lo,hi=a["h"],c["l"]
-            filled = any(x["l"]<=lo for x in bars[i+1:])
-            if not filled and price>lo:
-                out.append({"type":"bullish","top":hi,"bottom":lo,"idx":i})
+            gap=hi-lo
+            # فیکس C23: پرشدنِ کامل **و** پرشدنِ نصفه هر دو ابطال‌کننده‌اند. طبقِ ICT
+            # وقتی قیمت بیش از ۵۰٪ گپ را مصرف کند، ایمبالانس دیگر «تازه» نیست و
+            # اعتمادِ POI افت می‌کند. پس اگر پایین‌ترین لوِ بعدی به زیرِ نقطه‌ی میانیِ
+            # گپ رفته باشد → mitigated → دور انداخته می‌شود.
+            mid=lo+gap*0.5
+            future=bars[i+1:]
+            filled = any(x["l"]<=lo for x in future)
+            half_mit = any(x["l"]<=mid for x in future)
+            if not filled and not half_mit and price>lo:
+                out.append({"type":"bullish","top":hi,"bottom":lo,"idx":i,
+                            "mid":round(mid,5)})
         if a["l"]>c["h"] and disp_body and b["c"]<b["o"]:
             lo,hi=c["h"],a["l"]
-            filled = any(x["h"]>=hi for x in bars[i+1:])
-            if not filled and price<hi:
-                out.append({"type":"bearish","top":hi,"bottom":lo,"idx":i})
+            gap=hi-lo
+            mid=lo+gap*0.5
+            future=bars[i+1:]
+            filled = any(x["h"]>=hi for x in future)
+            half_mit = any(x["h"]>=mid for x in future)
+            if not filled and not half_mit and price<hi:
+                out.append({"type":"bearish","top":hi,"bottom":lo,"idx":i,
+                            "mid":round(mid,5)})
     return out[-6:]
 
 def order_blocks(bars, lookback=80):
@@ -356,15 +370,22 @@ def order_blocks(bars, lookback=80):
         # bullish OB: down candle followed by strong up displacement
         if b["c"]<b["o"] and nxt["c"]>nxt["o"] and disp>1.3*avg_rng and nxt["c"]>b["h"]:
             top,bot=b["h"],b["l"]
+            # فیکس C23: اوبیِ نهادیِ معتبر باید ایمبالانس (FVG) به‌جا بگذارد — یعنی
+            # کندلِ دیسپلیسمنت آن‌قدر پرقدرت بوده که گپِ ۳کندلی بسازد (low کندلِ i+2
+            # بالای high کندلِ i). اوبیِ بدونِ FVG صرفاً یک کندلِ برگشتیِ ضعیف است.
+            has_fvg = (i+2 < n) and (bars[i+2]["l"] > b["h"])
             # میتیگیت: بعد از کندلِ دیسپلیسمنت (i+2 به بعد) قیمت به داخلِ اوبی برگشته؟
             mitigated = any(x["l"]<=top for x in bars[i+2:])
-            if not mitigated:
-                out.append({"type":"bullish","top":top,"bottom":bot,"idx":i})
+            if not mitigated and has_fvg:
+                out.append({"type":"bullish","top":top,"bottom":bot,"idx":i,
+                            "disp_x_avg":round(disp/avg_rng,2) if avg_rng>0 else None})
         if b["c"]>b["o"] and nxt["c"]<nxt["o"] and disp>1.3*avg_rng and nxt["c"]<b["l"]:
             top,bot=b["h"],b["l"]
+            has_fvg = (i+2 < n) and (bars[i+2]["h"] < b["l"])
             mitigated = any(x["h"]>=bot for x in bars[i+2:])
-            if not mitigated:
-                out.append({"type":"bearish","top":top,"bottom":bot,"idx":i})
+            if not mitigated and has_fvg:
+                out.append({"type":"bearish","top":top,"bottom":bot,"idx":i,
+                            "disp_x_avg":round(disp/avg_rng,2) if avg_rng>0 else None})
     return out[-5:]
 
 def _session_levels(bars, tf):
