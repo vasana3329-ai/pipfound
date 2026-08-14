@@ -181,8 +181,42 @@ def swings(bars, n=2):
             clean.append(list(s))
     return [tuple(x) for x in clean]
 
+def _break_displaced(bars, swing_idx, level, up, disp_mult=1.5):
+    """آیا شکستِ سطحِ `level` (سقف/کفِ سوینگ در ایندکسِ swing_idx) با یک کندلِ
+    دیسپلیسمنت انجام شده؟ (فیکس C3)
+
+    از کندلِ بعدِ سوینگ جلو می‌رویم و نخستین کندلی را که **بسته‌شدنش** از سطح
+    عبور کرده پیدا می‌کنیم؛ اگر بدنه‌ی همان کندل ≥ disp_mult×میانگینِ رِنجِ اخیر
+    باشد، شکست معتبر (MSS واقعی) است. شکستِ بی‌جانِ کم‌بدنه معمولاً سوئیپِ
+    لیکوئیدیتی است نه تغییرِ ساختار، و باید BOS/CHoCH جعلی تولید نکند.
+    up=True یعنی شکستِ صعودی (close>level)، up=False یعنی نزولی (close<level).
+
+    خروجی: (ok, break_idx) — ok آیا شکستِ دیسپلیسمنت‌دار بود، و break_idx ایندکسِ
+    کندلِ شکست (برای ترتیب‌سنجیِ sweep→MSS در فیکس C4). اگر شکستی نبود (None,None).
+    """
+    n=len(bars)
+    if swing_idx is None or swing_idx>=n-1:
+        return (False, None)
+    lo=max(0, swing_idx-30)
+    avg=sum(b["h"]-b["l"] for b in bars[lo:swing_idx+1])/max(1, swing_idx+1-lo)
+    if avg<=0:
+        return (False, None)
+    for k in range(swing_idx+1, n):
+        c=bars[k]["c"]; o=bars[k]["o"]
+        crossed = (c>level) if up else (c<level)
+        if crossed:
+            body=abs(c-o)
+            dir_ok = (c>o) if up else (c<o)
+            return (bool(dir_ok and body>=disp_mult*avg), k)
+    return (False, None)
+
+
 def structure(bars, sw):
-    """Determine trend + last BOS/CHoCH from alternating swings."""
+    """Determine trend + last BOS/CHoCH from alternating swings.
+
+    خروجی: trend, labeled[-6:], bos, choch, meta — meta شاملِ ایندکسِ کندلِ شکستِ
+    BOS/CHoCH (bos_break_idx/choch_break_idx) برای ترتیب‌سنجیِ sweep→MSS (فیکس C4).
+    """
     highs=[s for s in sw if s[2]=="H"]; lows=[s for s in sw if s[2]=="L"]
     events=[]; trend="range"
     # classify HH/HL/LH/LL sequence
@@ -203,29 +237,30 @@ def structure(bars, sw):
     elif dns>ups: trend="down"
     # BOS / CHoCH detection on close basis
     bos=choch=None
+    bos_break_idx=choch_break_idx=None
     price=bars[-1]["c"]
     # اصلاحِ باگ: BOS = شکستِ نزدیک‌ترین سوینگ، نه هر سوینگِ کهنه.
-    # قبلاً حلقه به عقب می‌رفت و اولین سقفِ قدیمی‌ای که قیمت از آن بالاتر بود را
-    # bullish_BOS اعلام می‌کرد → در هر بازاری قیمت بالای یک سقفِ قدیمی هست، پس
-    # همیشه بایاسِ صعودیِ ساختگی می‌ساخت و هیچ سیگنالِ نزولی تولید نمی‌شد.
+    # فیکس C3: شکست باید با کندلِ دیسپلیسمنت باشد؛ شکستِ بی‌جان = سوئیپ، نه BOS.
     if highs and price>highs[-1][1]:
-        bos=("bullish_BOS",highs[-1][1],highs[-1][0])
-    if lows and price<lows[-1][1]:
-        b2=("bearish_BOS",lows[-1][1],lows[-1][0])
-        if not bos: bos=b2
-    # CHoCH: trend flip signal (break against recent trend).
-    # اصلاحِ همان باگِ BOS که این‌جا باقی مانده بود: CHoCH باید شکستِ
-    # **نزدیک‌ترین** سوینگِ مخالف باشد، نه هر سوینگِ کهنه. قبلاً حلقه به عقب
-    # می‌رفت و اولین سوینگِ قدیمی‌ای که قیمت آن را رد کرده بود CHoCH اعلام
-    # می‌شد؛ چون قیمتِ فعلی تقریباً همیشه بالای یک سقفِ خیلی قدیمی است،
-    # در ترندِ نزولی یک bullish_CHoCH جعلی می‌ساخت و بایاسِ نزولیِ واقعی را
-    # خنثی می‌کرد → روی فارکس همه‌چیز «نامشخص/صعودی» می‌شد.
+        ok,bi=_break_displaced(bars, highs[-1][0], highs[-1][1], True)
+        if ok:
+            bos=("bullish_BOS",highs[-1][1],highs[-1][0]); bos_break_idx=bi
+    if lows and price<lows[-1][1] and bos is None:
+        ok,bi=_break_displaced(bars, lows[-1][0], lows[-1][1], False)
+        if ok:
+            bos=("bearish_BOS",lows[-1][1],lows[-1][0]); bos_break_idx=bi
+    # CHoCH: تغییرِ کاراکترِ ساختار، شکستِ **نزدیک‌ترین** سوینگِ مخالف با دیسپلیسمنت.
     if len(labeled)>=3:
         if trend=="up" and lows and price<lows[-1][1]:
-            choch=("bearish_CHoCH",lows[-1][1],lows[-1][0])
+            ok,bi=_break_displaced(bars, lows[-1][0], lows[-1][1], False)
+            if ok:
+                choch=("bearish_CHoCH",lows[-1][1],lows[-1][0]); choch_break_idx=bi
         elif trend=="down" and highs and price>highs[-1][1]:
-            choch=("bullish_CHoCH",highs[-1][1],highs[-1][0])
-    return trend, labeled[-6:], bos, choch
+            ok,bi=_break_displaced(bars, highs[-1][0], highs[-1][1], True)
+            if ok:
+                choch=("bullish_CHoCH",highs[-1][1],highs[-1][0]); choch_break_idx=bi
+    meta={"bos_break_idx":bos_break_idx,"choch_break_idx":choch_break_idx,"n":len(bars)}
+    return trend, labeled[-6:], bos, choch, meta
 
 def fvgs(bars, lookback=60):
     """Unfilled fair value gaps (3-candle imbalance)."""
@@ -247,7 +282,15 @@ def fvgs(bars, lookback=60):
     return out[-6:]
 
 def order_blocks(bars, lookback=80):
-    """Last opposing candle before a displacement move."""
+    """Last opposing candle before a displacement move.
+
+    فیکس C5: اوبی‌های میتیگیت‌شده (که قیمت بعداً واردشان شده و بدنه را مصرف کرده)
+    کنار گذاشته می‌شوند — تریدِ اوبیِ سوخته = استاپ‌اوت. یک اوبی «mitigated» است اگر
+    بعد از تشکیل، قیمت به داخلِ بدنه‌ی آن بازگشته باشد:
+      - بولیش OB (کفِ تقاضا): اگر بعداً کندلی low‌اش ≤ topِ اوبی رفته → لمس/میتیگیت.
+      - بریش OB (سقفِ عرضه): اگر بعداً کندلی high‌اش ≥ bottomِ اوبی رفته → لمس/میتیگیت.
+    فقط اوبی‌های تازه و لمس‌نشده به‌عنوان POIِ معتبر برمی‌گردند.
+    """
     out=[]; n=len(bars); start=max(3,n-lookback)
     avg_rng=sum(b["h"]-b["l"] for b in bars[start:])/max(1,n-start)
     for i in range(start,n-1):
@@ -255,9 +298,16 @@ def order_blocks(bars, lookback=80):
         disp=abs(nxt["c"]-nxt["o"])
         # bullish OB: down candle followed by strong up displacement
         if b["c"]<b["o"] and nxt["c"]>nxt["o"] and disp>1.3*avg_rng and nxt["c"]>b["h"]:
-            out.append({"type":"bullish","top":b["h"],"bottom":b["l"],"idx":i})
+            top,bot=b["h"],b["l"]
+            # میتیگیت: بعد از کندلِ دیسپلیسمنت (i+2 به بعد) قیمت به داخلِ اوبی برگشته؟
+            mitigated = any(x["l"]<=top for x in bars[i+2:])
+            if not mitigated:
+                out.append({"type":"bullish","top":top,"bottom":bot,"idx":i})
         if b["c"]>b["o"] and nxt["c"]<nxt["o"] and disp>1.3*avg_rng and nxt["c"]<b["l"]:
-            out.append({"type":"bearish","top":b["h"],"bottom":b["l"],"idx":i})
+            top,bot=b["h"],b["l"]
+            mitigated = any(x["h"]>=bot for x in bars[i+2:])
+            if not mitigated:
+                out.append({"type":"bearish","top":top,"bottom":bot,"idx":i})
     return out[-5:]
 
 def liquidity(bars, sw, tol=0.0007):
@@ -360,12 +410,12 @@ def sweeps(bars, sw, lookback=12):
         for si,sp,st in prior_highs:
             if si<i-1 and b["h"]>sp and b["c"]<sp:
                 out.append({"type":"bearish_sweep","level":round(sp,5),
-                            "bar_from_end":n-1-i,"note":"buyside liquidity grabbed"})
+                            "bar_from_end":n-1-i,"idx":i,"note":"buyside liquidity grabbed"})
                 break
         for si,sp,st in prior_lows:
             if si<i-1 and b["l"]<sp and b["c"]>sp:
                 out.append({"type":"bullish_sweep","level":round(sp,5),
-                            "bar_from_end":n-1-i,"note":"sellside liquidity grabbed"})
+                            "bar_from_end":n-1-i,"idx":i,"note":"sellside liquidity grabbed"})
                 break
     # keep only the last few, most recent first
     return out[-4:][::-1]
@@ -443,10 +493,30 @@ def analyze_bars(bars, tf, disp=None, src="backtest", sym=None):
     هسته‌ی مشترکِ analyze و بک‌تست — دقیقاً همان منطقِ تصحیح‌شده روی هر برشِ تاریخی."""
     if len(bars)<30: raise RuntimeError("not enough bars")
     sw=swings(bars,2)
-    trend,labels,bos,choch=structure(bars,sw)
+    trend,labels,bos,choch,meta=structure(bars,sw)
     # فیکس C2: کیل‌زون از تایم‌استمپِ آخرین کندلِ همین برش حساب می‌شود (بازتولیدپذیر
     # در بک‌تست)، نه ساعتِ دیوارِ لحظه‌ی اجرا.
     kz = killzone_at(bars[-1]["t"])
+    swp = sweeps(bars, sw)
+    # فیکس C4: توالیِ مقدسِ sweep → MSS. آیا سوئیپِ لیکوئیدیتی **قبل از** کندلِ
+    # شکستِ ساختار (CHoCH ترجیحاً، وگرنه BOS) رخ داده؟ اگر MSS قبل از سوئیپ باشد،
+    # توالی نقض شده و ورود نامعتبر است. اندیس‌ها روی همین برش‌اند.
+    mss_idx = meta.get("choch_break_idx")
+    if mss_idx is None:
+        mss_idx = meta.get("bos_break_idx")
+    seq_ok = None
+    if mss_idx is not None and swp:
+        # جهتِ MSS
+        mss_dir = None
+        if choch:
+            mss_dir = 1 if "bullish" in choch[0] else -1
+        elif bos:
+            mss_dir = 1 if "bullish" in bos[0] else -1
+        # سوئیپِ هم‌جهت که پیش از شکست رخ داده (bullish_sweep برای MSS صعودی و برعکس)
+        want_sweep = "bullish_sweep" if mss_dir == 1 else "bearish_sweep"
+        prior = [s for s in swp if s.get("type") == want_sweep
+                 and s.get("idx") is not None and s["idx"] <= mss_idx]
+        seq_ok = bool(prior)
     return {
         "symbol":disp,"resolved":sym or disp,"source":src,"tf":tf,
         "bars":len(bars),"last_price":bars[-1]["c"],
@@ -454,9 +524,11 @@ def analyze_bars(bars, tf, disp=None, src="backtest", sym=None):
         "trend":trend,
         "recent_structure":[{"label":l[3],"price":round(l[1],5)} for l in labels],
         "BOS":bos,"CHoCH":choch,
+        "mss_meta":meta,
+        "sequence_ok":seq_ok,   # فیکس C4: sweep→MSS رعایت شده؟ (True/False/None=نامشخص)
         "premium_discount":premium_discount(bars,sw),
         "liquidity":liquidity(bars,sw),
-        "liquidity_sweeps":sweeps(bars,sw),
+        "liquidity_sweeps":swp,
         "displacement":displacement(bars),
         "FVG_unfilled":fvgs(bars),
         "order_blocks":order_blocks(bars),
