@@ -274,34 +274,71 @@ def liquidity(bars, sw, tol=0.0007):
     return {"buyside_eqh":sorted(set(eqh))[-3:],"sellside_eql":sorted(set(eql))[:3],
             "range_high":max(b["h"] for b in bars),"range_low":min(b["l"] for b in bars)}
 
-def premium_discount(bars, sw, span=8):
-    """PD array on the current dealing range.
+def _impulse_leg(sw):
+    """آخرین «پایِ ایمپالس» (حرکتِ جهت‌دارِ سازنده‌ی ساختار) از روی سوینگ‌ها.
 
-    Fix: instead of the last two swings (which can form a tiny, meaningless
-    range), use the extremes (highest swing high, lowest swing low) among the
-    last `span` swings that price is currently trading within. This is the
-    'dealing range' ICT/SMC actually price against. Falls back gracefully.
+    ICT فیب را روی همین پا می‌کشد: مبدأ (origin) → مقصد (BOS/terminus). ما آن را
+    از دو سوینگِ آخرِ متناوب می‌گیریم چون sw از پیش پاک‌سازیِ نوع‌متناوب شده است:
+      - آخرین جفت L→H  ⇒ پایِ صعودی: bottom=L، top=H، جهت=+1.
+      - آخرین جفت H→L  ⇒ پایِ نزولی: top=H، bottom=L، جهت=-1.
+    خروجی: (bottom, top, leg_dir, origin_idx, term_idx) یا None اگر کمتر از دو سوینگ.
+    """
+    if len(sw) < 2:
+        return None
+    a, b = sw[-2], sw[-1]     # a=مبدأ، b=مقصد (تازه‌ترین)
+    if a[2] == b[2]:
+        return None            # هم‌نوع نباید باشد (sw پاک‌سازی شده)، محافظه‌کاری
+    if a[2] == "L" and b[2] == "H":
+        return (a[1], b[1], 1, a[0], b[0])       # پایِ صعودی L→H
+    if a[2] == "H" and b[2] == "L":
+        return (b[1], a[1], -1, a[0], b[0])      # پایِ نزولی H→L
+    return None
+
+
+def premium_discount(bars, sw, span=8):
+    """PD array انکورشده روی **پایِ ایمپالسِ واقعی** (نه رِنجِ دلخواه).
+
+    اصلاحِ C1 + C7: پیش‌تر رِنج از اکسترمم‌های ۸ سوینگِ آخر ساخته و سپس برای شاملِ
+    قیمتِ فعلی «پهن» می‌شد → اکولیبریوم جابه‌جا و پریمیوم/دیسکانت غلط برچسب می‌خورد،
+    و OTE روی رِنجِ ساختگی می‌افتاد (ریشه‌ی باختِ ورودهای OTE). حالا فیب روی پایِ
+    ایمپالسِ ساختاری (مبدأ→مقصدِ آخرین حرکتِ جهت‌دار) لنگر می‌شود و رِنج **پهن
+    نمی‌شود** — اگر قیمت از پا بیرون زده باشد، خودِ همان بیرون‌زدگی سیگنالِ معناداری
+    است (mitigation/continuation) و نباید با پهن‌کردنِ رِنج پنهان شود.
+
+    خروجی، برای سازگاری با confluence.ote_zone و فیکس C7، زون‌های OTE را هم‌راستا
+    با همان قراردادِ آن‌جا برمی‌گرداند (خرید=دیسکانت پایینِ رِنج، فروش=پریمیومِ بالا).
     """
     highs=[s for s in sw if s[2]=="H"]; lows=[s for s in sw if s[2]=="L"]
     if not highs or not lows: return None
-    recent=sw[-span:] if len(sw)>=span else sw
-    rh=[s[1] for s in recent if s[2]=="H"]; rl=[s[1] for s in recent if s[2]=="L"]
-    if not rh or not rl:
-        rh=[highs[-1][1]]; rl=[lows[-1][1]]
-    top=max(rh); bot=min(rl)
     price=bars[-1]["c"]
-    # if price has run outside the swing range, widen to include it so pct stays sane
-    top=max(top, price); bot=min(bot, price)
+
+    leg=_impulse_leg(sw)
+    if leg is not None:
+        bot, top, leg_dir, o_idx, t_idx = leg
+    else:
+        # پس‌افتِ محافظه‌کارانه: اکسترمم‌های span سوینگِ آخر (بدونِ پهن‌کردن)
+        recent=sw[-span:] if len(sw)>=span else sw
+        rh=[s[1] for s in recent if s[2]=="H"]; rl=[s[1] for s in recent if s[2]=="L"]
+        if not rh or not rl:
+            rh=[highs[-1][1]]; rl=[lows[-1][1]]
+        top=max(rh); bot=min(rl); leg_dir=0
+
+    if top<=bot:
+        return None
     eq=(top+bot)/2
-    zone="premium" if price>eq else "discount"
     rng=top-bot
+    # زون بر اساسِ محلِ قیمت در پا؛ price_pct می‌تواند <0 یا >100 شود اگر قیمت از پا
+    # بیرون زده باشد — این عمداً حفظ می‌شود تا «قیمت پا را نقض/ادامه داده» را نشان دهد.
+    zone="premium" if price>eq else "discount"
     pct=(price-bot)/rng*100 if rng>0 else 50
-    # OTE (optimal trade entry) zone: 0.62-0.79 retrace of the range.
-    # For a long the discount OTE sits low; for a short the premium OTE sits high.
-    ote_long=(round(bot+rng*0.62,5), round(bot+rng*0.79,5))   # buy zone
-    ote_short=(round(top-rng*0.79,5), round(top-rng*0.62,5))  # sell zone
+    # OTE = ۰.۶۲–۰.۷۹ رتریسمنتِ پا (منطبق با confluence.ote_zone، فیکس C7):
+    #   خرید → دیسکانتِ پایینِ رِنج: bot + (۰.۲۱..۰.۳۸)×rng
+    #   فروش → پریمیومِ بالای رِنج: top − (۰.۳۸..۰.۲۱)×rng
+    ote_long=(round(bot+rng*0.21,5), round(bot+rng*0.38,5))   # buy (discount) zone
+    ote_short=(round(top-rng*0.38,5), round(top-rng*0.21,5))  # sell (premium) zone
     return {"range_top":round(top,5),"range_bottom":round(bot,5),
             "equilibrium":round(eq,5),"zone":zone,"price_pct":round(pct,1),
+            "leg_dir":leg_dir,
             "ote_long_buy_zone":ote_long,"ote_short_sell_zone":ote_short}
 
 def sweeps(bars, sw, lookback=12):
