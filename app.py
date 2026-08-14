@@ -472,15 +472,16 @@ tr.on td{background:rgba(34,197,94,.05)}
   <div class="card">
     <div class="searchrow">
       <input id="sym" class="inp" placeholder="نامِ نماد را بنویس… مثل XAUUSD یا BTCUSDT یا EURUSD"
+             title="نامِ نماد را این‌جا بنویس (XAUUSD, EURUSD, BTCUSDT …). با انتخاب/تایپِ نماد، سبک و دکمه‌ی تحلیل چشمک می‌زنند؛ هیچ‌چیز خودکار اجرا نمی‌شود."
              list="syms" autocomplete="off" autofocus>
       <datalist id="syms"></datalist>
       <div class="styles" id="styles">
-        <button data-k="scalp">اسکالپ</button>
-        <button data-k="day" class="active">روزانه</button>
-        <button data-k="swing">سوینگ</button>
+        <button data-k="scalp" title="سبکِ اسکالپ — تایم‌فریمِ پایین. فقط سبک را عوض می‌کند؛ تحلیل را خودکار اجرا نمی‌کند.">اسکالپ</button>
+        <button data-k="day" class="active" title="سبکِ روزانه (پیش‌فرض). فقط سبک را عوض می‌کند؛ تحلیل را خودکار اجرا نمی‌کند.">روزانه</button>
+        <button data-k="swing" title="سبکِ سوینگ — تایم‌فریمِ بالا. فقط سبک را عوض می‌کند؛ تحلیل را خودکار اجرا نمی‌کند.">سوینگ</button>
       </div>
-      <button id="go" class="go">تحلیل کن</button>
-      <button id="bt" class="go" style="background:#334155">بک‌تست</button>
+      <button id="go" class="go" title="تحلیلِ زنده‌ی همین لحظه: امتیاز، تایم‌فریمِ ورود، پلنِ عددی و درجه را می‌دهد.">تحلیل کن</button>
+      <button id="bt" class="go" style="background:#334155" title="بک‌تستِ walk-forward روی داده‌ی تاریخی؛ پنلِ تنظیماتِ بازه/تایم‌فریم/جهت را باز می‌کند.">بک‌تست</button>
     </div>
     <div class="chips" id="chips"></div>
     <div class="stephint" id="stepHint">
@@ -492,9 +493,12 @@ tr.on td{background:rgba(34,197,94,.05)}
     <div id="btPanel" class="btpanel">
       <div class="btrow">
         <span class="btlbl">بازه‌ی بک‌تست (تاریخِ روی چارت):</span>
-        <input id="btFrom" class="btinp" type="text" placeholder="از — مثل 2026-06-01" autocomplete="off">
-        <input id="btTo" class="btinp" type="text" placeholder="تا — مثل 2026-08-13" autocomplete="off">
-        <button id="btSuggest" class="btsug" type="button">بازه‌ی پیشنهادی ↧</button>
+        <input id="btFrom" class="btinp" type="text" placeholder="از — مثل 2026-06-01" autocomplete="off"
+               title="تاریخِ شروعِ بازه‌ی بک‌تست (روی چارت). خالی = خودکار (کندل‌های اخیر). قالب: 2026-06-01">
+        <input id="btTo" class="btinp" type="text" placeholder="تا — مثل 2026-08-13" autocomplete="off"
+               title="تاریخِ پایانِ بازه‌ی بک‌تست (روی چارت). خالی = خودکار (کندل‌های اخیر). قالب: 2026-08-13">
+        <button id="btSuggest" class="btsug" type="button"
+                title="بر اساسِ عمقِ پیمایش و دیتای در دسترس، حداقلِ تاریخِ معتبر را در کادرها پیشنهاد می‌دهد. اول نماد و سبک را انتخاب کن.">بازه‌ی پیشنهادی ↧</button>
       </div>
       <div class="btsughint" id="btSugHint">
         برای بازه، نماد و سبک را انتخاب کن، سپس «بازه‌ی پیشنهادی» را بزن تا حداقلِ تاریخِ معتبر
@@ -502,18 +506,20 @@ tr.on td{background:rgba(34,197,94,.05)}
       </div>
       <div class="btrow">
         <span class="btlbl">تایم‌فریمِ دلخواه (فرکتالی):</span>
-        <input id="btTfs" class="btinp wide" type="text" placeholder="مثلاً 4h,1h,15m,5m — خالی = طبقِ سبک">
+        <input id="btTfs" class="btinp wide" type="text" placeholder="مثلاً 4h,1h,15m,5m — خالی = طبقِ سبک"
+               title="تایم‌فریم‌های دلخواهِ فرکتالی، با کاما جدا: «4h,1h,15m,5m». اولی = بایاسِ بالا، آخری = ورود. بر سبک اولویت دارد؛ خالی = طبقِ سبک.">
         <span class="bthint">اولی = بایاسِ بالا، آخری = ورود</span>
       </div>
       <div class="btrow">
         <span class="btlbl">جهتِ مجاز:</span>
         <div class="sideseg" id="btSide">
-          <button data-s="both" class="active">هر دو</button>
-          <button data-s="long">فقط خرید</button>
-          <button data-s="short">فقط فروش</button>
+          <button data-s="both" class="active" title="هر دو جهتِ خرید و فروش را بک‌تست کن (پیش‌فرض).">هر دو</button>
+          <button data-s="long" title="فقط سیگنال‌های خرید (long) را بک‌تست کن.">فقط خرید</button>
+          <button data-s="short" title="فقط سیگنال‌های فروش (short) را بک‌تست کن.">فقط فروش</button>
         </div>
         <span class="btlbl" style="margin-inline-start:14px">عمقِ پیمایش:</span>
-        <input id="btWalk" class="btinp narrow" type="number" min="100" max="8000" step="100" value="2000">
+        <input id="btWalk" class="btinp narrow" type="number" min="100" max="8000" step="100" value="2000"
+               title="عمقِ پیمایشِ walk-forward = تعدادِ کندلِ ورودی که ماشین روی آن قدم‌به‌قدم جلو می‌رود. برای نمونه‌ی آماریِ معتبر ≥ ۲۰۰۰ توصیه می‌شود.">
         <span class="btlbl" style="font-size:11px;color:var(--muted)">(برای نمونه‌ی معتبر ≥ ۲۰۰۰ توصیه می‌شود)</span>
       </div>
     </div>
@@ -539,8 +545,9 @@ tr.on td{background:rgba(34,197,94,.05)}
     <h2>🖼️ اسکرین‌شاتِ چارت <span class="jmsg">(آپلود برای بایگانی و مرور)</span></h2>
     <div class="uprow">
       <input type="file" id="shotFile" accept="image/png,image/jpeg,image/webp,image/gif" style="display:none">
-      <button class="upbtn" id="shotPick">📤 انتخابِ تصویر</button>
-      <input class="upnote" id="shotNote" placeholder="یادداشت (اختیاری) — مثلاً «سوئیپِ لو + چاک روی ۱h»">
+      <button class="upbtn" id="shotPick" title="یک تصویرِ چارت را از دستگاهت انتخاب کن (PNG/JPG/WebP/GIF) تا برای بایگانی و مرور آپلود شود.">📤 انتخابِ تصویر</button>
+      <input class="upnote" id="shotNote" placeholder="یادداشت (اختیاری) — مثلاً «سوئیپِ لو + چاک روی ۱h»"
+             title="یادداشتِ اختیاری روی این اسکرین‌شات؛ کنارِ تصویر ذخیره و نمایش داده می‌شود.">
       <span id="shotMsg" class="jmsg"></span>
     </div>
     <div class="shotgrid" id="shotGrid"></div>
@@ -818,7 +825,7 @@ function render(d){
         <span>محدوده‌ی موفقِ ورود: <b>${fmt(o.low)} – ${fmt(o.high)}</b></span>
         <span>قیمتِ فعلی: <b>${fmt(d.last_price)}</b> (فیبِ ${o.fib_pct}٪)</span>
       </div>
-      <button class="alarm-btn" id="alarmBtn">🔔 آلارم روی این ناحیه بگذار</button>
+      <button class="alarm-btn" id="alarmBtn" title="روی این ناحیه‌ی OTE آلارم بگذار؛ هر ۹۰ ثانیه بررسی می‌شود و وقتی قیمت واردِ ناحیه شد خبر می‌دهد.">🔔 آلارم روی این ناحیه بگذار</button>
       <span id="alarmMsg" class="jmsg"></span>
     </div>`;
   }
@@ -862,7 +869,7 @@ function render(d){
     ${upcoming}
     <div class="verdict">${d.verdict||""}</div>
     <div class="jrnrow">
-      <button id="jbtn" class="jbtn" ${d.plan?"":"disabled"}>💾 ثبت در ژورنال</button>
+      <button id="jbtn" class="jbtn" ${d.plan?"":"disabled"} title="این ستاپ را با پلنِ عددی‌اش در ژورنالِ معاملات ثبت کن. تا وقتی پلنِ معتبری نباشد غیرفعال است.">💾 ثبت در ژورنال</button>
       <span id="jmsg" class="jmsg"></span>
     </div>
   </div>`;
@@ -998,7 +1005,7 @@ async function loadShots(){
       return `<div class="shot">
         <img src="${src}" data-full="${src}" alt="chart">
         <div class="meta">${sym}${note}<br>${s.created||""}
-          <br><button class="sdel" data-id="${s.id}">حذف</button></div>
+          <br><button class="sdel" data-id="${s.id}" title="این اسکرین‌شات را برای همیشه حذف کن.">حذف</button></div>
       </div>`;
     }).join("");
     grid.querySelectorAll("img").forEach(im=>{
@@ -1033,7 +1040,7 @@ async function loadAlarms(){
         <span class="arng">${dirFa} · OTE ${fmt(a.low)}–${fmt(a.high)}</span>
         ${px}
         <span class="astat">${pill}</span>
-        <button class="adel" data-id="${a.id}">حذف</button>
+        <button class="adel" data-id="${a.id}" title="این آلارم را حذف کن؛ دیگر بررسی نمی‌شود.">حذف</button>
         ${reason}
       </div>`;
     }).join("");
