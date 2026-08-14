@@ -465,6 +465,15 @@ def liquidity(bars, sw, tol=0.0007, tf=None):
             buyside.add(lvl)
         elif s[2] == "L" and lvl < price:
             sellside.add(lvl)
+    # C24: الگوهای لیکوئیدیتیِ کلاسیک (double top/bottom, V-shape) هم استخرِ استاپ‌اند
+    # و هدفِ باکیفیت‌تری از سوینگِ خام‌اند (چون معامله‌گرها دقیقاً آن‌جا استاپ می‌گذارند).
+    pat = patterns(bars, sw)
+    for p in pat:
+        lvl = p["level"]
+        if p["side"] == "buyside" and lvl > price:
+            buyside.add(lvl)
+        elif p["side"] == "sellside" and lvl < price:
+            sellside.add(lvl)
     # C19: نزدیک‌ترین‌ها را نگه دار، نه دورترین‌ها. هدفِ اولِ ICT = نزدیک‌ترین
     # لیکوئیدیتیِ مقابل، نه انتهای رِنج. بای‌ساید بالای قیمت است پس نزدیک‌ترین =
     # کوچک‌ترین‌ها ([:4])؛ سل‌ساید زیرِ قیمت پس نزدیک‌ترین = بزرگ‌ترین‌ها ([-4:]).
@@ -538,6 +547,48 @@ def premium_discount(bars, sw, span=8):
             "equilibrium":round(eq,5),"zone":zone,"price_pct":round(pct,1),
             "leg_dir":leg_dir,
             "ote_long_buy_zone":ote_long,"ote_short_sell_zone":ote_short}
+
+def patterns(bars, sw, tol=0.0015):
+    """C24: الگوهای لیکوئیدیتیِ کلاسیک که یک ترِیدرِ price-action می‌بیند و
+    موتورِ equal-high/low به‌تنهایی نمی‌گیرد:
+
+      • double_top / double_bottom: دو سقف (یا کف) تقریباً هم‌سطح (اختلاف < tol).
+        استاپِ معامله‌گرها دقیقاً بالای/زیرِ آن انباشته می‌شود → استخرِ لیکوئیدیتی.
+      • v_top / v_bottom: چرخشِ تیز (سوینگِ H بین دو L پایین‌تر، یا برعکس) بدونِ
+        فازِ توزیع — قله/کفِ V که اغلب بعداً دوباره تست/سوئیپ می‌شود.
+
+    خروجی: لیستِ dict {kind, level، side ('buyside'|'sellside'), idx}. side یعنی
+    این سطح کدام سمت لیکوئیدیتی نگه می‌دارد (double_top→buyside بالای سقف و ...).
+    """
+    out = []
+    highs = [s for s in sw if s[2] == "H"]
+    lows  = [s for s in sw if s[2] == "L"]
+    # --- double top: دو سوینگ‌های H متوالی هم‌سطح ---
+    for i in range(1, len(highs)):
+        a, b = highs[i-1], highs[i]
+        if a[1] > 0 and abs(a[1]-b[1])/a[1] < tol:
+            out.append({"kind": "double_top", "level": round((a[1]+b[1])/2, 5),
+                        "side": "buyside", "idx": b[0]})
+    for i in range(1, len(lows)):
+        a, b = lows[i-1], lows[i]
+        if a[1] > 0 and abs(a[1]-b[1])/a[1] < tol:
+            out.append({"kind": "double_bottom", "level": round((a[1]+b[1])/2, 5),
+                        "side": "sellside", "idx": b[0]})
+    # --- V-shape: سوینگِ H که دو کفِ کناری‌اش هر دو پایین‌ترند (چرخشِ تیز) ---
+    for k in range(1, len(sw)-1):
+        prev, cur, nxt = sw[k-1], sw[k], sw[k+1]
+        if cur[2] == "H" and prev[2] == "L" and nxt[2] == "L":
+            # ارتفاعِ چرخش نسبت به کفِ کناری قابلِ توجه باشد
+            depth = cur[1] - max(prev[1], nxt[1])
+            if depth > 0 and cur[1] > 0 and depth/cur[1] > tol*3:
+                out.append({"kind": "v_top", "level": round(cur[1], 5),
+                            "side": "buyside", "idx": cur[0]})
+        if cur[2] == "L" and prev[2] == "H" and nxt[2] == "H":
+            depth = min(prev[1], nxt[1]) - cur[1]
+            if depth > 0 and cur[1] > 0 and depth/cur[1] > tol*3:
+                out.append({"kind": "v_bottom", "level": round(cur[1], 5),
+                            "side": "sellside", "idx": cur[0]})
+    return out[-8:]
 
 def sweeps(bars, sw, lookback=12):
     """Liquidity sweeps / stop-runs on recent bars.
@@ -677,6 +728,7 @@ def analyze_bars(bars, tf, disp=None, src="backtest", sym=None):
         "premium_discount":premium_discount(bars,sw),
         "liquidity":liquidity(bars,sw,tf=tf),
         "liquidity_sweeps":swp,
+        "liquidity_patterns":patterns(bars,sw),
         "displacement":displacement(bars),
         "FVG_unfilled":fvgs(bars),
         "order_blocks":order_blocks(bars),
