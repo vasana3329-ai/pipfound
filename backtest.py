@@ -56,52 +56,92 @@ def _build_d(series, tfs, t_now, warm=40):
 
 
 def _simulate(entry_bars, start_idx, direction, entry, sl, tp,
-              entry_type, fill_window=24, max_hold=400):
+              entry_type, fill_window=24, max_hold=400, confirm_window=3):
     """
     شبیه‌سازیِ نتیجه‌ی معامله روی کندل‌های تایم‌فریمِ ورود از start_idx به بعد.
-    برمی‌گرداند: (result, exit_price, r, bars_held, filled_idx, fill_price)  یا None اگر پر نشد.
+    برمی‌گرداند: (result, exit_price, r, bars_held, filled_idx, fill_price, sl_used)  یا None اگر پر نشد.
     result ∈ {"win","loss"}.
 
-    فیکس C8: ورودِ «market» دیگر کورکورانه روی planِ poi_mid پر نمی‌شود (که می‌تواند
-    دور از قیمتِ واقعیِ کندلِ سیگنال باشد و نتیجه را متورم کند). حالا روی **کلوزِ
-    کندلِ سیگنال** پر می‌شود — همان قیمتی که در زمانِ واقعی در دسترس است. ریسک/هدف/
-    وین‌لاس نسبت به همین قیمتِ واقعی سنجیده می‌شود، نه قیمتِ آرمانی.
-    ورودِ «limit_ote» همچنان منتظرِ لمسِ قیمتِ لیمیت طیِ fill_window می‌ماند.
+    فیکس C8: ورودِ «market» روی **کلوزِ کندلِ سیگنال** پر می‌شود — همان قیمتی که در
+    زمانِ واقعی در دسترس است. ریسک/هدف نسبت به همین قیمتِ واقعی سنجیده می‌شود.
+
+    فیکس C17: ورودِ «limit_ote» دیگر کورکورانه با اولین لمسِ گلدن‌پاکت پر نمی‌شود.
+    یک ترِیدرِ اسمارت‌مانی روی لمسِ صرف وارد نمی‌شود؛ منتظرِ **تأییدِ تایمِ پایین‌تر**
+    می‌ماند: پس از لمسِ لیمیت، باید طیِ confirm_window کندل یک **کندلِ دیسپلیسمنتِ
+    رجکشن** (بسته‌شدن در جهتِ معامله با بدنه‌ی ≥ میانگین) ظاهر شود. ورود روی کلوزِ
+    همان کندلِ تأیید انجام می‌شود و **استاپ پشتِ فتیله‌ی سوئیپِ واقعی** (کف/سقفِ
+    ثبت‌شده در فازِ پولبک) + بافر می‌نشیند — نه پشتِ سوینگِ ازپیش‌محاسبه‌شده که مدام
+    خورده می‌شد (ریشه‌ی C17). اگر تأیید نیاید، معامله‌ای رخ نمی‌دهد.
     """
     n = len(entry_bars)
     filled_idx = None
     fill_price = entry
+    sl_used = sl
     if entry_type == "market":
         filled_idx = start_idx
         fill_price = entry_bars[start_idx]["c"]   # فیکس C8: کلوزِ واقعیِ کندلِ سیگنال
     else:
-        # limit_ote: منتظرِ لمسِ قیمتِ ورود طیِ fill_window کندلِ بعد
+        # limit_ote: ابتدا لمسِ قیمتِ لیمیت طیِ fill_window کندلِ بعد
+        touch_idx = None
         for k in range(start_idx + 1, min(start_idx + 1 + fill_window, n)):
             b = entry_bars[k]
             if b["l"] <= entry <= b["h"]:
-                filled_idx = k
-                fill_price = entry   # لیمیت دقیقاً روی قیمتِ سفارش پر می‌شود
+                touch_idx = k
                 break
-        if filled_idx is None:
-            return None  # لیمیت پر نشد → معامله‌ای رخ نداد
+        if touch_idx is None:
+            return None  # لیمیت اصلاً لمس نشد → معامله‌ای رخ نداد
 
-    risk = abs(fill_price - sl)
+        # آستانه‌ی دیسپلیسمنت = میانگینِ بدنه‌ی ۲۰ کندلِ اخیر (فیکس C17)
+        lo = max(0, touch_idx - 20)
+        seg = entry_bars[lo:touch_idx + 1]
+        avg_body = sum(abs(x["c"] - x["o"]) for x in seg) / max(1, len(seg))
+
+        # فازِ تأیید: دنبالِ کندلِ رجکشنِ دیسپلیسمنت + ردگیریِ فتیله‌ی سوئیپ
+        sweep_ext = entry_bars[touch_idx]["l"] if direction == 1 else entry_bars[touch_idx]["h"]
+        confirm_idx = None
+        for k in range(touch_idx, min(touch_idx + 1 + confirm_window, n)):
+            b = entry_bars[k]
+            if direction == 1:
+                sweep_ext = min(sweep_ext, b["l"])
+            else:
+                sweep_ext = max(sweep_ext, b["h"])
+            body = abs(b["c"] - b["o"])
+            closed_dir = (b["c"] > b["o"]) if direction == 1 else (b["c"] < b["o"])
+            if k > touch_idx and closed_dir and body >= avg_body:
+                confirm_idx = k
+                break
+        if confirm_idx is None:
+            return None  # تأییدِ LTF نیامد → صبر، نه ورود
+
+        filled_idx = confirm_idx
+        fill_price = entry_bars[confirm_idx]["c"]   # ورود روی کلوزِ کندلِ تأیید
+        # فیکس C17: استاپ پشتِ فتیله‌ی سوئیپِ واقعیِ فازِ پولبک + بافرِ کوچک
+        buf = abs(fill_price) * 0.0003
+        dyn_sl = (sweep_ext - buf) if direction == 1 else (sweep_ext + buf)
+        # فقط اگر استاپِ داینامیک سمتِ درست و با فاصله‌ی معنادار باشد از آن استفاده کن؛
+        # وگرنه به استاپِ پلنِ ساختاری برگرد (نگهبان در برابرِ ریسکِ صفر/معکوس).
+        min_gap = abs(fill_price) * 0.0005
+        if ((direction == 1 and dyn_sl < fill_price - min_gap) or
+                (direction == -1 and dyn_sl > fill_price + min_gap)):
+            sl_used = round(dyn_sl, 5)
+
+    risk = abs(fill_price - sl_used)
     if risk <= 0:
         return None
 
     # از کندلِ بعدِ پرشدن، حرکت را دنبال کن
     for k in range(filled_idx + 1, min(filled_idx + 1 + max_hold, n)):
         b = entry_bars[k]
-        hit_sl = (b["l"] <= sl) if direction == 1 else (b["h"] >= sl)
+        hit_sl = (b["l"] <= sl_used) if direction == 1 else (b["h"] >= sl_used)
         hit_tp = (b["h"] >= tp) if direction == 1 else (b["l"] <= tp)
         if hit_sl and hit_tp:
             # هر دو در یک کندل → محافظه‌کارانه: SL اول
-            return ("loss", sl, -1.0, k - filled_idx, filled_idx, fill_price)
+            return ("loss", sl_used, -1.0, k - filled_idx, filled_idx, fill_price, sl_used)
         if hit_sl:
-            return ("loss", sl, -1.0, k - filled_idx, filled_idx, fill_price)
+            return ("loss", sl_used, -1.0, k - filled_idx, filled_idx, fill_price, sl_used)
         if hit_tp:
             r = round(abs(tp - fill_price) / risk, 2)
-            return ("win", tp, r, k - filled_idx, filled_idx, fill_price)
+            return ("win", tp, r, k - filled_idx, filled_idx, fill_price, sl_used)
     return None  # تا انتهای داده نه TP نه SL — معامله‌ی ناتمام، حساب نمی‌شود
 
 
@@ -291,7 +331,7 @@ def backtest(symbol, style="day", grades=("A+", "A", "B"),
                             plan.get("entry_type", "market"),
                             fill_window=fill_window, max_hold=max_hold)
             if sim is not None:
-                result, exitp, rr_real, held, filled_idx, fill_price = sim
+                result, exitp, rr_real, held, filled_idx, fill_price, sl_used = sim
                 t_sig = datetime.datetime.fromtimestamp(
                     t_now, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
                 trades.append({
@@ -300,7 +340,7 @@ def backtest(symbol, style="day", grades=("A+", "A", "B"),
                     "dir": plan["direction"],
                     "entry_type": plan.get("entry_type"),
                     "entry": plan["entry"], "fill": round(fill_price, 5),
-                    "sl": plan["sl"], "tp": plan["tp"],
+                    "sl": round(sl_used, 5), "tp": plan["tp"],
                     "planned_rr": plan["rr"],
                     "result": result,
                     "r": rr_real,
