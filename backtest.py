@@ -162,9 +162,21 @@ def _simulate(entry_bars, start_idx, direction, entry, sl, tp,
     remaining = 1.0           # کسرِ بازِ پوزیشن
     stop_now = sl_used        # استاپِ فعالِ مابقی (بعد از TP1 → BE=fill_price)
     tp1_done = False
+    # ── ابزارِ تشخیصی (فقط اندازه‌گیری؛ منطقِ خروج را عوض نمی‌کند) ──────────
+    # MFE/MAE در واحدِ R: بیشترین حرکتِ مساعد/نامساعد در کلِ پنجره‌ی نگه‌داری.
+    # با این می‌فهمیم هدفِ دومِ واقع‌گرایانه کجاست و آیا رانر اصلاً شانسِ رسیدن دارد.
+    mfe_R = 0.0
+    mae_R = 0.0
+    def _diag():
+        return {"mfe_R": round(mfe_R, 2), "mae_R": round(mae_R, 2)}
 
     for k in range(filled_idx + 1, min(filled_idx + 1 + max_hold, n)):
         b = entry_bars[k]
+        # به‌روزرسانیِ MFE/MAE پیش از هر تصمیمِ خروج
+        fav = (b["h"] - fill_price) if direction == 1 else (fill_price - b["l"])
+        adv = (fill_price - b["l"]) if direction == 1 else (b["h"] - fill_price)
+        mfe_R = max(mfe_R, fav / risk)
+        mae_R = max(mae_R, adv / risk)
         hit_stop = (b["l"] <= stop_now) if direction == 1 else (b["h"] >= stop_now)
         hit_tp1 = (not tp1_done) and (
             (b["h"] >= tp1) if direction == 1 else (b["l"] <= tp1))
@@ -176,11 +188,11 @@ def _simulate(entry_bars, start_idx, direction, entry, sl, tp,
                 # کلِ پوزیشن با -۱R خورد
                 total = round(-1.0, 2)
                 res = "loss"
-                return (res, stop_now, total, k - filled_idx, filled_idx, fill_price, sl_used)
+                return (res, stop_now, total, k - filled_idx, filled_idx, fill_price, sl_used, _diag())
             if hit_stop and hit_tp1:
                 # هر دو در یک کندل، پیش از TP1 → محافظه‌کارانه: استاپ اول
                 return ("loss", stop_now, round(-1.0, 2), k - filled_idx,
-                        filled_idx, fill_price, sl_used)
+                        filled_idx, fill_price, sl_used, _diag())
             if hit_tp1:
                 booked_R += tp1_frac * tp1_R      # قفلِ سودِ پله‌ی اول
                 remaining -= tp1_frac
@@ -190,7 +202,7 @@ def _simulate(entry_bars, start_idx, direction, entry, sl, tp,
                 if hit_final:
                     r_final = abs(tp - fill_price) / risk
                     total = round(booked_R + remaining * r_final, 2)
-                    return ("win", tp, total, k - filled_idx, filled_idx, fill_price, sl_used)
+                    return ("win", tp, total, k - filled_idx, filled_idx, fill_price, sl_used, _diag())
                 continue
 
         # پس از TP1: مابقی با استاپِ BE مدیریت می‌شود
@@ -199,15 +211,15 @@ def _simulate(entry_bars, start_idx, direction, entry, sl, tp,
             # محافظه‌کارانه: BE اول (مابقی سربه‌سر بسته)
             total = round(booked_R, 2)
             res = "win" if total > 0 else ("loss" if total < 0 else "be")
-            return (res, stop_now, total, k - filled_idx, filled_idx, fill_price, sl_used)
+            return (res, stop_now, total, k - filled_idx, filled_idx, fill_price, sl_used, _diag())
         if hit_be:
             total = round(booked_R, 2)            # مابقی سربه‌سر → فقط سودِ TP1 می‌ماند
             res = "win" if total > 0 else "be"
-            return (res, stop_now, total, k - filled_idx, filled_idx, fill_price, sl_used)
+            return (res, stop_now, total, k - filled_idx, filled_idx, fill_price, sl_used, _diag())
         if hit_final:
             r_final = abs(tp - fill_price) / risk
             total = round(booked_R + remaining * r_final, 2)
-            return ("win", tp, total, k - filled_idx, filled_idx, fill_price, sl_used)
+            return ("win", tp, total, k - filled_idx, filled_idx, fill_price, sl_used, _diag())
     return None  # تا انتهای داده نه هدف نه استاپ — معامله‌ی ناتمام، حساب نمی‌شود
 
 
@@ -397,7 +409,7 @@ def backtest(symbol, style="day", grades=("A+", "A", "B"),
                             plan.get("entry_type", "market"),
                             fill_window=fill_window, max_hold=max_hold)
             if sim is not None:
-                result, exitp, rr_real, held, filled_idx, fill_price, sl_used = sim
+                result, exitp, rr_real, held, filled_idx, fill_price, sl_used, diag = sim
                 t_sig = datetime.datetime.fromtimestamp(
                     t_now, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
                 trades.append({
@@ -411,6 +423,8 @@ def backtest(symbol, style="day", grades=("A+", "A", "B"),
                     "result": result,
                     "r": rr_real,
                     "bars_held": held,
+                    "mfe_R": diag["mfe_R"],
+                    "mae_R": diag["mae_R"],
                 })
                 # جلو بپر تا انتهای این معامله (بدونِ هم‌پوشانی)
                 i = filled_idx + held + 1
