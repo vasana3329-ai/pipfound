@@ -211,56 +211,99 @@ def _break_displaced(bars, swing_idx, level, up, disp_mult=1.5):
     return (False, None)
 
 
-def structure(bars, sw):
-    """Determine trend + last BOS/CHoCH from alternating swings.
+def _closed_beyond(bars, from_idx, to_idx, level, up):
+    """اولین ایندکسی بینِ from_idx و to_idx که کندل‌اش با **بسته‌شدن** از level عبور
+    کرده (up=True → close>level، up=False → close<level) را برمی‌گرداند؛ وگرنه None.
+    مبنای شکستِ ساختار در SMC = بسته‌شدنِ کندل فراتر از سوینگ، نه صرفِ لمسِ فتیله."""
+    lo = max(0, from_idx)
+    hi = min(to_idx + 1, len(bars))
+    for k in range(lo, hi):
+        c = bars[k]["c"]
+        if (up and c > level) or ((not up) and c < level):
+            return k
+    return None
 
-    خروجی: trend, labeled[-6:], bos, choch, meta — meta شاملِ ایندکسِ کندلِ شکستِ
-    BOS/CHoCH (bos_break_idx/choch_break_idx) برای ترتیب‌سنجیِ sweep→MSS (فیکس C4).
+
+def structure(bars, sw):
+    """بازسازیِ C21 — خواندنِ ساختار با **ماشینِ حالت**، نه رأی‌گیریِ برچسب‌ها.
+
+    فلسفه‌ی درستِ ICT/SMC: ساختار با «توالیِ شکست‌ها» ساخته می‌شود.
+      • BOS  (Break of Structure): شکستِ **هم‌جهت** با روند → ادامه‌ی روند.
+      • CHoCH (Change of Character): نخستین شکستِ **خلافِ** روند (شکستِ سوینگِ
+        محافظت‌شده) → کاندیدِ برگشتِ روند.
+      • MSS  (Market Structure Shift): CHoCH/شکستی که با کندلِ **دیسپلیسمنت**
+        همراه است (انرژیِ نهادیِ واقعی)؛ CHoCHِ بی‌جان MSS نیست.
+    روند فقط با CHoCH برمی‌گردد؛ تا وقتی CHoCH نیامده، روند همان می‌ماند.
+
+    خروجی: trend, labeled[-6:], bos, choch, meta.
+      bos/choch: آخرین رخدادِ هر نوع به‌صورتِ (name, level, swing_idx) — سازگار با
+      analyze_bars و فیکس C4. meta شاملِ break_idxها + mss + جریانِ رخدادها.
     """
-    highs=[s for s in sw if s[2]=="H"]; lows=[s for s in sw if s[2]=="L"]
-    events=[]; trend="range"
-    # classify HH/HL/LH/LL sequence
-    labeled=[]
-    last_h=last_l=None
+    # ---- برچسب‌گذاریِ نمایشیِ HH/HL/LH/LL (برای گزارش، نه تصمیمِ ساختار) ----
+    labeled = []
+    last_h = last_l = None
     for s in sw:
-        if s[2]=="H":
-            lab="HH" if (last_h and s[1]>last_h) else ("LH" if last_h else "H")
-            labeled.append((s[0],s[1],"H",lab)); last_h=s[1]
+        if s[2] == "H":
+            lab = "HH" if (last_h is not None and s[1] > last_h) else ("LH" if last_h is not None else "H")
+            labeled.append((s[0], s[1], "H", lab)); last_h = s[1]
         else:
-            lab="LL" if (last_l and s[1]<last_l) else ("HL" if last_l else "L")
-            labeled.append((s[0],s[1],"L",lab)); last_l=s[1]
-    # trend from last few labels
-    recent=[l[3] for l in labeled[-4:]]
-    ups=sum(1 for r in recent if r in ("HH","HL"))
-    dns=sum(1 for r in recent if r in ("LL","LH"))
-    if ups>dns: trend="up"
-    elif dns>ups: trend="down"
-    # BOS / CHoCH detection on close basis
-    bos=choch=None
-    bos_break_idx=choch_break_idx=None
-    price=bars[-1]["c"]
-    # اصلاحِ باگ: BOS = شکستِ نزدیک‌ترین سوینگ، نه هر سوینگِ کهنه.
-    # فیکس C3: شکست باید با کندلِ دیسپلیسمنت باشد؛ شکستِ بی‌جان = سوئیپ، نه BOS.
-    if highs and price>highs[-1][1]:
-        ok,bi=_break_displaced(bars, highs[-1][0], highs[-1][1], True)
-        if ok:
-            bos=("bullish_BOS",highs[-1][1],highs[-1][0]); bos_break_idx=bi
-    if lows and price<lows[-1][1] and bos is None:
-        ok,bi=_break_displaced(bars, lows[-1][0], lows[-1][1], False)
-        if ok:
-            bos=("bearish_BOS",lows[-1][1],lows[-1][0]); bos_break_idx=bi
-    # CHoCH: تغییرِ کاراکترِ ساختار، شکستِ **نزدیک‌ترین** سوینگِ مخالف با دیسپلیسمنت.
-    if len(labeled)>=3:
-        if trend=="up" and lows and price<lows[-1][1]:
-            ok,bi=_break_displaced(bars, lows[-1][0], lows[-1][1], False)
-            if ok:
-                choch=("bearish_CHoCH",lows[-1][1],lows[-1][0]); choch_break_idx=bi
-        elif trend=="down" and highs and price>highs[-1][1]:
-            ok,bi=_break_displaced(bars, highs[-1][0], highs[-1][1], True)
-            if ok:
-                choch=("bullish_CHoCH",highs[-1][1],highs[-1][0]); choch_break_idx=bi
-    meta={"bos_break_idx":bos_break_idx,"choch_break_idx":choch_break_idx,"n":len(bars)}
+            lab = "LL" if (last_l is not None and s[1] < last_l) else ("HL" if last_l is not None else "L")
+            labeled.append((s[0], s[1], "L", lab)); last_l = s[1]
+
+    # ---- ماشینِ حالت روی سوینگ‌های متناوبِ پاک‌شده ----
+    trend = "range"
+    lh = ll = None          # آخرین پیوتِ سقف/کف که تاکنون دیده شده: (idx, price)
+    events = []             # (kind, level, swing_idx, break_idx, displaced)
+    for s in sw:
+        idx, price, typ = s[0], s[1], s[2]
+        if typ == "H":
+            # شکستِ صعودی = بسته‌شدن بالای سقفِ سوینگِ قبلی در مسیرِ رسیدن به این پیوت
+            if lh is not None and price > lh[1]:
+                bidx = _closed_beyond(bars, lh[0] + 1, idx, lh[1], True)
+                if bidx is not None:
+                    disp, _ = _break_displaced(bars, lh[0], lh[1], True)
+                    if trend == "down":
+                        events.append(("bullish_CHoCH", lh[1], lh[0], bidx, bool(disp)))
+                    else:
+                        events.append(("bullish_BOS", lh[1], lh[0], bidx, bool(disp)))
+                    trend = "up"
+            lh = (idx, price)
+        else:
+            # شکستِ نزولی = بسته‌شدن زیرِ کفِ سوینگِ قبلی
+            if ll is not None and price < ll[1]:
+                bidx = _closed_beyond(bars, ll[0] + 1, idx, ll[1], False)
+                if bidx is not None:
+                    disp, _ = _break_displaced(bars, ll[0], ll[1], False)
+                    if trend == "up":
+                        events.append(("bearish_CHoCH", ll[1], ll[0], bidx, bool(disp)))
+                    else:
+                        events.append(("bearish_BOS", ll[1], ll[0], bidx, bool(disp)))
+                    trend = "down"
+            ll = (idx, price)
+
+    # آخرین BOS و آخرین CHoCH را جدا استخراج کن
+    bos = choch = None
+    bos_break_idx = choch_break_idx = None
+    choch_disp = False
+    for ev in events:
+        kind, level, sidx, bidx, disp = ev
+        if kind.endswith("BOS"):
+            bos = (kind, level, sidx); bos_break_idx = bidx
+        else:  # CHoCH
+            choch = (kind, level, sidx); choch_break_idx = bidx; choch_disp = disp
+    # MSS = همان CHoCHِ فعلی، **فقط اگر** با دیسپلیسمنت رخ داده باشد (تغییرِ کاراکترِ
+    # واقعیِ نهادی). CHoCHِ بی‌جان یا شکستِ کهنه MSS نیست → None. این جلوی چسبیدن به
+    # یک شکستِ باستانیِ دیسپلیسمنت‌دار را می‌گیرد.
+    mss = None
+    if choch is not None and choch_disp:
+        mss = {"type": choch[0].replace("CHoCH", "MSS"),
+               "level": round(choch[1], 5), "swing_idx": choch[2],
+               "break_idx": choch_break_idx}
+
+    meta = {"bos_break_idx": bos_break_idx, "choch_break_idx": choch_break_idx,
+            "mss": mss, "events": events[-6:], "n": len(bars)}
     return trend, labeled[-6:], bos, choch, meta
+
 
 def fvgs(bars, lookback=60):
     """Unfilled fair value gaps (3-candle imbalance).
