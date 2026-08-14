@@ -392,7 +392,19 @@ def liquidity(bars, sw, tol=0.0007, tf=None):
         v = sess.get(key)
         if v is not None:
             (buyside if v > price else sellside).add(v)
-    return {"buyside_eqh":sorted(buyside)[-4:],"sellside_eql":sorted(sellside)[:4],
+    # C19: سوینگ‌های ساختاری به‌عنوانِ لیکوئیدیتیِ میانی — سقفِ سوینگِ بالای قیمت
+    # هدفِ بای‌ساید است (استاپِ خریدارها آن‌جاست) و کفِ سوینگِ زیرِ قیمت هدفِ سل‌ساید.
+    # پیش‌تر فقط equal-highها هدف بودند که نادرند، پس هدف روی range-extremeِ دور می‌افتاد.
+    for s in sw:
+        lvl = round(s[1], 5)
+        if s[2] == "H" and lvl > price:
+            buyside.add(lvl)
+        elif s[2] == "L" and lvl < price:
+            sellside.add(lvl)
+    # C19: نزدیک‌ترین‌ها را نگه دار، نه دورترین‌ها. هدفِ اولِ ICT = نزدیک‌ترین
+    # لیکوئیدیتیِ مقابل، نه انتهای رِنج. بای‌ساید بالای قیمت است پس نزدیک‌ترین =
+    # کوچک‌ترین‌ها ([:4])؛ سل‌ساید زیرِ قیمت پس نزدیک‌ترین = بزرگ‌ترین‌ها ([-4:]).
+    return {"buyside_eqh":sorted(buyside)[:4],"sellside_eql":sorted(sellside)[-4:],
             "range_high":max(b["h"] for b in bars),"range_low":min(b["l"] for b in bars),
             "session":sess}
 
