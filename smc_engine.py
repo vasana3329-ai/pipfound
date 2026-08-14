@@ -310,8 +310,53 @@ def order_blocks(bars, lookback=80):
                 out.append({"type":"bearish","top":top,"bottom":bot,"idx":i})
     return out[-5:]
 
-def liquidity(bars, sw, tol=0.0007):
-    """Equal highs/lows (liquidity pools) + range extremes."""
+def _session_levels(bars, tf):
+    """سطوحِ لیکوئیدیتیِ سشنی/روزانه (فیکس C6): PDH/PDL (سقف/کفِ روزِ قبل) و
+    رِنجِ آسیایی (های/لوِ سشنِ آسیا ۱۹:۰۰–۰۰:۰۰ ET).
+
+    اینها لیکوئیدیتیِ هسته‌ای ICT‌اند که تشخیصِ equal-high/low به‌تنهایی نمی‌بیند.
+    از تایم‌استمپِ کندل‌ها (UTC → ET با آفستِ DST) روز و سشن استخراج می‌شود.
+    فقط روی تایم‌فریم‌های درون‌روزی معنا دارد؛ برای 1d/1w کنار گذاشته می‌شود.
+    خروجی: dict با pdh/pdl/asian_high/asian_low (هرکدام ممکن است None باشد).
+    """
+    if tf in ("1d", "1w") or len(bars) < 5:
+        return {}
+    # گروه‌بندیِ کندل‌ها بر اساسِ روزِ ET
+    def _et(ts):
+        dt = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+        off = 4 if _is_us_dst(dt) else 5
+        return dt - datetime.timedelta(hours=off)
+    days = {}       # date -> [bars]
+    asian = {}      # date -> [bars in 19:00-24:00 ET of that date]
+    for b in bars:
+        et = _et(b["t"])
+        dkey = et.date()
+        days.setdefault(dkey, []).append(b)
+        if 19 <= et.hour < 24:
+            asian.setdefault(dkey, []).append(b)
+    daykeys = sorted(days.keys())
+    out = {}
+    if len(daykeys) >= 2:
+        # روزِ قبل = آخرین روزِ کاملِ پیش از روزِ جاری
+        prev = days[daykeys[-2]]
+        out["pdh"] = round(max(x["h"] for x in prev), 5)
+        out["pdl"] = round(min(x["l"] for x in prev), 5)
+    # رِنجِ آسیاییِ آخرین سشنِ آسیاییِ در دسترس
+    akeys = sorted(asian.keys())
+    if akeys:
+        ab = asian[akeys[-1]]
+        out["asian_high"] = round(max(x["h"] for x in ab), 5)
+        out["asian_low"] = round(min(x["l"] for x in ab), 5)
+    return out
+
+
+def liquidity(bars, sw, tol=0.0007, tf=None):
+    """Equal highs/lows (liquidity pools) + range extremes + session levels.
+
+    فیکس C6: علاوه بر equal-high/low فرکتالی، سطوحِ سشنی هم افزوده می‌شود:
+    PDH/PDL و رِنجِ آسیایی. اینها به فهرستِ اهدافِ بای‌ساید/سل‌ساید تزریق می‌شوند تا
+    پلن‌ساز بتواند به لیکوئیدیتیِ واقعیِ ICT هدف‌گذاری کند، نه فقط سقف/کفِ مساویِ نادر.
+    """
     highs=[s[1] for s in sw if s[2]=="H"][-8:]
     lows=[s[1] for s in sw if s[2]=="L"][-8:]
     eqh=[]; eql=[]
@@ -321,8 +366,21 @@ def liquidity(bars, sw, tol=0.0007):
     for i in range(len(lows)):
         for j in range(i+1,len(lows)):
             if abs(lows[i]-lows[j])/lows[i]<tol: eql.append(round((lows[i]+lows[j])/2,5))
-    return {"buyside_eqh":sorted(set(eqh))[-3:],"sellside_eql":sorted(set(eql))[:3],
-            "range_high":max(b["h"] for b in bars),"range_low":min(b["l"] for b in bars)}
+    sess = _session_levels(bars, tf) if tf else {}
+    price = bars[-1]["c"]
+    # سطوحِ سشنیِ بالای قیمت → بای‌ساید (هدفِ خرید)؛ زیرِ قیمت → سل‌ساید (هدفِ فروش)
+    buyside = set(eqh); sellside = set(eql)
+    for key in ("pdh", "asian_high"):
+        v = sess.get(key)
+        if v is not None:
+            (buyside if v > price else sellside).add(v)
+    for key in ("pdl", "asian_low"):
+        v = sess.get(key)
+        if v is not None:
+            (buyside if v > price else sellside).add(v)
+    return {"buyside_eqh":sorted(buyside)[-4:],"sellside_eql":sorted(sellside)[:4],
+            "range_high":max(b["h"] for b in bars),"range_low":min(b["l"] for b in bars),
+            "session":sess}
 
 def _impulse_leg(sw):
     """آخرین «پایِ ایمپالس» (حرکتِ جهت‌دارِ سازنده‌ی ساختار) از روی سوینگ‌ها.
@@ -527,7 +585,7 @@ def analyze_bars(bars, tf, disp=None, src="backtest", sym=None):
         "mss_meta":meta,
         "sequence_ok":seq_ok,   # فیکس C4: sweep→MSS رعایت شده؟ (True/False/None=نامشخص)
         "premium_discount":premium_discount(bars,sw),
-        "liquidity":liquidity(bars,sw),
+        "liquidity":liquidity(bars,sw,tf=tf),
         "liquidity_sweeps":swp,
         "displacement":displacement(bars),
         "FVG_unfilled":fvgs(bars),

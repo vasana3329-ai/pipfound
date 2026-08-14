@@ -327,28 +327,41 @@ def score(symbol, tfs, d=None):
     if direction != 0 and has_poi and price is not None:
         z = poi_ob or poi_fvg
         poi_mid = (z["top"] + z["bottom"]) / 2
+        # فیکس C11: ورود روی **لبه‌ی پروگزیمال** (لبه‌ای که قیمت اول به آن می‌رسد)
+        # یا گلدن‌پاکتِ ۰.۷۰۵، نه میدِ اوبی. برای خرید، پولبک از بالا می‌آید پس لبه‌ی
+        # پروگزیمال = سقفِ اوبی؛ برای فروش = کفِ اوبی.
+        poi_prox = z["top"] if direction == 1 else z["bottom"]
         liq = d.get(poi_tf, {}).get("liquidity") or d.get(ltf, {}).get("liquidity") or {}
         pd = pd_src or d.get(ltf, {}).get("premium_discount") or {}
+        # گلدن‌پاکتِ ۰.۷۰۵ روی همان پایِ ایمپالسی که PD/OTE از آن ساخته شده (فیکس C11)
+        gp = None
+        _rt = pd.get("range_top"); _rb = pd.get("range_bottom")
+        if _rt and _rb and _rt > _rb:
+            _rng = _rt - _rb
+            gp = round(_rb + _rng * 0.295, 5) if direction == 1 else round(_rt - _rng * 0.295, 5)
         in_ote = bool(ote and ote.get("inside"))
         if in_ote:
-            entry = round(poi_mid, 5); entry_type = "market"
+            # قیمت داخلِ OTE است → ورودِ بازار روی لبه‌ی پروگزیمالِ POI (نزدیک‌ترین به قیمت)
+            entry = round(poi_prox, 5); entry_type = "market"
         elif ote and htf_conf:
-            # اصلاحِ باگِ وین‌ریتِ پایین: لیمیتِ OTE فقط وقتی مجاز است که همین لحظه
-            # قیمت روی POIِ تایم‌فریمِ بالا هم باشد (کانفلوئنسِ HTF). آن‌وقت به‌جای میدِ
-            # عمیقِ ناحیه، لبه‌ی کم‌عمقِ OTE (سمتِ ۰.۶۲، نزدیک‌ترین به قیمت) را ورود بگذار
-            # تا هم شانسِ پرشدن بالا برود، هم درست وسطِ شکستِ ساختار وارد نشویم.
-            entry = round(ote["high"] if direction == 1 else ote["low"], 5)
+            # کانفلوئنسِ HTF هست → لیمیتِ OTE روی گلدن‌پاکتِ ۰.۷۰۵ (وسطِ ناحیه‌ی موفق)،
+            # وگرنه لبه‌ی کم‌عمقِ OTE. گلدن‌پاکت شانسِ پرشدن و کیفیتِ ورود را متعادل می‌کند.
+            if gp is not None:
+                entry = gp
+            else:
+                entry = round(ote["high"] if direction == 1 else ote["low"], 5)
             entry_type = "limit_ote"
         else:
-            # بدونِ کانفلوئنسِ HTF، صبر برای پولبکِ عمیق ارزشِ آماری ندارد (بک‌تست: OTE
-            # تنها ~۱۲–۴۰٪ وین می‌داد در برابرِ ~۸۰٪ ورودِ بازار) → ورودِ بازار روی POI.
-            entry = round(poi_mid, 5); entry_type = "market"
+            # بدونِ کانفلوئنسِ HTF → ورودِ بازار روی لبه‌ی پروگزیمال (نه میدِ عمیق)
+            entry = round(poi_prox, 5); entry_type = "market"
+        # فیکس C10: استاپ پشتِ سطحِ نقضِ ساختاری (کفِ اوبی/سوینگ برای خرید) + بافرِ
+        # کوچکِ اسپرد، نه یک درصدِ ثابت که سطح را جابه‌جا کند. بافر = کسری از خودِ
+        # اندازه‌ی POI (نه درصدِ خامِ قیمت) تا با نوسانِ نماد بخواند.
+        poi_size = abs(z["top"] - z["bottom"])
+        buf = max(poi_size * 0.10, abs(price) * 0.0003)  # بافرِ کوچکِ اسپرد
         if direction == 1:
             struct_low = min(z["bottom"], ote["low"] if ote else z["bottom"])
-            sl = round(struct_low * 0.999, 5)
-            # هدف = نزدیک‌ترین لیکوئیدیتیِ مقابل (بای‌ساید/سقفِ مساوی) بالاتر از ورود،
-            # نه لبه‌ی دورِ کلِ رِنج (که RRِ خیالی ۱:۱۵ می‌سازد). فقط اگر هیچ لیکوئیدیتیِ
-            # میانی نبود، به لبه‌ی رِنج پس‌افت می‌کنیم.
+            sl = round(struct_low - buf, 5)
             cands = [x for x in (liq.get("buyside_eqh") or []) if x and x > entry * 1.001]
             rh = liq.get("range_high") or pd.get("range_top")
             if rh and rh > entry * 1.001:
@@ -356,16 +369,21 @@ def score(symbol, tfs, d=None):
             tp = min(cands) if cands else None
         else:
             struct_high = max(z["top"], ote["high"] if ote else z["top"])
-            sl = round(struct_high * 1.001, 5)
+            sl = round(struct_high + buf, 5)
             cands = [x for x in (liq.get("sellside_eql") or []) if x and x < entry * 0.999]
             rl = liq.get("range_low") or pd.get("range_bottom")
             if rl and rl < entry * 0.999:
                 cands.append(rl)
             tp = max(cands) if cands else None
-        # حداقلِ فاصله‌ی استاپ = ۰.۱۵٪ قیمت تا RRِ خیالی تولید نشود
-        min_stop = abs(price) * 0.0015
-        if abs(entry - sl) < min_stop:
-            sl = round(entry - min_stop, 5) if direction == 1 else round(entry + min_stop, 5)
+        # نگهبانِ استاپِ صفر/معکوس: اگر ورود و استاپ عملاً یکی شدند یا استاپ سمتِ غلط
+        # افتاد، پلن نامعتبر است (به‌جای تولیدِ RRِ خیالی با هل‌دادنِ مصنوعیِ استاپ).
+        bad_stop = (direction == 1 and sl >= entry) or (direction == -1 and sl <= entry)
+        min_gap = abs(price) * 0.0005
+        if bad_stop or abs(entry - sl) < min_gap:
+            rr_ok = False
+            rr_txt = ("استاپِ ساختاریِ معتبر با فاصله‌ی کافی از ورود شکل نگرفت — "
+                      "ورود و سطحِ نقض تقریباً منطبق‌اند. منتظرِ ساختارِ تمیزتر بمان.")
+            tp = None
         if tp:
             valid_tp = (direction == 1 and tp > entry) or (direction == -1 and tp < entry)
             risk = abs(entry - sl)
