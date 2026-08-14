@@ -340,13 +340,18 @@ def score(symbol, tfs, d=None):
             _rng = _rt - _rb
             gp = round(_rb + _rng * 0.295, 5) if direction == 1 else round(_rt - _rng * 0.295, 5)
         in_ote = bool(ote and ote.get("inside"))
-        # منطقِ ورودِ ICT-درست (بازنگری پس از افشای C8):
-        # ورودِ «بازار» فقط وقتی مجاز است که قیمت همین حالا در ناحیه‌ی معتبر باشد
-        # (داخلِ OTE). در غیرِ این‌صورت هرگز قله/کف را «چیس» نمی‌کنیم — به‌جایش پلنِ
-        # «لیمیت در گلدن‌پاکتِ ۰.۷۰۵» می‌گذاریم و منتظرِ پولبک می‌مانیم. این همان
-        # کاری است که یک ترِیدرِ اسمارت‌مانی می‌کند؛ چیسِ بازار در محلِ بد، طبقِ
-        # بک‌تستِ واقع‌گرایانه (کلوزِ کندل) لبه‌ی منفی می‌دهد.
-        if in_ote:
+        # منطقِ ورودِ ICT-درست (بازنگری C8 → سخت‌گیریِ C22):
+        # ورودِ «بازار» فقط وقتی مجاز است که قیمت داخلِ OTE باشد **و** تریگرِ واقعی
+        # هم تأیید شده باشد: توالیِ سوئیپ→ام‌اس‌اس درست + دیسپلیسمنتِ هم‌جهت روی LTF.
+        # افشای C21 نشان داد ۱۸ ورودِ market با وین‌ریتِ ۳۳٪ = چیس در OTE بدونِ تریگر.
+        # یک ترِیدرِ اسمارت‌مانی داخلِ OTE هم تا دیسپلیسمنت/شکستِ ساختارِ تأییدکننده
+        # نبیند، بازار نمی‌زند؛ لیمیت در گلدن‌پاکت می‌گذارد و منتظرِ پولبک می‌ماند.
+        disp_confirms = bool(ltf_disp.get("present")) and (
+            (direction == 1 and ltf_disp.get("direction") == "bullish") or
+            (direction == -1 and ltf_disp.get("direction") == "bearish"))
+        trigger_ok = (seq_ok is not False) and (disp_confirms or bool(fresh_sweep))
+        market_ok = in_ote and trigger_ok
+        if market_ok:
             entry = round(price, 5); entry_type = "market"
         elif gp is not None:
             entry = gp; entry_type = "limit_ote"
