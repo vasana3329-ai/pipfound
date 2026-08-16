@@ -392,18 +392,40 @@ def score(symbol, tfs, d=None):
         if tp:
             valid_tp = (direction == 1 and tp > entry) or (direction == -1 and tp < entry)
             risk = abs(entry - sl)
-            reward = abs(tp - entry)
-            rr = round(reward / risk, 2) if risk > 0 else 0
             if not valid_tp:
                 rr_ok = False
+                plan = None
                 rr_txt = (f"هدفِ نامعتبر ({_d(tp)}) — در جهتِ معامله فراتر از ورود نیست؛ "
                           f"RRِ واقعی وجود ندارد. منتظرِ ساختارِ تازه بمان.")
             else:
-                rr_ok = rr >= 2.0
-                lbl = "ورودِ بازار" if entry_type == "market" else "لیمیت در OTE (منتظرِ پولبک)"
-                rr_txt = f"RR ≈ ۱:{rr} ({lbl}: ورود {_d(entry)} / استاپ {_d(sl)} / هدف {_d(tp)})"
-                plan = {"direction": bias_word[direction], "entry": entry, "sl": sl,
-                        "tp": round(tp, 5), "rr": rr, "entry_type": entry_type}
+                # ── قانونِ کاربر: ستاپ فقط با ریسک‌به‌ریواردِ ۲ تا ۳ ─────────────────
+                # داده‌ی MFE/MAE ثابت کرد هدف‌گیریِ خامِ «نزدیک‌ترین لیکوئیدیتی» اغلب
+                # فاصله‌ی فانتزی می‌سازد (میانه‌ی planned_rr ~۴۸×، فقط ۳/۱۶ معامله به
+                # ≥۲R رسید). پس هدفِ نمایشی روی سقفِ ۳R قفل می‌شود: اگر لیکوئیدیتیِ
+                # واقعی نزدیک‌تر از ۳R بود همان، وگرنه ۳R. سپس کفِ ۱:۲ گیت می‌شود؛
+                # هر ستاپِ زیرِ ۲R اصلاً پلن تولید نمی‌کند (plan=None) تا در اپ دیده نشود.
+                r_to_liq = round(abs(tp - entry) / risk, 2) if risk > 0 else 0
+                cap_tp = entry + direction * risk * 3.0           # سقفِ هدف = ۳R
+                tp_final = (min(tp, cap_tp) if direction == 1 else max(tp, cap_tp))
+                rr = round(abs(tp_final - entry) / risk, 2) if risk > 0 else 0
+                if rr < 2.0:
+                    # نزدیک‌ترین هدفِ لیکوئیدیتیِ معتبر کمتر از ۱:۲ فاصله دارد → بی‌ستاپ
+                    rr_ok = False
+                    plan = None
+                    rr_txt = (f"نزدیک‌ترین هدفِ لیکوئیدیتی فقط ۱:{r_to_liq} فاصله دارد — "
+                              f"کمتر از حداقلِ ۱:۲. ستاپِ معتبر نیست؛ منتظرِ ساختاری با "
+                              f"هدفِ دورتر بمان.")
+                else:
+                    rr_ok = True
+                    lbl = "ورودِ بازار" if entry_type == "market" else "لیمیت در OTE (منتظرِ پولبک)"
+                    capped = (direction == 1 and tp > cap_tp) or (direction == -1 and tp < cap_tp)
+                    extra = (f" · لیکوئیدیتیِ بعدی در ۱:{r_to_liq} (هدفِ کششیِ رانر)"
+                             if capped else "")
+                    rr_txt = (f"RR ≈ ۱:{rr} ({lbl}: ورود {_d(entry)} / استاپ {_d(sl)} / "
+                              f"هدف {_d(tp_final)}){extra}")
+                    plan = {"direction": bias_word[direction], "entry": entry, "sl": sl,
+                            "tp": round(tp_final, 5), "rr": rr, "entry_type": entry_type,
+                            "liq_target": round(tp, 5), "rr_to_liq": r_to_liq}
     row("امکانِ RR ≥ ۱:۲", rr_ok, 1.0, rr_txt)
 
     # --- grade (normalized to % of max, so adding factors won't inflate grades) ---
@@ -420,6 +442,10 @@ def score(symbol, tfs, d=None):
         wrong_zone = True
     ote_failed = bool(ote) and not ote.get("inside", False)
     location_bad = wrong_zone and ote_failed
+    # گیتِ RR (قانونِ کاربر): اگر جهت و POI هست ولی پلنِ معتبرِ ۱:۲ ساخته نشد،
+    # ستاپ نباید به‌عنوانِ «قابلِ اجرا» (A/A+) نمایش داده شود. هر حالتی که به پلن
+    # نرسید (rr_ok=False یا None به‌دلیلِ نبودِ هدفِ لیکوئیدیتی) سقفِ درجه = C.
+    rr_gate_failed = (direction != 0 and has_poi and plan is None and rr_ok is not True)
     if direction == 0:
         grade = "بدونِ معامله"
         verdict = "بایاس نامشخص است؛ منتظرِ ساختارِ واضح بمان."
@@ -430,6 +456,12 @@ def score(symbol, tfs, d=None):
         verdict = (f"ساختار {bias_word[direction]} است اما قیمت در محلِ اشتباه برای {act} است "
                    f"(زونِ غلط + بیرونِ OTE). ورودِ الان چیسِ قیمت است — واچ کن و منتظرِ "
                    f"پولبک به ناحیه‌ی OTE بمان.")
+    elif rr_gate_failed:
+        # ساختار ممکن است خوب باشد اما ریسک‌به‌ریواردِ ۱:۲ در دسترس نیست → غیرقابلِ اجرا
+        grade = "C"
+        verdict = ("ساختار مناسب است اما ستاپ به حداقلِ ریسک‌به‌ریواردِ ۱:۲ نمی‌رسد "
+                   "(نزدیک‌ترین هدفِ لیکوئیدیتی خیلی نزدیک است). طبقِ قانونِ ۱:۲ تا ۱:۳، "
+                   "ورود توصیه نمی‌شود — واچ کن تا ساختاری با هدفِ دورتر شکل بگیرد.")
     elif ratio >= 0.85 and not conflict:
         grade = "A+"; verdict = "ستاپِ درجه‌یکِ هم‌راستا با همه‌ی شرایطِ اسمارت‌مانی — قابلِ اجرا."
     elif ratio >= 0.70 and not conflict:

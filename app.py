@@ -792,7 +792,8 @@ function render(d){
         <div class="pcell rr"><div class="k">ریسک به ریوارد</div><div class="v">۱:${p.rr}</div></div>
       </div>
       <div class="pgrid" style="margin-top:10px">
-        <div class="pcell"><div class="k">هدف (حدِ سود)</div><div class="v">${fmt(p.tp)}</div></div>
+        <div class="pcell"><div class="k">هدف (حدِ سود · ۲ تا ۳R)</div><div class="v">${fmt(p.tp)}</div></div>
+        ${p.liq_target && p.rr_to_liq && p.rr_to_liq>p.rr ? `<div class="pcell"><div class="k">کششِ رانر (لیکوئیدیتیِ بعدی)</div><div class="v">${fmt(p.liq_target)} <span style="color:var(--muted);font-size:12px">۱:${p.rr_to_liq}</span></div></div>` : ""}
       </div>
     </div>`;
   }
