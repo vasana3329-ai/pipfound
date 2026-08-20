@@ -687,6 +687,50 @@ def killzone_now():
     """سازگاریِ عقب‌رو: کیل‌زونِ لحظه‌ی فعلی (= killzone_at(None))."""
     return killzone_at(None)
 
+
+def silver_bullet_window(ts=None):
+    """پنجره‌ی Silver Bullet نیویورک (۰۹:۰۰–۱۱:۰۰ ET) — استخراج‌شده از اندازه‌گیریِ
+    فعالیتِ کیل‌زون: طلا در این پنجره ~۲.۰–۲.۳× و BTC ~۱.۵–۲.۸× بقیه‌ی روز تحرک دارد.
+
+    ICT اصلِ Silver Bullet را پنجره‌ی ۱۰:۰۰–۱۱:۰۰ می‌گیرد؛ ما بر پایه‌ی داده‌ی خودمان
+    به ۰۹:۰۰–۱۱:۰۰ گسترش دادیم چون اوجِ رِنجِ طلا ساعتِ ۰۹ ET است.
+
+    خروجی dict:
+      in_window: آیا این لحظه داخلِ پنجره است؟
+      et_hour, et_minute: ساعت/دقیقه‌ی نیویورک.
+      seconds_to_open: ثانیه تا بازشدنِ بعدیِ پنجره (۰ اگر داخل).
+      seconds_to_close: ثانیه تا بسته‌شدن (None اگر بیرون).
+      open_et/close_et: رشته‌ی نمایشی.
+    """
+    if ts is None:
+        dt_utc = datetime.datetime.now(datetime.timezone.utc)
+    else:
+        dt_utc = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+    offset = 4 if _is_us_dst(dt_utc) else 5
+    et = dt_utc - datetime.timedelta(hours=offset)
+    OPEN_H, CLOSE_H = 9, 11
+    h = et.hour + et.minute / 60
+    in_window = OPEN_H <= h < CLOSE_H
+    # بازشدنِ بعدی (امروز اگر هنوز نرسیده، وگرنه فردا)
+    open_today = et.replace(hour=OPEN_H, minute=0, second=0, microsecond=0)
+    close_today = et.replace(hour=CLOSE_H, minute=0, second=0, microsecond=0)
+    if et < open_today:
+        next_open = open_today
+    elif et >= close_today:
+        next_open = open_today + datetime.timedelta(days=1)
+    else:
+        next_open = open_today  # داخلِ پنجره
+    sec_to_open = 0 if in_window else int((next_open - et).total_seconds())
+    sec_to_close = int((close_today - et).total_seconds()) if in_window else None
+    return {
+        "in_window": in_window,
+        "et_hour": et.hour, "et_minute": et.minute,
+        "seconds_to_open": sec_to_open,
+        "seconds_to_close": sec_to_close,
+        "open_et": "09:00 ET", "close_et": "11:00 ET",
+    }
+
+
 def analyze_bars(bars, tf, disp=None, src="backtest", sym=None):
     """تحلیلِ ساختار روی آرایه‌ی کندلِ ازپیش‌آماده (بدونِ fetch).
     هسته‌ی مشترکِ analyze و بک‌تست — دقیقاً همان منطقِ تصحیح‌شده روی هر برشِ تاریخی."""

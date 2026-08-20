@@ -50,6 +50,9 @@ STYLES = {
     "scalp": {"label": "اسکالپ",   "tfs": ["1h", "30m", "15m", "5m"],  "entry_tf": "5m"},
     "day":   {"label": "روزانه",    "tfs": ["1d", "4h", "1h", "15m"],   "entry_tf": "15m"},
     "swing": {"label": "سوینگ",     "tfs": ["1w", "1d", "4h", "1h"],    "entry_tf": "1h"},
+    # Silver Bullet نیویورک: اسکلپِ ۱ دقیقه‌ای که فقط در پنجره‌ی ۰۹:۰۰–۱۱:۰۰ ET
+    # (اوجِ فعالیتِ اندازه‌گیری‌شده‌ی روز) معنا دارد. استکِ بایاسِ ۱۵m/۵m، ورود ۱m.
+    "sb_ny": {"label": "سیلوربولت نیویورک", "tfs": ["15m", "5m", "1m"], "entry_tf": "1m"},
 }
 
 # نمادهای پیشنهادی برای اتوکامپلیت
@@ -69,6 +72,20 @@ def analyze(symbol, style):
     r["style"] = sty["label"]
     r["style_key"] = style if style in STYLES else "day"
     r["entry_tf"] = sty["entry_tf"]
+    # گیتِ زمانیِ سیلوربولت: در حالتِ sb_ny اگر خارج از پنجره‌ی ۰۹:۰۰–۱۱:۰۰ ET باشیم،
+    # هیچ پلنِ ورودی نباید نمایش داده شود (استراتژی فقط در این پنجره معتبر است).
+    # این گیت جدا از منطقِ نمره است — فقط اجرای زنده را قفلِ زمانی می‌کند.
+    if style == "sb_ny":
+        try:
+            _w = E.silver_bullet_window()
+            if not _w.get("in_window"):
+                r["plan"] = None
+                if r.get("entry_stamp"):
+                    r["entry_stamp"]["stamped"] = False
+                    r["entry_stamp"].setdefault("reasons", []).insert(
+                        0, "خارج از پنجره‌ی ۰۹:۰۰–۱۱:۰۰ ET — سیلوربولت فقط در این پنجره ورود می‌دهد")
+        except Exception:
+            pass
     # macro gate (اختیاری)
     macro = None
     if M is not None:
@@ -96,6 +113,13 @@ def analyze(symbol, style):
         except Exception:
             macro = None
     r["macro"] = macro
+    # پنجره‌ی Silver Bullet نیویورک (۰۹:۰۰–۱۱:۰۰ ET) — برای گیتِ زمانیِ استراتژیِ sb_ny
+    # و نمایشِ تایمرِ آلارمِ ساعتِ ۹ در UI.
+    try:
+        r["sb_window"] = E.silver_bullet_window()
+    except Exception:
+        r["sb_window"] = None
+    r["is_sb_mode"] = (style == "sb_ny")
     return r
 
 
@@ -301,6 +325,23 @@ h1{font-size:22px;margin:0;font-weight:700;letter-spacing:.2px}
   font-size:16px;padding:14px 26px;border-radius:12px;cursor:pointer;transition:.15s}
 .go:hover{filter:brightness(1.08)}
 .go:disabled{opacity:.55;cursor:not-allowed}
+/* دکمه‌ی خاصِ سیلوربولت — رنگِ متمایزِ بنفش/طلایی */
+.sb-btn{background:linear-gradient(135deg,#a855f7,#f59e0b);border:0;color:#0b0f17;font-weight:800;
+  font-size:15px;padding:14px 20px;border-radius:12px;cursor:pointer;transition:.15s;
+  box-shadow:0 0 0 1px rgba(168,85,247,.4),0 4px 18px rgba(168,85,247,.25)}
+.sb-btn:hover{filter:brightness(1.08)}
+.sb-btn.active{outline:2px solid #f59e0b;outline-offset:2px}
+/* کارتِ پنجره‌ی سیلوربولت */
+.sbwin{margin-top:16px;background:linear-gradient(135deg,rgba(168,85,247,.10),rgba(245,158,11,.08));
+  border:1px solid rgba(168,85,247,.4);border-radius:14px;padding:16px}
+.sbwin h3{margin:0 0 10px;font-size:15px;color:#e8eefc}
+.sbwin .sb-state{font-size:15px;font-weight:800;margin-bottom:8px}
+.sbwin .sb-open{color:#22d3a5}
+.sbwin .sb-shut{color:#f59e0b}
+.sbwin .sb-timer{font-variant-numeric:tabular-nums;font-size:22px;font-weight:900;color:#f59e0b}
+.sbwin .sb-steps{margin:12px 0 0;padding:0;list-style:none;font-size:13px;line-height:1.9;color:#c8d2ea}
+.sbwin .sb-steps li{padding-right:20px;position:relative}
+.sbwin .sb-steps li::before{content:"◆";position:absolute;right:0;color:#a855f7;font-size:11px;top:3px}
 .chips{display:flex;gap:7px;flex-wrap:wrap;margin-top:14px}
 /* پنلِ تنظیماتِ بک‌تست */
 .btpanel{margin-top:14px;border-top:1px dashed var(--line);padding-top:14px;display:flex;
@@ -486,6 +527,7 @@ tr.on td{background:rgba(34,197,94,.05)}
       </div>
       <button id="go" class="go" title="تحلیلِ زنده‌ی همین لحظه: امتیاز، تایم‌فریمِ ورود، پلنِ عددی و درجه را می‌دهد.">تحلیل کن</button>
       <button id="bt" class="go" style="background:#334155" title="بک‌تستِ walk-forward روی داده‌ی تاریخی؛ پنلِ تنظیماتِ بازه/تایم‌فریم/جهت را باز می‌کند.">بک‌تست</button>
+      <button id="sbBtn" class="sb-btn" title="استراتژیِ سیلوربولتِ نیویورک روی تایمِ ۱ دقیقه — فقط در پنجره‌ی ۰۹:۰۰ تا ۱۱:۰۰ به‌وقتِ نیویورک معتبر است (اوجِ فعالیتِ روز). با کلیک، سبک روی این استراتژی می‌رود، تحلیلِ ۱m اجرا می‌شود و تایمرِ ساعتِ ۹ نمایش داده می‌شود.">🎯 سیلوربولت نیویورک</button>
     </div>
     <div class="chips" id="chips"></div>
     <div id="btPanel" class="btpanel">
@@ -584,8 +626,46 @@ symIn.addEventListener("input", markReady);
 $("#styles").addEventListener("click",e=>{
   const b=e.target.closest("button");if(!b)return;
   document.querySelectorAll("#styles button").forEach(x=>x.classList.remove("active"));
+  $("#sbBtn").classList.remove("active");
   b.classList.add("active");style=b.dataset.k;
 });
+
+// دکمه‌ی خاصِ سیلوربولت نیویورک — سبک را روی sb_ny می‌گذارد و بلافاصله تحلیل می‌کند
+$("#sbBtn").addEventListener("click",()=>{
+  document.querySelectorAll("#styles button").forEach(x=>x.classList.remove("active"));
+  $("#sbBtn").classList.add("active");
+  style="sb_ny";
+  if(symIn.value.trim()) run(); else symIn.focus();
+});
+
+// تایمرِ زنده‌ی پنجره‌ی سیلوربولت (شمارشِ معکوس تا ۰۹:۰۰ ET یا تا بسته‌شدن)
+let _sbTimer=null;
+function fmtDur(sec){
+  sec=Math.max(0,sec|0);
+  const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;
+  const p=n=>String(n).padStart(2,"0");
+  return (h>0? p(h)+":":"")+p(m)+":"+p(s);
+}
+function startSbTimer(win){
+  if(_sbTimer){clearInterval(_sbTimer);_sbTimer=null;}
+  if(!win) return;
+  let toOpen=win.seconds_to_open|0, toClose=win.in_window?(win.seconds_to_close|0):0;
+  const el=()=>document.getElementById("sbTimer");
+  const stEl=()=>document.getElementById("sbState");
+  const tick=()=>{
+    const t=el(); if(!t){clearInterval(_sbTimer);_sbTimer=null;return;}
+    if(win.in_window){
+      toClose--; if(toClose<0)toClose=0;
+      t.textContent=fmtDur(toClose);
+      const s=stEl(); if(s){s.textContent="🟢 پنجره باز است — تا بسته‌شدن:";s.className="sb-state sb-open";}
+    }else{
+      toOpen--; if(toOpen<0)toOpen=0;
+      t.textContent=fmtDur(toOpen);
+      const s=stEl(); if(s){s.textContent="🟠 پنجره بسته است — تا بازشدنِ ۰۹:۰۰ ET:";s.className="sb-state sb-shut";}
+    }
+  };
+  tick(); _sbTimer=setInterval(tick,1000);
+}
 
 goBtn.onclick=run;
 symIn.addEventListener("keydown",e=>{if(e.key==="Enter")run();});
@@ -851,6 +931,33 @@ function render(d){
 
   const biasStrip = d.bias_by_tf ? Object.entries(d.bias_by_tf).map(([k,v])=>`${k}=${v}`).join(" · ") : "";
 
+  // کارتِ پنجره‌ی سیلوربولت نیویورک — فقط در حالتِ sb_ny نمایش داده می‌شود
+  let sbHtml="";
+  if(d.is_sb_mode){
+    const w=d.sb_window||{};
+    const open=w.in_window;
+    const stateTxt = open ? "🟢 پنجره باز است — تا بسته‌شدن:" : "🟠 پنجره بسته است — تا بازشدنِ ۰۹:۰۰ ET:";
+    const stateCls = open ? "sb-open" : "sb-shut";
+    const nowEt = (w.et_hour!=null) ? `${String(w.et_hour).padStart(2,"0")}:${String(w.et_minute||0).padStart(2,"0")} ET` : "—";
+    const gate = open
+      ? `<div style="color:#22d3a5;font-size:13px;margin-top:6px">✅ الان داخلِ پنجره‌ای — شرایطِ ورودِ زیر را روی چارتِ ۱ دقیقه دنبال کن.</div>`
+      : `<div style="color:#f59e0b;font-size:13px;margin-top:6px">⏳ خارج از پنجره — سیگنالِ ورود فقط بینِ ۰۹:۰۰ تا ۱۱:۰۰ ET معتبر است. تایمرِ بالا تا بازشدن می‌شمارد.</div>`;
+    sbHtml=`<div class="sbwin">
+      <h3>🎯 سیلوربولت نیویورک — استراتژیِ ۱ دقیقه (پنجره‌ی ۰۹:۰۰–۱۱:۰۰ ET)</h3>
+      <div id="sbState" class="sb-state ${stateCls}">${stateTxt}</div>
+      <div class="sb-timer" id="sbTimer">—</div>
+      <div style="color:var(--muted);font-size:12px;margin-top:4px">ساعتِ فعلیِ نیویورک: <b>${nowEt}</b></div>
+      ${gate}
+      <ol class="sb-steps">
+        <li><b>بایاس (قبل از ۰۹:۰۰):</b> جهتِ روزت را از ۱۵m/۵m بگیر؛ فقط هم‌جهت معامله کن. سقف/کفِ سشنِ آسیا و لندن را به‌عنوانِ لیکوئیدیتیِ هدف علامت بزن.</li>
+        <li><b>سوئیپ (جوداس):</b> صبر کن قیمت یک لیکوئیدیتیِ نزدیک را بزند (کفِ ساعتِ قبل برای خرید، سقف برای فروش) — تله‌ی استاپِ خردها.</li>
+        <li><b>ام‌اس‌اس + دیسپلیسمنت:</b> بلافاصله بعدِ سوئیپ، یک کندلِ پرقدرت باید ساختارِ ۱m را خلافِ سوئیپ با <b>کلوز</b> بشکند (نه فتیله).</li>
+        <li><b>فیرولیوگپ:</b> همان کندلِ دیسپلیسمنت یک FVGِ ۳کندلی می‌سازد — ناحیه‌ی ورودِ تو.</li>
+        <li><b>ورود/استاپ/هدف:</b> لیمیت روی لبه‌ی FVG · استاپ پشتِ فتیله‌ی سوئیپ · هدف لیکوئیدیتیِ مقابل (سقف/کفِ آسیا/لندن)، با RR ۱:۲ تا ۱:۳.</li>
+      </ol>
+    </div>`;
+  }
+
   res.innerHTML=`<div class="card">
     <div class="rhead">
       <div class="sym">${d.symbol}</div>
@@ -871,6 +978,7 @@ function render(d){
       <tbody>${rows}</tbody>
     </table>
     ${planHtml}
+    ${sbHtml}
     ${oteHtml}
     <div style="margin-top:14px">${badges}</div>
     ${upcoming}
@@ -885,6 +993,9 @@ function render(d){
   if(jb) jb.onclick = saveJournal;
   const ab = document.getElementById("alarmBtn");
   if(ab) ab.onclick = setOteAlarm;
+  // تایمرِ زنده‌ی سیلوربولت را استارت بزن (اگر در این حالت هستیم)
+  if(d.is_sb_mode && d.sb_window){ startSbTimer(d.sb_window); }
+  else if(_sbTimer){ clearInterval(_sbTimer); _sbTimer=null; }
 }
 
 async function setOteAlarm(){
