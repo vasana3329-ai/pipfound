@@ -425,7 +425,10 @@ def score(symbol, tfs, d=None):
                               f"هدف {_d(tp_final)}){extra}")
                     plan = {"direction": bias_word[direction], "entry": entry, "sl": sl,
                             "tp": round(tp_final, 5), "rr": rr, "entry_type": entry_type,
-                            "liq_target": round(tp, 5), "rr_to_liq": r_to_liq}
+                            "liq_target": round(tp, 5), "rr_to_liq": r_to_liq,
+                            # مرزهای POI (اردربلاک/فیرولیوگپ) که ورود از آن گرفته شد —
+                            # برای سنجشِ «عمقِ نفوذ به زون» (قانونِ ۳۰٪ ویدیوی Smart Risk).
+                            "poi_top": round(z["top"], 5), "poi_bottom": round(z["bottom"], 5)}
     row("امکانِ RR ≥ ۱:۲", rr_ok, 1.0, rr_txt)
 
     # --- grade (normalized to % of max, so adding factors won't inflate grades) ---
@@ -489,7 +492,78 @@ def score(symbol, tfs, d=None):
         "ote": ote,
         "killzone": d.get(ltf, {}).get("killzone"),
         "news_gate": gate_status,
+        "entry_stamp": _entry_stamp(direction, plan, price, ratio, seq_ok,
+                                    ltf_disp, ltf_choch, fresh_sweep, conflict,
+                                    wrong_zone),
     }
+
+
+def _entry_stamp(direction, plan, price, ratio, seq_ok, ltf_disp, ltf_choch,
+                 fresh_sweep, conflict, wrong_zone):
+    """مهرِ تاییدِ ورودِ اختیاری (خواسته‌ی کاربر: نمره > ۷۰٪).
+
+    مدلِ عرضه/تقاضای ویدیوی Smart Risk (استخراج‌شده و بک‌تست‌شده، نه کپیِ ادعای
+    وین‌ریت). مهر فقط وقتی «تایید» می‌خورد که **همه‌ی** شرایطِ مکانیکیِ زیر برقرار
+    باشند — یک مهرِ اختیاری روی ورود، نه تغییرِ درجه:
+
+      ۱) نمره > ۷۰٪ (آستانه‌ی صریحِ کاربر) و بدونِ تضادِ HTF↔MTF و زونِ درست.
+      ۲) پلنِ معتبرِ RR ≥ ۱:۲ ساخته شده.
+      ۳) قانونِ ۳۰٪ ویدیو: قیمت باید حداقل ۳۰٪ داخلِ زونِ POI (اردربلاک/فیرولیوگپ)
+         نفوذ کرده باشد — «اولین لمسِ سطحی را ترید نکن؛ صبر کن زون میتیگیت شود».
+      ۴) تاییدِ LTF: توالیِ سوئیپ→ام‌اس‌اس نقض نشده **و** (چاکِ هم‌جهت یا
+         دیسپلیسمنتِ هم‌جهت یا سوئیپِ تازه) — یعنی چرخشِ واقعی دیده شده.
+
+    خروجی: dict {stamped: bool, reasons: [...], penetration_pct, threshold_pct}.
+    اگر پلن نباشد → stamped=False با دلیل.
+    """
+    thr = 70
+    reasons = []
+    if direction == 0 or plan is None:
+        return {"stamped": False, "threshold_pct": thr,
+                "reasons": ["پلنِ معتبرِ RR ≥ ۱:۲ ساخته نشد یا جهت نامشخص است"]}
+    ok = True
+    # ۱) آستانه‌ی نمره
+    pct = round(ratio * 100, 1)
+    if pct <= thr:
+        ok = False
+        reasons.append(f"نمره {pct}٪ ≤ {thr}٪ — به آستانه‌ی مهر نرسید")
+    if conflict:
+        ok = False
+        reasons.append("تضادِ تایم‌فریمِ بالا/میانی")
+    if wrong_zone:
+        ok = False
+        reasons.append("قیمت در زونِ اشتباهِ پریمیوم/دیسکانت")
+    # ۳) قانونِ ۳۰٪: عمقِ نفوذ به زونِ POI
+    penetration = None
+    pt = plan.get("poi_top"); pb = plan.get("poi_bottom")
+    if pt is not None and pb is not None and pt > pb and price is not None:
+        zsize = pt - pb
+        if direction == 1:   # تقاضا: قیمت از بالا وارد می‌شود؛ نفوذ = چقدر پایین آمده
+            penetration = round(max(0.0, (pt - price)) / zsize * 100, 1)
+        else:                # عرضه: قیمت از پایین وارد می‌شود؛ نفوذ = چقدر بالا رفته
+            penetration = round(max(0.0, (price - pb)) / zsize * 100, 1)
+        if penetration < 30.0:
+            ok = False
+            reasons.append(f"نفوذ به زون فقط {penetration}٪ < ۳۰٪ — اولین لمسِ سطحی، صبر کن")
+    # ۴) تاییدِ چرخشِ LTF
+    disp_ok = bool((ltf_disp or {}).get("present")) and (
+        (direction == 1 and (ltf_disp or {}).get("direction") == "bullish") or
+        (direction == -1 and (ltf_disp or {}).get("direction") == "bearish"))
+    choch_ok = bool(ltf_choch) and (
+        (direction == 1 and "bullish" in ltf_choch[0]) or
+        (direction == -1 and "bearish" in ltf_choch[0]))
+    reversal_ok = disp_ok or choch_ok or bool(fresh_sweep)
+    if seq_ok is False:
+        ok = False
+        reasons.append("توالیِ سوئیپ→ام‌اس‌اس نقض شده")
+    if not reversal_ok:
+        ok = False
+        reasons.append("چرخشِ LTF تایید نشد (چاک/دیسپلیسمنت/سوئیپِ هم‌جهت نیست)")
+    if ok:
+        reasons.append(f"✅ همه‌ی شرایطِ مدلِ عرضه/تقاضا برقرار (نمره {pct}٪، "
+                       f"نفوذ {penetration}٪ ≥ ۳۰٪، چرخشِ LTF تایید).")
+    return {"stamped": ok, "threshold_pct": thr, "score_pct": pct,
+            "penetration_pct": penetration, "reasons": reasons}
 
 
 def _fmt_table(r):

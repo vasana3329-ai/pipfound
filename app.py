@@ -384,6 +384,10 @@ tr.on td{background:rgba(34,197,94,.05)}
 .pcell .k{color:var(--muted);font-size:11px;margin-bottom:4px}
 .pcell .v{font-size:17px;font-weight:800;font-variant-numeric:tabular-nums}
 .pcell.rr .v{color:var(--accent2)}
+.stamp{margin:0 0 12px;padding:10px 14px;border-radius:10px;font-size:14px;font-weight:700}
+.stamp .stamp-why{font-size:11px;font-weight:400;color:var(--muted);margin-top:6px;line-height:1.6}
+.stamp-ok{background:rgba(34,211,165,.12);border:1px solid rgba(34,211,165,.4);color:var(--grade-ap)}
+.stamp-no{background:rgba(100,116,139,.12);border:1px solid rgba(100,116,139,.35);color:var(--muted)}
 .verdict{margin-top:16px;background:rgba(77,163,255,.08);border-right:3px solid var(--accent);
   padding:12px 14px;border-radius:8px;font-size:14px;line-height:1.7}
 .badge{display:inline-block;font-size:12px;padding:4px 10px;border-radius:8px;margin:2px 4px 2px 0}
@@ -783,8 +787,21 @@ function render(d){
     const et = p.entry_type==="market"
       ? `<span class="badge g-green">ورودِ بازار (الان)</span>`
       : `<span class="badge g-amber">لیمیت در OTE — منتظرِ پولبک</span>`;
+    // مهرِ تاییدِ ورودِ اختیاری (مدلِ عرضه/تقاضا: نمره>۷۰٪ + نفوذِ ۳۰٪ + تاییدِ چرخشِ LTF)
+    const es = d.entry_stamp || {};
+    let stampHtml = "";
+    if(es.stamped){
+      stampHtml = `<div class="stamp stamp-ok" title="همه‌ی شرایطِ مدلِ عرضه/تقاضا برقرار است — مهرِ تاییدِ ورودِ اختیاری.">
+        ✅ مهرِ تاییدِ ورود (نمره ${es.score_pct}٪ · نفوذِ زون ${es.penetration_pct}٪)
+        <div class="stamp-why">${(es.reasons||[]).join(" · ")}</div></div>`;
+    } else {
+      stampHtml = `<div class="stamp stamp-no" title="یک یا چند شرطِ مدلِ عرضه/تقاضا برقرار نیست — ورود توصیه نمی‌شود.">
+        ⛔ بدونِ مهرِ تایید — شرایطِ ورود کامل نیست
+        <div class="stamp-why">${(es.reasons||[]).join(" · ")}</div></div>`;
+    }
     planHtml=`<div class="plan">
       <h3>📌 پلنِ پیشنهادی — تایم‌فریمِ ورود: <b>${d.entry_tf}</b> · سبک: ${d.style} &nbsp; ${et}</h3>
+      ${stampHtml}
       <div class="pgrid">
         <div class="pcell"><div class="k">جهت</div><div class="v">${p.direction}</div></div>
         <div class="pcell"><div class="k">ورود</div><div class="v">${fmt(p.entry)}</div></div>

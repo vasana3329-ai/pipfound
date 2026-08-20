@@ -298,7 +298,8 @@ def suggest_range(symbol, style="day", tfs=None, walk=600):
 
 def backtest(symbol, style="day", grades=("A+", "A", "B"),
              walk=350, fill_window=24, max_hold=400, side="both",
-             tfs=None, date_from=None, date_to=None, verbose=False):
+             tfs=None, date_from=None, date_to=None, verbose=False,
+             require_stamp=False):
     """
     بک‌تستِ کاملِ walk-forward.
     style تعیینِ تایم‌فریم‌ها (همان نگاشتِ اپ): scalp/day/swing.
@@ -398,6 +399,13 @@ def backtest(symbol, style="day", grades=("A+", "A", "B"),
 
         plan = r.get("plan")
         grade = r.get("grade")
+        stamp = (r.get("entry_stamp") or {}).get("stamped", False)
+        # اگر require_stamp روشن باشد، فقط سیگنال‌هایی که مهرِ تاییدِ ورود خورده‌اند
+        # (نمره>۷۰٪ + نفوذِ ۳۰٪ + تاییدِ چرخشِ LTF) وارد می‌شوند — دقیقاً همان مدلِ
+        # عرضه/تقاضای ویدیو. این راهِ سنجشِ لبه‌ی ستاپِ افزوده است.
+        if require_stamp and not stamp:
+            i += 1
+            continue
         if plan and grade in grades and plan.get("rr", 0) >= 2.0:
             direction = 1 if plan["direction"] == "صعودی" else -1
             # فیلترِ جهت: side=long فقط صعودی، side=short فقط نزولی
@@ -556,6 +564,8 @@ def main():
                     help="شروعِ بازه‌ی بک‌تست: YYYY-MM-DD یا 'YYYY-MM-DD HH:MM' (UTC)")
     ap.add_argument("--to", dest="date_to", default="",
                     help="پایانِ بازه‌ی بک‌تست: YYYY-MM-DD یا 'YYYY-MM-DD HH:MM' (UTC)")
+    ap.add_argument("--require-stamp", action="store_true",
+                    help="فقط سیگنال‌های مهرخورده (مدلِ عرضه/تقاضا: نمره>۷۰٪ + نفوذِ ۳۰٪ + تاییدِ چرخشِ LTF)")
     ap.add_argument("--json", action="store_true")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args()
@@ -571,7 +581,7 @@ def main():
                    walk=a.walk, fill_window=a.fill_window,
                    max_hold=a.max_hold, side=a.side,
                    tfs=tfs, date_from=date_from, date_to=date_to,
-                   verbose=a.verbose)
+                   verbose=a.verbose, require_stamp=a.require_stamp)
     if a.json:
         print(json.dumps(res, ensure_ascii=False, indent=2))
     else:
