@@ -438,6 +438,21 @@ tr.on td{background:rgba(34,197,94,.05)}
 .stamp-no{background:rgba(100,116,139,.12);border:1px solid rgba(100,116,139,.35);color:var(--muted)}
 .verdict{margin-top:16px;background:rgba(77,163,255,.08);border-right:3px solid var(--accent);
   padding:12px 14px;border-radius:8px;font-size:14px;line-height:1.7}
+/* منوی کرکره‌ایِ ستاپ‌های اسکلپ (آکاردئون) */
+.acc{margin-top:16px;display:flex;flex-direction:column;gap:8px}
+.acc-item{background:var(--panel2);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.acc-head{width:100%;display:flex;align-items:center;gap:10px;padding:12px 14px;background:transparent;
+  border:none;color:var(--txt);font-family:inherit;font-size:14px;font-weight:700;cursor:pointer;text-align:right}
+.acc-head:hover{background:rgba(77,163,255,.06)}
+.acc-head .arr{margin-right:auto;color:var(--muted);transition:.2s;font-size:12px}
+.acc-item.open .acc-head .arr{transform:rotate(180deg)}
+.acc-body{display:none;padding:0 14px 14px;font-size:13px;line-height:1.9;color:#c8d2ea;border-top:1px dashed var(--line)}
+.acc-item.open .acc-body{display:block}
+.acc-path{margin:10px 0;padding:10px 12px;background:rgba(168,85,247,.08);
+  border-right:3px solid #a855f7;border-radius:8px;font-size:12.5px;line-height:2}
+.acc-path b{color:#d8b4fe}
+.acc-stats{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:12px;color:var(--muted)}
+.acc-stats b{color:var(--accent2)}
 .badge{display:inline-block;font-size:12px;padding:4px 10px;border-radius:8px;margin:2px 4px 2px 0}
 .badge.kz{background:rgba(245,158,11,.12);color:var(--warn);border:1px solid rgba(245,158,11,.3)}
 .badge.g-green{background:rgba(34,197,94,.12);color:var(--good);border:1px solid rgba(34,197,94,.3)}
@@ -931,6 +946,52 @@ function render(d){
     const cls=g.includes("red")?"g-red":g.includes("amber")?"g-amber":"g-green";
     badges+=`<span class="badge ${cls}">گیتِ خبر: ${gateFa(d.macro.gate)}</span>`;
   }
+
+  // منوی کرکره‌ایِ ستاپ‌های اسکلپ — فقط در سبکِ اسکالپ نمایش داده می‌شود.
+  // سه ستاپِ بک‌تست‌شده (walk=1200–1500، جمعِ ۲۴ معامله: WR~۶۶٪، totalR +6.49):
+  const scalpSetups=[
+    {t:"۱) پولبک به OTE در امتداد روند (ستاپِ اصلی)",
+     wr:"۶۲–۷۰٪", r:"+4.5R (ETH · ۱۰ معامله)",
+     path:["بایاس: روندِ 1h را بخوان (HH/HL صعودی یا LH/LL نزولی) — فقط هم‌جهت معامله کن",
+           "صبر کن قیمت به ناحیه‌ی OTE (۰.۶۲–۰.۷۹ فیبِ آخرین پای ایمپالس) پولبک بزند",
+           "روی 5m منتظر سوئیپِ لیکوئیدیتی بمان (فتیله زیرِ کف/بالای سقفِ قبلی + کلوزِ برگشتی)",
+           "چاک/MSS هم‌جهت روی 15m تأیید شود + کندلِ دیسپلیسمنت (بدنه ≥ ۱.۵× میانگین)",
+           "ورود: لیمیت روی لبه‌ی FVG یا گلدن‌پاکتِ ۰.۷۰۵ · استاپ پشتِ فتیله‌ی سوئیپ",
+           "هدف: لیکوئیدیتیِ مقابل با RR حداقل ۱:۲ (سقفِ ۳R)"],
+     note:"بیشترین تعداد سیگنال و پایدارترین آمار — ستاپِ پیش‌فرضِ اسکلپ."},
+    {t:"۲) سوئیپِ سشن → برگشت از زونِ HTF (سبکِ طلای Smart Risk)",
+     wr:"۶۷٪ (XAU)", r:"+1.6R (طلا · ۶ معامله)",
+     path:["روی 30m زونِ عرضه/تقاضا (اردربلاک/FVGِ مبدأِ حرکتِ ایمپالسی) را علامت بزن — حداکثر ۳ کندل",
+           "صبر کن قیمت وارد زون شود و حداقل ۳۰٪ آن را میتیگیت کند (اولین لمسِ سطحی = نه)",
+           "برو روی 5m؛ سوئیپِ لیکوئیدیتیِ خلافِ جهتِ موردنظرت را تماشا کن (جوداس)",
+           "MSS خلافِ سوئیپ با کلوزِ کندل تأیید شود",
+           "ورود: لبه‌ی FVG یا اردربلاکِ 5m · استاپ پشتِ فتیله‌ی سوئیپ",
+           "هدف: لیکوئیدیتیِ مقابل (EQH/EQL یا سقف/کفِ سشن) با RR ۱:۲ تا ۱:۳"],
+     note:"بهترین ستاپ برای طلا و جفت‌های پرنوسانِ سشنِ نیویورک."},
+    {t:"۳) ادامه‌دهنده پس از BOS (هم‌جهت با روندِ تازه‌شکسته)",
+     wr:"۸۰٪ گریدِ B (BTC)", r:"+1.8R (BTC · ۵ معامله)",
+     path:["روی 15m یک BOS تازه با کندلِ دیسپلیسمنت‌دار شناسایی کن (نه شکستِ بی‌جان)",
+           "منتظر پولبکِ قیمت به مبدأِ حرکتِ شکست بمان (اردربلاکِ سازنده‌ی BOS)",
+           "روی 5m ساختارِ کوچک هم‌جهت بسازد: HL بالاتر برای خرید / LH پایین‌تر برای فروش",
+           "FVGِ داخلِ حرکتِ شکست پر نشده باشد = هدف و ورودِ هم‌زمان",
+           "ورود: لیمیت در اردربلاک/FVG · استاپ زیرِ مبدأِ حرکت (پشتِ ساختار، نه درصدِ ثابت)",
+           "هدف: اولین لیکوئیدیتیِ مقابل با کفِ RR ۱:۲"],
+     note:"وین‌ریتِ بالا اما سیگنالِ کمتر — صبورانه، فقط BOSهای دیسپلیسمنت‌دار."}
+  ];
+  let accHtml="";
+  if(style==="scalp" || d.style_key==="scalp"){
+    const items=scalpSetups.map((s,i)=>`
+      <div class="acc-item" id="acci${i}">
+        <button class="acc-head" data-i="${i}">${s.t}<span class="arr">▼</span></button>
+        <div class="acc-body">
+          <div class="acc-path"><b>مسیرِ ستاپ:</b><br>${s.path.map((p,j)=>`${j+1}. ${p}`).join("<br>")}</div>
+          <div class="acc-stats"><span>📊 وین‌ریتِ بک‌تست: <b>${s.wr}</b></span><span>💰 بازده: <b>${s.r}</b></span></div>
+          <div style="margin-top:8px;color:var(--muted);font-size:12px">💡 ${s.note}</div>
+        </div>
+      </div>`).join("");
+    accHtml=`<div class="acc"><div style="color:var(--muted);font-size:12px;margin-bottom:2px">📚 ستاپ‌های اسکلپِ بک‌تست‌شده (کلیک = بازشدنِ مسیر):</div>${items}</div>`;
+  }
+
   let upcoming="";
   if(d.macro && d.macro.upcoming && d.macro.upcoming.length){
     upcoming=`<div class="upcoming">⚠️ اخبارِ مهمِ پیشِ رو (۴۸س): ${d.macro.upcoming.join(" · ")}</div>`;
@@ -986,6 +1047,7 @@ function render(d){
     </table>
     ${planHtml}
     ${sbHtml}
+    ${accHtml}
     ${oteHtml}
     <div style="margin-top:14px">${badges}</div>
     ${upcoming}
@@ -1003,6 +1065,15 @@ function render(d){
   // تایمرِ زنده‌ی سیلوربولت را استارت بزن (اگر در این حالت هستیم)
   if(d.is_sb_mode && d.sb_window){ startSbTimer(d.sb_window); }
   else if(_sbTimer){ clearInterval(_sbTimer); _sbTimer=null; }
+  // آکاردئونِ ستاپ‌های اسکلپ: کلیک روی سرِ هر ردیف = باز/بسته
+  document.querySelectorAll(".acc-head").forEach(h=>{
+    h.onclick=()=>{
+      const it=h.closest(".acc-item");
+      const was=it.classList.contains("open");
+      document.querySelectorAll(".acc-item").forEach(x=>x.classList.remove("open"));
+      if(!was) it.classList.add("open");
+    };
+  });
 }
 
 async function setOteAlarm(){
