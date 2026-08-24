@@ -64,6 +64,59 @@ SUGGESTIONS = [
 ]
 
 
+def _setup_statuses(r):
+    """ارزیابیِ زنده‌ی سه ستاپِ اسکلپ از روی چک‌لیستِ گریدر — چراغِ سبز/زرد/قرمز.
+
+      🟢 سبز  = تأییدِ قوی: شرط‌های کلیدیِ ستاپ همین حالا برقرارند.
+      🟡 زرد  = انتظار: بایاس هست ولی قیمت هنوز به محل/تریگر نرسیده.
+      🔴 قرمز = شرایطِ ستاپ نیست.
+
+    این تابع قضاوت جدیدی نمی‌سازد؛ فقط همان ردیف‌های چک‌لیستِ confluence را
+    به سه ستاپِ منوی اسکلپ ترجمه می‌کند (صفر تکرارِ منطق).
+    """
+    rows = {c["name"]: c["status"] for c in (r.get("checklist") or [])}
+    bias   = rows.get("بایاسِ تایم‌فریم بالا واضح") == "✓"
+    align  = rows.get("هم‌راستاییِ چند تایم‌فریم", "✗") in ("✓", "◐")
+    zone   = rows.get("پریمیوم/دیسکانتِ درست") == "✓"
+    ote_in = rows.get("ناحیه‌ی OTE (۰.۶۲–۰.۷۹ فیب)") == "✓"
+    sweep  = rows.get("سوئیپِ لیکوئیدیتیِ تازه (تریگر)") == "✓"
+    choch  = rows.get("چاکِ ساختاری روی LTF") == "✓"
+    seqok  = rows.get("توالیِ سوئیپ→ام‌اس‌اس") != "✗"
+    disp   = rows.get("دیسپلیسمنت (حرکتِ نهادی)") == "✓"
+    poi    = rows.get("نقطه‌ی ورود (اردر بلاک/فیرولیوگپ)") == "✓"
+    htconf = rows.get("کانفلوئنسِ POIِ تایم‌فریم بالا") == "✓"
+    rr_ok  = rows.get("امکانِ RR ≥ ۱:۲") == "✓"
+
+    out = []
+    # ستاپ ۱ — پولبک به OTE در امتداد روند
+    if bias and zone and ote_in and (sweep or choch) and disp and seqok and rr_ok:
+        out.append({"state": "green", "why": "قیمت در OTE + تریگرِ سوئیپ/چاک + دیسپلیسمنت — همه‌ی شرط‌ها برقرار"})
+    elif bias and (zone or ote_in):
+        out.append({"state": "yellow",
+                    "why": "روند هست ولی قیمت هنوز در OTE نیست یا تریگر نیامده — منتظرِ پولبک/سوئیپ بمان"})
+    else:
+        out.append({"state": "red", "why": "بایاسِ واضح یا موقعیتِ درستِ قیمت نیست — ستاپ فعلاً منتفی"})
+
+    # ستاپ ۲ — سوئیپِ سشن → برگشت از زون HTF
+    if htconf and (choch or disp) and sweep:
+        out.append({"state": "green", "why": "قیمت در زونِ تایمِ بالا + سوئیپ و برگشتِ تأییدشده"})
+    elif htconf or (bias and poi):
+        out.append({"state": "yellow",
+                    "why": "قیمت نزدیک/داخلِ زونِ HTF است — صبر برای میتیگیتِ ۳۰٪ و MSS"})
+    else:
+        out.append({"state": "red", "why": "قیمت به هیچ زونِ عرضه/تقاضای تایمِ بالا نچسبیده"})
+
+    # ستاپ ۳ — ادامه‌دهنده پس از BOS
+    if align and disp and poi:
+        out.append({"state": "green", "why": "BOS هم‌جهت + دیسپلیسمنت + POIِ مبدأ آماده‌ی پولبک"})
+    elif align and disp:
+        out.append({"state": "yellow",
+                    "why": "شکستِ ساختار انجام شد — منتظرِ پولبک به مبدأِ حرکت (اردربلاک/FVG)"})
+    else:
+        out.append({"state": "red", "why": "BOS دیسپلیسمنت‌دارِ تازه‌ای در جهتِ روند نیست"})
+    return out
+
+
 def analyze(symbol, style):
     """اجرای اسکنر برای یک نماد + سبک و برگرداندنِ دیکشنریِ کامل."""
     sty = STYLES.get(style, STYLES["day"])
@@ -120,6 +173,11 @@ def analyze(symbol, style):
         except Exception:
             macro = None
     r["macro"] = macro
+    # چراغِ زنده‌ی سه ستاپِ اسکلپ (سبز/زرد/قرمز) — از روی چک‌لیستِ همان تحلیل
+    try:
+        r["setup_statuses"] = _setup_statuses(r)
+    except Exception:
+        r["setup_statuses"] = None
     # پنجره‌ی Silver Bullet نیویورک (۰۹:۰۰–۱۱:۰۰ ET) — برای گیتِ زمانیِ استراتژیِ sb_ny
     # و نمایشِ تایمرِ آلارمِ ساعتِ ۹ در UI.
     try:
@@ -453,6 +511,13 @@ tr.on td{background:rgba(34,197,94,.05)}
 .acc-path b{color:#d8b4fe}
 .acc-stats{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:12px;color:var(--muted)}
 .acc-stats b{color:var(--accent2)}
+/* چراغِ وضعیتِ زنده‌ی هر ستاپ */
+.lamp{font-size:12px;font-weight:700;padding:4px 10px;border-radius:8px;white-space:nowrap}
+.lamp.g{background:rgba(34,197,94,.15);color:var(--good);border:1px solid rgba(34,197,94,.35)}
+.lamp.y{background:rgba(245,158,11,.13);color:var(--warn);border:1px solid rgba(245,158,11,.32)}
+.lamp.r{background:rgba(239,68,68,.12);color:var(--bad);border:1px solid rgba(239,68,68,.3)}
+.acc-why{margin-top:10px;padding:8px 12px;background:rgba(77,163,255,.07);border-right:3px solid var(--accent);
+  border-radius:6px;font-size:12.5px;color:#dbe6ff}
 .badge{display:inline-block;font-size:12px;padding:4px 10px;border-radius:8px;margin:2px 4px 2px 0}
 .badge.kz{background:rgba(245,158,11,.12);color:var(--warn);border:1px solid rgba(245,158,11,.3)}
 .badge.g-green{background:rgba(34,197,94,.12);color:var(--good);border:1px solid rgba(34,197,94,.3)}
@@ -979,17 +1044,25 @@ function render(d){
      note:"وین‌ریتِ بالا اما سیگنالِ کمتر — صبورانه، فقط BOSهای دیسپلیسمنت‌دار."}
   ];
   let accHtml="";
-  if(style==="scalp" || d.style_key==="scalp"){
+  {
+    const st = d.setup_statuses || [null,null,null];
+    const lamp = s => s==="green" ? `<span class="lamp g" title="تأییدِ قوی — شرط‌های ستاپ همین حالا برقرارند">🟢 تأییدِ قوی</span>`
+                  : s==="yellow" ? `<span class="lamp y" title="انتظار — بایاس هست، قیمت هنوز به محل/تریگر نرسیده">🟡 منتظرِ شرایط</span>`
+                  : s==="red" ? `<span class="lamp r" title="شرایط ستاپ نیست">🔴 شرایط نیست</span>`
+                  : `<span class="lamp n">—</span>`;
     const items=scalpSetups.map((s,i)=>`
       <div class="acc-item" id="acci${i}">
-        <button class="acc-head" data-i="${i}">${s.t}<span class="arr">▼</span></button>
+        <button class="acc-head" data-i="${i}">
+          <span>${s.t}</span>${lamp(st[i] && st[i].state)}<span class="arr">▼</span>
+        </button>
         <div class="acc-body">
+          ${st[i] ? `<div class="acc-why">${st[i].why||""}</div>` : ""}
           <div class="acc-path"><b>مسیرِ ستاپ:</b><br>${s.path.map((p,j)=>`${j+1}. ${p}`).join("<br>")}</div>
           <div class="acc-stats"><span>📊 وین‌ریتِ بک‌تست: <b>${s.wr}</b></span><span>💰 بازده: <b>${s.r}</b></span></div>
           <div style="margin-top:8px;color:var(--muted);font-size:12px">💡 ${s.note}</div>
         </div>
       </div>`).join("");
-    accHtml=`<div class="acc"><div style="color:var(--muted);font-size:12px;margin-bottom:2px">📚 ستاپ‌های اسکلپِ بک‌تست‌شده (کلیک = بازشدنِ مسیر):</div>${items}</div>`;
+    accHtml=`<div class="acc"><div style="color:var(--muted);font-size:12px;margin-bottom:2px">📚 سه ستاپِ پیشنهادی (چراغ = وضعیتِ زنده؛ کلیک = مسیر):</div>${items}</div>`;
   }
 
   let upcoming="";
