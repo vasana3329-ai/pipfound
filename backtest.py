@@ -261,6 +261,10 @@ def suggest_range(symbol, style="day", tfs=None, walk=600):
         "scalp": ["1h", "30m", "15m", "5m"],   # فیکس S1: هم‌راستا با اپِ زنده
         "day":   ["1d", "4h", "1h", "15m"],
         "swing": ["1w", "1d", "4h", "1h"],
+        # Silver Bullet NY: هم‌راستا با app.STYLES["sb_ny"]. بک‌تستِ این سبک فقط با
+        # tfs صریح معنا دارد؛ بدونِ آن همین استک را می‌گیرد (گیتِ زمانیِ پنجره
+        # ۰۹–۱۱ ET در بک‌تست اعمال نمی‌شود — محدودیتِ شناخته‌شده، در بلوپرینت).
+        "sb_ny": ["15m", "5m", "1m"],
     }
     if tfs:
         tfs = [t.strip() for t in tfs if str(t).strip()]
@@ -321,6 +325,10 @@ def backtest(symbol, style="day", grades=("A+", "A", "B"),
         "scalp": ["1h", "30m", "15m", "5m"],
         "day":   ["1d", "4h", "1h", "15m"],
         "swing": ["1w", "1d", "4h", "1h"],
+        # سیلوربولت NY — هم‌راستا با app.STYLES["sb_ny"]. توجه: گیتِ زمانیِ پنجره‌ی
+        # ۰۹–۱۱ ET در بک‌تست اعمال نمی‌شود (محدودیتِ شناخته‌شده؛ سیگنال‌های خارج از
+        # پنجره هم شمرده می‌شوند → نتیجه محافظه‌کارانه است نه خوش‌بینانه).
+        "sb_ny": ["15m", "5m", "1m"],
     }
     # tfs دلخواهِ کاربر بر نگاشتِ style اولویت دارد (تاییدِ فرکتال‌بودن).
     if tfs:
@@ -549,7 +557,8 @@ def _fmt_fa(res):
 def main():
     ap = argparse.ArgumentParser(description="بک‌تستِ walk-forward با اسکیل‌های تصحیح‌شده‌ی pipfound")
     ap.add_argument("symbol")
-    ap.add_argument("--style", default="day", choices=["scalp", "day", "swing"])
+    ap.add_argument("--style", default="day",
+                    choices=["scalp", "day", "swing", "sb_ny"])
     ap.add_argument("--grades", default="A+,A,B",
                     help="درجه‌های قابلِ‌قبول، جداشده با ویرگول")
     ap.add_argument("--walk", type=int, default=350)
