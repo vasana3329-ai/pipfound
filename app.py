@@ -372,9 +372,8 @@ body{margin:0;background:radial-gradient(1200px 600px at 80% -10%,#16223b 0%,var
   min-height:100vh;padding:28px 16px}
 .wrap{max-width:920px;margin:0 auto}
 .header{display:flex;align-items:center;gap:12px;margin-bottom:6px}
-.logo{width:42px;height:42px;border-radius:12px;background:linear-gradient(135deg,var(--accent),var(--accent2));
-  display:grid;place-items:center;font-size:22px;box-shadow:0 6px 22px rgba(77,163,255,.35)}
-h1{font-size:22px;margin:0;font-weight:700;letter-spacing:.2px}
+h1{font-size:22px;margin:0;font-weight:700;letter-spacing:.2px;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
 .sub{color:var(--muted);font-size:13px;margin:2px 0 22px}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:20px;
   box-shadow:0 20px 50px rgba(0,0,0,.35)}
@@ -512,6 +511,15 @@ tr.on td{background:rgba(34,197,94,.05)}
 .acc-stats{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:12px;color:var(--muted)}
 .acc-stats b{color:var(--accent2)}
 /* چراغِ وضعیتِ زنده‌ی هر ستاپ */
+/* دکمه و پنلِ ستاپ‌ها — همیشه بالای صفحه، مستقل از کارتِ نتیجه */
+.setups-btn{background:linear-gradient(135deg,#059669,#65a30d);border:0;color:#04120b;font-weight:800;
+  font-size:15px;padding:14px 18px;border-radius:12px;cursor:pointer;transition:.15s}
+.setups-btn:hover{filter:brightness(1.08)}
+.setups-btn.active{outline:2px solid #34d399;outline-offset:2px}
+.setups-panel{display:none;margin-top:12px;background:var(--panel);border:1px solid var(--line);
+  border-radius:14px;padding:14px}
+.setups-panel.open{display:block}
+.sp-head{font-size:14px;font-weight:800;margin-bottom:10px}
 .lamp{font-size:12px;font-weight:700;padding:4px 10px;border-radius:8px;white-space:nowrap}
 .lamp.g{background:rgba(34,197,94,.15);color:var(--good);border:1px solid rgba(34,197,94,.35)}
 .lamp.y{background:rgba(245,158,11,.13);color:var(--warn);border:1px solid rgba(245,158,11,.32)}
@@ -594,10 +602,9 @@ tr.on td{background:rgba(34,197,94,.05)}
 <body>
 <div class="wrap">
   <div class="header">
-    <div class="logo">📈</div>
     <div>
       <h1>pipfound</h1>
-      <div class="sub">تحلیلگرِ اسمارت‌مانی · SMC + ICT · تاپ‌داون · دیتای زنده · فارکس / فلزات / کریپتو</div>
+      <div class="sub">تحلیلگرِ اسمارت‌مانی · SMC + ICT</div>
     </div>
   </div>
 
@@ -615,6 +622,11 @@ tr.on td{background:rgba(34,197,94,.05)}
       <button id="go" class="go" title="تحلیلِ زنده‌ی همین لحظه: امتیاز، تایم‌فریمِ ورود، پلنِ عددی و درجه را می‌دهد.">تحلیل کن</button>
       <button id="bt" class="go" style="background:#334155" title="بک‌تستِ walk-forward روی داده‌ی تاریخی؛ پنلِ تنظیماتِ بازه/تایم‌فریم/جهت را باز می‌کند.">بک‌تست</button>
       <button id="sbBtn" class="sb-btn" title="استراتژیِ سیلوربولتِ نیویورک روی تایمِ ۱ دقیقه — فقط در پنجره‌ی ۰۹:۰۰ تا ۱۱:۰۰ به‌وقتِ نیویورک معتبر است (اوجِ فعالیتِ روز). با کلیک، سبک روی این استراتژی می‌رود، تحلیلِ ۱m اجرا می‌شود و تایمرِ ساعتِ ۹ نمایش داده می‌شود.">🎯 سیلوربولت نیویورک</button>
+      <button id="setupsBtn" class="setups-btn" title="سه ستاپِ پیشنهادیِ اسکلپ با وضعیتِ زنده: 🟢 تأییدِ قوی · 🟡 منتظرِ شرایط · 🔴 شرایط نیست. چراغ‌ها از آخرین تحلیل به‌روز می‌شوند؛ با کلیک روی هر ردیف مسیرِ ستاپ باز می‌شود.">📚 ستاپ‌ها</button>
+    </div>
+    <div id="setupsPanel" class="setups-panel">
+      <div class="sp-head">📚 سه ستاپِ پیشنهادی <span class="jmsg" id="spState">— اول یک تحلیل بگیر تا چراغ‌ها روشن شوند</span></div>
+      <div id="spList"></div>
     </div>
     <div class="chips" id="chips"></div>
     <div id="btPanel" class="btpanel">
@@ -658,9 +670,8 @@ tr.on td{background:rgba(34,197,94,.05)}
   <div class="livewrap">
     <h2>📊 چارتِ زنده <span class="jmsg" id="tvSymLbl"></span></h2>
     <div class="tv-box" id="tvBox">
-      <div class="aempty" style="padding:40px">یک نماد را تحلیل کن یا از دکمه‌های میان‌بر انتخاب کن تا چارتِ زنده‌اش این‌جا بیاید.</div>
+    <div class="aempty" style="padding:40px">یک نماد را تحلیل کن تا چارتِ زنده‌اش این‌جا بیاید.</div>
     </div>
-    <div class="tv-hint">چارتِ زنده از TradingView (فقط برای دیدن؛ امتیاز و پلن از دیتای مستقلِ اپ می‌آید).</div>
   </div>
 
   <div class="livewrap">
@@ -677,10 +688,7 @@ tr.on td{background:rgba(34,197,94,.05)}
 
   <div class="lightbox" id="lightbox"><img id="lightboxImg" src="" alt=""></div>
 
-  <div class="foot">
-    داده: Binance (کریپتو) + Yahoo (فارکس/فلزات) — رایگان، بدون کلید · تقویمِ اقتصادی: ForexFactory<br>
-    ⚠️ ابزارِ کمکی است، نه سیگنالِ تضمینی. تصمیمِ نهایی و مدیریتِ ریسک با خودت.
-  </div>
+  <div class="foot">⚠️ ابزارِ کمکی است، نه سیگنالِ تضمینی — تصمیم و مدیریتِ ریسک با خودت.</div>
 </div>
 
 <script>
@@ -1044,26 +1052,6 @@ function render(d){
      note:"وین‌ریتِ بالا اما سیگنالِ کمتر — صبورانه، فقط BOSهای دیسپلیسمنت‌دار."}
   ];
   let accHtml="";
-  {
-    const st = d.setup_statuses || [null,null,null];
-    const lamp = s => s==="green" ? `<span class="lamp g" title="تأییدِ قوی — شرط‌های ستاپ همین حالا برقرارند">🟢 تأییدِ قوی</span>`
-                  : s==="yellow" ? `<span class="lamp y" title="انتظار — بایاس هست، قیمت هنوز به محل/تریگر نرسیده">🟡 منتظرِ شرایط</span>`
-                  : s==="red" ? `<span class="lamp r" title="شرایط ستاپ نیست">🔴 شرایط نیست</span>`
-                  : `<span class="lamp n">—</span>`;
-    const items=scalpSetups.map((s,i)=>`
-      <div class="acc-item" id="acci${i}">
-        <button class="acc-head" data-i="${i}">
-          <span>${s.t}</span>${lamp(st[i] && st[i].state)}<span class="arr">▼</span>
-        </button>
-        <div class="acc-body">
-          ${st[i] ? `<div class="acc-why">${st[i].why||""}</div>` : ""}
-          <div class="acc-path"><b>مسیرِ ستاپ:</b><br>${s.path.map((p,j)=>`${j+1}. ${p}`).join("<br>")}</div>
-          <div class="acc-stats"><span>📊 وین‌ریتِ بک‌تست: <b>${s.wr}</b></span><span>💰 بازده: <b>${s.r}</b></span></div>
-          <div style="margin-top:8px;color:var(--muted);font-size:12px">💡 ${s.note}</div>
-        </div>
-      </div>`).join("");
-    accHtml=`<div class="acc"><div style="color:var(--muted);font-size:12px;margin-bottom:2px">📚 سه ستاپِ پیشنهادی (چراغ = وضعیتِ زنده؛ کلیک = مسیر):</div>${items}</div>`;
-  }
 
   let upcoming="";
   if(d.macro && d.macro.upcoming && d.macro.upcoming.length){
@@ -1138,15 +1126,53 @@ function render(d){
   // تایمرِ زنده‌ی سیلوربولت را استارت بزن (اگر در این حالت هستیم)
   if(d.is_sb_mode && d.sb_window){ startSbTimer(d.sb_window); }
   else if(_sbTimer){ clearInterval(_sbTimer); _sbTimer=null; }
-  // آکاردئونِ ستاپ‌های اسکلپ: کلیک روی سرِ هر ردیف = باز/بسته
-  document.querySelectorAll(".acc-head").forEach(h=>{
+  // چراغ‌های ستاپ‌ها بعد از هر تحلیل تازه شوند (اگر پنل باز است)
+  renderSetups(d.setup_statuses);
+}
+
+// ── پنلِ ستاپ‌ها: همیشه بالای صفحه، مستقل از کارتِ نتیجه ──────────────
+function renderSetups(statuses){
+  const list=document.getElementById("spList");
+  const state=document.getElementById("spState");
+  if(!list) return;
+  const st = statuses || [null,null,null];
+  if(state){
+    if(statuses){
+      state.textContent=`— آخرین تحلیل: ${(window._last&&window._last.symbol)||""} · ${new Date().toLocaleTimeString("fa-IR")}`;
+    }else{
+      state.textContent="— اول یک تحلیل بگیر تا چراغ‌ها روشن شوند";
+    }
+  }
+  const lamp = s => s==="green" ? `<span class="lamp g">🟢 تأییدِ قوی</span>`
+                : s==="yellow" ? `<span class="lamp y">🟡 منتظرِ شرایط</span>`
+                : s==="red" ? `<span class="lamp r">🔴 شرایط نیست</span>`
+                : `<span class="lamp y">⚪ بی‌داده — تحلیل بگیر</span>`;
+  list.innerHTML = scalpSetups.map((s,i)=>`
+    <div class="acc-item${st[i]&&st[i].state==="green"?" open":""}">
+      <button class="acc-head" data-i="${i}">
+        <span>${s.t}</span>${lamp(st[i]&&st[i].state)}<span class="arr">▼</span>
+      </button>
+      <div class="acc-body">
+        ${st[i] ? `<div class="acc-why">${st[i].why||""}</div>` : ""}
+        <div class="acc-path"><b>مسیرِ ستاپ:</b><br>${s.path.map((p,j)=>`${j+1}. ${p}`).join("<br>")}</div>
+        <div class="acc-stats"><span>📊 وین‌ریتِ بک‌تست: <b>${s.wr}</b></span><span>💰 بازده: <b>${s.r}</b></span></div>
+        <div style="margin-top:8px;color:var(--muted);font-size:12px">💡 ${s.note}</div>
+      </div>
+    </div>`).join("");
+  list.querySelectorAll(".acc-head").forEach(h=>{
     h.onclick=()=>{
-      const it=h.closest(".acc-item");
-      const was=it.classList.contains("open");
-      document.querySelectorAll(".acc-item").forEach(x=>x.classList.remove("open"));
-      if(!was) it.classList.add("open");
+      h.closest(".acc-item").classList.toggle("open");
     };
   });
+}
+// دکمه‌ی تاگلِ پنلِ ستاپ‌ها
+const setupsBtn=document.getElementById("setupsBtn"), setupsPanel=document.getElementById("setupsPanel");
+if(setupsBtn && setupsPanel){
+  setupsBtn.onclick=()=>{
+    const open=setupsPanel.classList.toggle("open");
+    setupsBtn.classList.toggle("active",open);
+    if(open) renderSetups(window._last && window._last.setup_statuses);
+  };
 }
 
 async function setOteAlarm(){
