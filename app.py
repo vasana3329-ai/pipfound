@@ -34,6 +34,10 @@ try:
     import macro_context as M
 except Exception:
     M = None
+try:
+    import fundamental as FUND
+except Exception:
+    FUND = None
 
 # ماژولِ ژورنال از پوشه‌ی همسایه‌ی trade-journal
 _JRN_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
@@ -353,6 +357,81 @@ def start_alarm_worker():
     return t
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  آلارمِ فاندمنتال — نوتیفیکیشنِ نیتیو ~۲۴ ساعت پیش از هر خبرِ پرتأثیر (یک‌بار)
+# ═══════════════════════════════════════════════════════════════════
+_FUND_FIRED_FILE = os.path.join(HOME, "pipfound", "fund_alarms_fired.json")
+_fund_lock = threading.Lock()
+
+
+def _load_fired():
+    try:
+        with open(_FUND_FIRED_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+
+def _save_fired(fired):
+    try:
+        os.makedirs(os.path.dirname(_FUND_FIRED_FILE), exist_ok=True)
+        tmp = _FUND_FIRED_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(sorted(fired), f)
+        os.replace(tmp, _FUND_FIRED_FILE)
+    except Exception:
+        pass
+
+
+def _fund_alarm_worker():
+    """هر ۱۰ دقیقه اخبارِ پرتأثیر را می‌سنجد؛ برای خبری که بینِ ۲۳ تا ۲۵ ساعتِ آینده
+    است، یک‌بار نوتیفیکیشنِ نیتیوِ مک می‌فرستد (ساعتِ اعلام به‌وقتِ تهران + جهتِ اثر)."""
+    if FUND is None:
+        return
+    while True:
+        try:
+            with _fund_lock:
+                fired = _load_fired()
+            data = FUND.build(hours=48)
+            changed = False
+            for e in (data.get("events") or []):
+                if e.get("impact") != "High":
+                    continue
+                h = e.get("in_hours", 999)
+                key = e.get("iso", "") + "|" + (e.get("title") or "")
+                if key in fired:
+                    continue
+                # پنجره‌ی ~۲۴ ساعت پیش از خبر (۲۳–۲۵ ساعت مانده)
+                if 23 <= h <= 25:
+                    a = e.get("analysis") or {}
+                    ttl = e.get("title_fa") or e.get("title") or "خبرِ اقتصادی"
+                    ccy = e.get("country_fa") or e.get("country") or ""
+                    beat = (a.get("beat") or {})
+                    gold = (beat.get("gold") or ["", "", ""])
+                    msg = (f"{e.get('tehran','')} — {ccy}. "
+                           f"عددِ قوی‌تر → {beat.get('ccy_dir','')}، "
+                           f"طلا/نقره {gold[1]}. برای تحلیلِ کامل کلیدِ 📰 فاندمنتال را بزن.")
+                    _notify_mac(f"📰 فردا: {ttl}", msg)
+                    fired.add(key)
+                    changed = True
+            # پاک‌سازیِ کلیدهای قدیمی (خبرهایی که گذشته‌اند) تا فایل بی‌نهایت رشد نکند
+            if changed:
+                live = {e.get("iso", "") + "|" + (e.get("title") or "")
+                        for e in (data.get("events") or [])}
+                fired = {k for k in fired if k in live}
+                with _fund_lock:
+                    _save_fired(fired)
+        except Exception:
+            traceback.print_exc()
+        time.sleep(600)
+
+
+def start_fund_alarm_worker():
+    t = threading.Thread(target=_fund_alarm_worker, daemon=True)
+    t.start()
+    return t
+
+
 HTML = r"""<!doctype html>
 <html lang="fa" dir="rtl">
 <head>
@@ -516,6 +595,11 @@ tr.on td{background:rgba(34,197,94,.05)}
   font-size:15px;padding:14px 18px;border-radius:12px;cursor:pointer;transition:.15s}
 .setups-btn:hover{filter:brightness(1.08)}
 .setups-btn.active{outline:2px solid #34d399;outline-offset:2px}
+/* دکمه‌ی فاندمنتال — رنگِ متمایزِ آبیِ نفتی/فیروزه‌ای */
+.fund-btn{background:linear-gradient(135deg,#0ea5e9,#6366f1);border:0;color:#04121f;font-weight:800;
+  font-size:15px;padding:14px 20px;border-radius:12px;cursor:pointer;transition:.15s;
+  box-shadow:0 0 0 1px rgba(14,165,233,.4),0 4px 18px rgba(99,102,241,.22)}
+.fund-btn:hover{filter:brightness(1.08)}
 .setups-panel{display:none;margin-top:12px;background:var(--panel);border:1px solid var(--line);
   border-radius:14px;padding:14px}
 .setups-panel.open{display:block}
@@ -621,6 +705,7 @@ tr.on td{background:rgba(34,197,94,.05)}
       <button id="bt" class="go" style="background:#334155" title="بک‌تستِ walk-forward روی داده‌ی تاریخی؛ پنلِ تنظیماتِ بازه/تایم‌فریم/جهت را باز می‌کند.">بک‌تست</button>
       <button id="sbBtn" class="sb-btn" title="استراتژیِ سیلوربولتِ نیویورک روی تایمِ ۱ دقیقه — فقط در پنجره‌ی ۰۹:۰۰ تا ۱۱:۰۰ به‌وقتِ نیویورک معتبر است (اوجِ فعالیتِ روز). با کلیک، سبک روی این استراتژی می‌رود، تحلیلِ ۱m اجرا می‌شود و تایمرِ ساعتِ ۹ نمایش داده می‌شود.">🎯 سیلوربولت نیویورک</button>
       <button id="setupsBtn" class="setups-btn" title="سه ستاپِ پیشنهادیِ اسکلپ با وضعیتِ زنده: 🟢 تأییدِ قوی · 🟡 منتظرِ شرایط · 🔴 شرایط نیست. چراغ‌ها از آخرین تحلیل به‌روز می‌شوند؛ با کلیک روی هر ردیف مسیرِ ستاپ باز می‌شود.">📚 ستاپ‌ها</button>
+      <button id="fundBtn" class="fund-btn" title="اخبارِ اقتصادیِ پرتأثیر (GDP، تورم، اشتغال، نرخِ بهره) یک روز پیش از اعلام — ساعتِ دقیقِ اعلام به‌وقتِ نیویورک و تهران، به‌همراهِ تحلیلِ اثرِ هر خبر روی جفت‌ارزهای مهم و طلا/نقره. با کلیک، صفحه‌ی جداگانه‌ی فاندمنتال در تبِ نو باز می‌شود.">📰 فاندمنتال</button>
     </div>
     <div id="setupsPanel" class="setups-panel">
       <div class="sp-head">📚 سه ستاپِ پیشنهادی <span class="jmsg" id="spState">— اول یک تحلیل بگیر تا چراغ‌ها روشن شوند</span></div>
@@ -688,6 +773,13 @@ tr.on td{background:rgba(34,197,94,.05)}
 </div>
 
 <script>
+// نمایشِ هر خطای JS روی خودِ صفحه — خطاها دیگر بی‌صدا گم نمی‌شوند
+window.addEventListener("error", e=>{
+  const r=document.getElementById("result");
+  if(r && !r.innerHTML.trim()){
+    r.innerHTML='<div class="err">خطای جاوااسکریپت: '+ (e.message||"نامشخص") +'</div>';
+  }
+});
 const SUGGESTIONS = __SUGGESTIONS__;
 let style = "day";
 
@@ -1169,6 +1261,10 @@ if(setupsBtn && setupsPanel){
 // رندرِ اولیه: سه ستاپ با چراغِ «بی‌داده» از همان ابتدا دیده شوند
 renderSetups(null);
 
+// دکمه‌ی فاندمنتال — صفحه‌ی جداگانه‌ی اخبارِ اقتصادی را در تبِ نو باز می‌کند
+const fundBtn=document.getElementById("fundBtn");
+if(fundBtn){ fundBtn.onclick=()=>window.open("/fundamental","_blank","noopener"); }
+
 async function setOteAlarm(){
   const d = window._last;
   if(!d || !d.ote){return;}
@@ -1349,6 +1445,229 @@ setInterval(loadAlarms, 30000);
 """
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  صفحه‌ی جداگانه‌ی فاندمنتال — تقویمِ اقتصادی + تحلیلِ اثرِ خبرها
+# ═══════════════════════════════════════════════════════════════════
+FUND_PAGE = r"""<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pipfound — فاندمنتال (اخبارِ اقتصادی)</title>
+<style>
+:root{
+  --bg:#0b0f17; --panel:#141a26; --panel2:#1b2333; --line:#28324a;
+  --txt:#e8eefc; --muted:#8a97b3; --accent:#0ea5e9; --accent2:#6366f1;
+  --good:#22c55e; --bad:#ef4444; --warn:#f59e0b;
+}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(1200px 600px at 80% -10%,#16223b 0%,var(--bg) 55%);
+  color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,"Vazirmatn","Segoe UI",Tahoma,sans-serif;
+  min-height:100vh;padding:28px 16px}
+.wrap{max-width:960px;margin:0 auto}
+h1{font-size:22px;margin:0 0 4px;font-weight:800;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+.sub{color:var(--muted);font-size:13px;margin:0 0 18px}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
+.toolbar .seg{display:flex;gap:4px;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:4px}
+.toolbar .seg button{background:transparent;border:0;color:var(--muted);padding:9px 14px;border-radius:9px;
+  cursor:pointer;font-size:13px;font-weight:700;font-family:inherit;transition:.15s}
+.toolbar .seg button.active{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#04121f}
+.toolbar .refresh{margin-inline-start:auto;background:var(--panel2);border:1px solid var(--line);color:var(--txt);
+  border-radius:10px;padding:9px 16px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit}
+.toolbar .refresh:hover{border-color:var(--accent)}
+.gen{color:var(--muted);font-size:12px;margin-bottom:14px}
+.note{background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);border-radius:12px;
+  padding:12px 16px;font-size:13px;line-height:1.8;color:#f6d99a;margin-bottom:18px}
+.next{background:linear-gradient(135deg,rgba(14,165,233,.12),rgba(99,102,241,.10));
+  border:1px solid rgba(14,165,233,.4);border-radius:14px;padding:16px;margin-bottom:20px}
+.next .lbl{font-size:12px;color:var(--muted);margin-bottom:4px}
+.next .ttl{font-size:17px;font-weight:800}
+.next .cd{font-variant-numeric:tabular-nums;color:var(--accent);font-weight:800}
+.ev{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:0;margin-bottom:14px;overflow:hidden}
+.ev-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:16px 18px;cursor:pointer}
+.ev-head:hover{background:var(--panel2)}
+.ev-icon{font-size:22px}
+.ev-main{flex:1;min-width:200px}
+.ev-title{font-size:15.5px;font-weight:800;line-height:1.4}
+.ev-title .en{color:var(--muted);font-size:12.5px;font-weight:600}
+.ev-meta{color:var(--muted);font-size:12.5px;margin-top:4px;line-height:1.7}
+.imp{font-size:11px;padding:4px 10px;border-radius:8px;font-weight:800;white-space:nowrap}
+.imp.High{background:rgba(239,68,68,.14);color:#fca5a5;border:1px solid rgba(239,68,68,.4)}
+.imp.Medium{background:rgba(245,158,11,.13);color:#fcd34d;border:1px solid rgba(245,158,11,.35)}
+.ccy{font-size:12px;padding:4px 10px;border-radius:8px;background:var(--panel2);border:1px solid var(--line);
+  font-weight:800;white-space:nowrap}
+.cd-badge{font-size:12px;padding:4px 10px;border-radius:8px;background:rgba(14,165,233,.12);
+  color:#7dd3fc;border:1px solid rgba(14,165,233,.35);font-weight:800;white-space:nowrap}
+.chev{color:var(--muted);font-size:13px;transition:.2s}
+.ev.open .chev{transform:rotate(180deg)}
+.ev-body{display:none;padding:0 18px 18px;border-top:1px solid var(--line)}
+.ev.open .ev-body{display:block}
+.times{display:flex;gap:20px;flex-wrap:wrap;font-size:13px;margin:14px 0;color:#cdd8ef}
+.times b{color:var(--txt)}
+.fc{display:flex;gap:20px;flex-wrap:wrap;font-size:13px;margin-bottom:14px}
+.fc .box{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px 14px}
+.fc .box .k{color:var(--muted);font-size:11px}
+.fc .box .v{font-weight:800;font-variant-numeric:tabular-nums}
+.why{background:rgba(99,102,241,.08);border-right:3px solid var(--accent2);border-radius:8px;
+  padding:10px 14px;font-size:13px;line-height:1.85;color:#dbe0ff;margin-bottom:14px}
+.scen{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:640px){.scen{grid-template-columns:1fr}}
+.scard{border-radius:12px;padding:14px}
+.scard.beat{background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.3)}
+.scard.miss{background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.28)}
+.scard .sh{font-size:13px;font-weight:800;margin-bottom:6px}
+.scard.beat .sh{color:#86efac}
+.scard.miss .sh{color:#fca5a5}
+.scard .cd-dir{font-size:13px;font-weight:800;margin-bottom:10px;color:var(--txt)}
+.pairtbl{width:100%;border-collapse:collapse;font-size:13px}
+.pairtbl td{padding:5px 4px;border-bottom:1px dashed var(--line)}
+.pairtbl td:first-child{font-weight:700;font-variant-numeric:tabular-nums}
+.pairtbl td:last-child{text-align:left;font-weight:800}
+.dir-up{color:var(--good)}
+.dir-dn{color:var(--bad)}
+.dir-neu{color:var(--muted)}
+.gold{margin-top:10px;font-size:12.5px;line-height:1.75;color:#e9d9a6;
+  background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.25);border-radius:8px;padding:9px 12px}
+.gold .g-dir{font-weight:800}
+.empty{text-align:center;color:var(--muted);padding:40px;font-size:14px}
+.err{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);color:#fca5a5;
+  border-radius:12px;padding:16px;font-size:14px}
+.back{display:inline-block;margin-bottom:16px;color:var(--accent);text-decoration:none;font-size:13px;font-weight:700}
+.back:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back" href="/">← بازگشت به تحلیلگر</a>
+  <h1>📰 فاندمنتال — اخبارِ اقتصادی</h1>
+  <p class="sub">اخبارِ پرتأثیرِ پیشِ‌رو (GDP، تورم، اشتغال، نرخِ بهره) با ساعتِ دقیقِ اعلام و تحلیلِ اثر روی جفت‌ارزهای مهم و طلا/نقره.</p>
+
+  <div class="toolbar">
+    <div class="seg" id="impSeg">
+      <button data-imp="high" class="active">فقط پرتأثیر (High)</button>
+      <button data-imp="all">همه (High + Medium)</button>
+    </div>
+    <div class="seg" id="horSeg">
+      <button data-h="48">۴۸ ساعت</button>
+      <button data-h="120" class="active">۵ روز</button>
+      <button data-h="180">هفتگی</button>
+    </div>
+    <button class="refresh" id="refresh">↻ به‌روزرسانی</button>
+  </div>
+
+  <div class="gen" id="gen"></div>
+  <div class="note" id="note"></div>
+  <div id="nextWrap"></div>
+  <div id="list"><div class="empty">در حالِ بارگذاریِ تقویم…</div></div>
+</div>
+
+<script>
+let impMode="high", horHours=120, DATA=null;
+const $=s=>document.querySelector(s);
+
+function dirClass(d){ if(d.includes("صعود"))return "dir-up"; if(d.includes("نزول"))return "dir-dn"; return "dir-neu"; }
+
+function pairRows(pairs){
+  return pairs.map(p=>`<tr><td>${p[0]}</td><td class="${dirClass(p[1])}">${p[1]}</td></tr>`).join("");
+}
+
+function scenCard(cls, s){
+  const g=s.gold;
+  return `<div class="scard ${cls}">
+    <div class="sh">${s.label}</div>
+    <div class="cd-dir">${s.ccy_dir}</div>
+    <table class="pairtbl"><tbody>${pairRows(s.pairs)}</tbody></table>
+    <div class="gold">🥇 <span class="g-dir ${dirClass(g[1])}">${g[0]}: ${g[1]}</span><br>${g[2]}</div>
+  </div>`;
+}
+
+function evCard(e,idx){
+  const a=e.analysis;
+  const fcBox = e.forecast?`<div class="box"><div class="k">پیش‌بینی</div><div class="v">${e.forecast}</div></div>`:"";
+  const prBox = e.previous?`<div class="box"><div class="k">قبلی</div><div class="v">${e.previous}</div></div>`:"";
+  const enTtl = e.title_fa? `<div class="en">${e.title}</div>` : "";
+  const faTtl = e.title_fa || e.title;
+  return `<div class="ev" data-i="${idx}">
+    <div class="ev-head">
+      <span class="ev-icon">${a.icon}</span>
+      <div class="ev-main">
+        <div class="ev-title">${faTtl}${enTtl}</div>
+        <div class="ev-meta">${a.cat} · ${e.et}<br>${e.tehran}</div>
+      </div>
+      <span class="ccy">${e.country_fa} (${e.country})</span>
+      <span class="imp ${e.impact}">${e.impact==="High"?"پرتأثیر":"متوسط"}</span>
+      <span class="cd-badge">⏳ ${e.countdown}</span>
+      <span class="chev">▾</span>
+    </div>
+    <div class="ev-body">
+      <div class="times">
+        <span>🗽 <b>${e.et}</b></span>
+        <span>🇮🇷 <b>${e.tehran}</b></span>
+      </div>
+      <div class="fc">${fcBox}${prBox}</div>
+      <div class="why">💡 ${a.why}</div>
+      <div class="scen">
+        ${scenCard("beat", a.beat)}
+        ${scenCard("miss", a.miss)}
+      </div>
+    </div>
+  </div>`;
+}
+
+function render(){
+  if(!DATA) return;
+  if(DATA.error){ $("#list").innerHTML=`<div class="err">خطا: ${DATA.error}</div>`; return; }
+  $("#gen").textContent="تولیدِ گزارش: "+(DATA.generated_tehran||"");
+  $("#note").textContent="⚠️ "+(DATA.note||"");
+  let evs=DATA.events||[];
+  if(impMode==="high") evs=evs.filter(e=>e.impact==="High");
+  // next high
+  const nh=DATA.next_high;
+  $("#nextWrap").innerHTML = nh ? `<div class="next">
+    <div class="lbl">نزدیک‌ترین خبرِ پرتأثیر</div>
+    <div class="ttl">${nh.analysis.icon} ${nh.title_fa||nh.title} — ${nh.country_fa}</div>
+    <div class="ev-meta" style="margin-top:6px">${nh.et} · 🇮🇷 ${nh.tehran}</div>
+    <div style="margin-top:6px">تا اعلام: <span class="cd">${nh.countdown}</span></div>
+  </div>` : "";
+  if(!evs.length){ $("#list").innerHTML='<div class="empty">در این بازه خبری با این سطحِ تأثیر پیدا نشد.</div>'; return; }
+  $("#list").innerHTML=evs.map((e,i)=>evCard(e,i)).join("");
+  $("#list").querySelectorAll(".ev-head").forEach(h=>{
+    h.onclick=()=>h.closest(".ev").classList.toggle("open");
+  });
+}
+
+async function load(){
+  $("#list").innerHTML='<div class="empty">در حالِ بارگذاریِ تقویم…</div>';
+  try{
+    const r=await fetch("/api/fundamental?hours="+horHours);
+    DATA=await r.json();
+    render();
+  }catch(err){
+    $("#list").innerHTML=`<div class="err">ارتباط ناموفق: ${err}</div>`;
+  }
+}
+
+$("#impSeg").addEventListener("click",e=>{
+  const b=e.target.closest("button"); if(!b)return;
+  document.querySelectorAll("#impSeg button").forEach(x=>x.classList.remove("active"));
+  b.classList.add("active"); impMode=b.dataset.imp; render();
+});
+$("#horSeg").addEventListener("click",e=>{
+  const b=e.target.closest("button"); if(!b)return;
+  document.querySelectorAll("#horSeg button").forEach(x=>x.classList.remove("active"));
+  b.classList.add("active"); horHours=parseInt(b.dataset.h,10); load();
+});
+$("#refresh").onclick=load;
+load();
+// شمارشِ معکوسِ زنده هر ۶۰ ثانیه بازخوانی می‌شود
+setInterval(load, 60000);
+</script>
+</body>
+</html>
+"""
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass  # سکوت
@@ -1384,6 +1703,7 @@ class Handler(BaseHTTPRequestHandler):
             q = parse_qs(u.query)
             sym = (q.get("symbol", [""])[0]).strip()
             style = (q.get("style", ["day"])[0]).strip()
+            print(f"[analyze] {sym} · {style}", flush=True)   # ردیابیِ موقت
             if not sym:
                 return self._send(400, json.dumps({"error": "نماد وارد نشده"}, ensure_ascii=False))
             try:
@@ -1394,6 +1714,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
         if u.path == "/api/health":
             return self._send(200, json.dumps({"ok": True}))
+        if u.path == "/api/fundamental":
+            if FUND is None:
+                return self._send(200, json.dumps(
+                    {"error": "موتورِ فاندمنتال در دسترس نیست"}, ensure_ascii=False))
+            try:
+                hours = int(parse_qs(u.query).get("hours", ["180"])[0])
+            except Exception:
+                hours = 180
+            try:
+                return self._send(200, json.dumps(FUND.build(hours=hours), ensure_ascii=False))
+            except Exception as e:
+                traceback.print_exc()
+                return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
+        if u.path == "/fundamental":
+            return self._send(200, FUND_PAGE, "text/html; charset=utf-8")
         if u.path == "/api/backtest":
             q = parse_qs(u.query)
             sym = (q.get("symbol", [""])[0]).strip()
@@ -1678,9 +2013,11 @@ def main():
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     url = f"http://{a.host}:{a.port}"
     start_alarm_worker()
+    start_fund_alarm_worker()
     print(f"✅ pipfound روی {url} بالا آمد.")
     print("   نمادها: XAUUSD, XAGUSD, EURUSD, BTCUSDT, ... — Ctrl+C برای توقف.")
     print("   🔔 موتورِ آلارم فعال شد (بررسیِ هر ۹۰ ثانیه).")
+    print("   📰 آلارمِ فاندمنتال فعال شد (هشدارِ ~۲۴ ساعت پیش از هر خبرِ پرتأثیر).")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
