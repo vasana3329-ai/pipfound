@@ -93,24 +93,45 @@ def build_icns(work):
 
 # ---------- 2) اسکریپتِ راه‌انداز ----------
 LAUNCHER = f'''#!/bin/bash
-# راه‌اندازِ pipfound — سرور را بالا می‌آورد و مرورگر را باز می‌کند
+# راه‌اندازِ pipfound — اول سلامتِ کد را چک می‌کند، بعد سرور را بالا می‌آورد و مرورگر را باز می‌کند
 SCRIPTS="{SCRIPTS}"
 VENV_PY="{VENV_PY}"
 PORT={PORT}
 URL="http://127.0.0.1:$PORT"
+GUARD_LOG="/tmp/pipfound-selfcheck.log"
 
 # اگر پایتونِ venv نبود، از پایتونِ سیستم استفاده کن
 if [ ! -x "$VENV_PY" ]; then VENV_PY="$(command -v python3)"; fi
 
+# 🩺 نگهبانِ سلامت: اگر کدِ اپ خراب شده باشد، همین‌جا نسخه‌ی سالمِ قبلی برمی‌گردد
+if [ -f "$SCRIPTS/selfcheck.py" ]; then
+  GUARD_OUT="$("$VENV_PY" "$SCRIPTS/selfcheck.py" --guard 2>&1)"
+  printf '%s\n%s\n\n' "── $(date '+%Y-%m-%d %H:%M:%S')" "$GUARD_OUT" >> "$GUARD_LOG"
+  case "$GUARD_OUT" in
+    *"❌"*)
+      osascript -e 'display dialog "نگهبانِ سلامتِ pipfound یک اشکال در کد پیدا کرد و نتوانست خودش ترمیم کند.\\n\\nلاگ: /tmp/pipfound-selfcheck.log" buttons {{"باشه"}} default button 1 with icon caution with title "pipfound"' >/dev/null 2>&1
+      open -a TextEdit "$GUARD_LOG" >/dev/null 2>&1
+      exit 1
+      ;;
+  esac
+fi
+
 # اگر سرور از قبل بالا نیست، بالا بیاور
 if ! curl -s "$URL/api/health" >/dev/null 2>&1; then
   cd "$SCRIPTS" || exit 1
-  nohup "$VENV_PY" app.py --port $PORT >/tmp/pipfound.log 2>&1 &
+  nohup "$VENV_PY" -u app.py --port $PORT >/tmp/pipfound.log 2>&1 &
   # صبر تا آماده شدن
-  for i in $(seq 1 30); do
+  for i in $(seq 1 40); do
     if curl -s "$URL/api/health" >/dev/null 2>&1; then break; fi
     sleep 0.3
   done
+fi
+
+# اگر سرور بالا نیامد (مثلاً خودِ اپ جلوی سروِ کدِ خراب را گرفته) واضح بگو
+if ! curl -s "$URL/api/health" >/dev/null 2>&1; then
+  osascript -e 'display dialog "سرورِ pipfound بالا نیامد. لاگِ سرور: /tmp/pipfound.log" buttons {{"باشه"}} default button 1 with icon caution with title "pipfound"' >/dev/null 2>&1
+  open -a TextEdit /tmp/pipfound.log >/dev/null 2>&1
+  exit 1
 fi
 
 open "$URL"

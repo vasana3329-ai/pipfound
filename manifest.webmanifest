@@ -1,0 +1,19 @@
+{
+  "name": "pipfound — تحلیلگرِ اسمارت‌مانی",
+  "short_name": "pipfound",
+  "description": "تحلیلِ زندهٔ SMC/ICT روی فارکس، فلزات و کریپتو — دیتای واقعی، بدونِ کلید",
+  "lang": "fa",
+  "dir": "rtl",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#0b0f17",
+  "theme_color": "#0b0f17",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "/icon-192-mask.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "/icon-512-mask.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -236,6 +236,55 @@ def build_feed(hours=180, min_impact="Medium"):
     return out
 
 
+def archive(hours=6):
+    """آرشیوِ اخبارِ اعلام‌شده در `hours` ساعتِ گذشته (High/Medium) + جهتِ موردانتظار.
+
+    نکته: تقویمِ ForexFactory در این خروجی عددِ «اعلام‌شده» را نمی‌دهد؛ پس آنچه
+    می‌آید خودِ رویداد + ساعتِ اعلام + تحلیلِ اثرِ بهتر/بدتر از پیش‌بینی است.
+    """
+    cal = M.get_calendar()
+    now = datetime.datetime.now(datetime.timezone.utc)
+    start = now - datetime.timedelta(hours=max(1, int(hours)))
+    out = []
+    for e in cal:
+        if e.get("impact") not in ("High", "Medium"):
+            continue
+        try:
+            dt = datetime.datetime.fromisoformat(e["date"])
+        except Exception:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ET)
+        if not (start <= dt <= now):
+            continue
+        teh = dt.astimezone(TEHRAN)
+        ccy = e.get("country")
+        out.append({
+            "iso": dt.isoformat(),
+            "title": e.get("title"),
+            "title_fa": _title_fa(e.get("title")),
+            "country": ccy,
+            "country_fa": _ccy_fa(ccy),
+            "impact": e.get("impact"),
+            "forecast": (e.get("forecast") or "").strip(),
+            "previous": (e.get("previous") or "").strip(),
+            "when_fa": f"{_FA_DAYS[teh.weekday()]} {teh.strftime('%H:%M')} به‌وقتِ تهران",
+            "minutes_ago": round((now - dt).total_seconds() / 60),
+            "analysis": _analysis(e.get("title"), ccy),
+        })
+    out.sort(key=lambda x: x["iso"], reverse=True)
+    now_teh = datetime.datetime.now(TEHRAN)
+    return {
+        "ok": True,
+        "hours": int(hours),
+        "generated_tehran": f"{_FA_DAYS[now_teh.weekday()]} {now_teh.strftime('%Y-%m-%d %H:%M')} تهران",
+        "count": len(out),
+        "events": out,
+        "note": ("جهت‌ها «اثرِ موردانتظار»اند (عددِ بهتر یا بدتر از پیش‌بینی). "
+                 "محرکِ واقعیِ بازار انحرافِ عددِ اعلام‌شده از پیش‌بینی است."),
+    }
+
+
 def build(hours=180):
     feed = build_feed(hours=hours)
     highs = [e for e in feed if e["impact"] == "High"]

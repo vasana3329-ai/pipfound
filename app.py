@@ -438,6 +438,32 @@ HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>pipfound — تحلیلگرِ اسمارت‌مانی (SMC / ICT)</title>
+<meta name="theme-color" content="#0b0f17">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="pipfound">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<script>
+/* نگهبانِ بوت: اگر اسکریپتِ اصلی به هر دلیلی از کار بیفتد، به‌جای صفحه‌ی مرده هشدار بده */
+window.__pipfoundBooted = false;
+function pipfoundBootWarn(){
+  if(document.getElementById("bootWarn")) return;
+  var b=document.body; if(!b){ setTimeout(pipfoundBootWarn, 120); return; }
+  var d=document.createElement("div"); d.id="bootWarn";
+  d.setAttribute("style","position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#7f1d1d;"+
+    "color:#fff;padding:10px 14px;font:13px/1.8 system-ui,Tahoma,sans-serif;text-align:center;"+
+    "box-shadow:0 6px 24px rgba(0,0,0,.5)");
+  d.textContent="⚠️ بخشی از کدِ این صفحه خطای نحوی دارد (دکمه‌ها بی‌اثر می‌شوند). اپ را ببند و دوباره باز کن؛ "+
+    "نگهبانِ سلامت خودش نسخه‌ی سالمِ قبلی را برمی‌گرداند. بررسیِ دستی: python3 selfcheck.py";
+  b.appendChild(d);
+}
+window.addEventListener("error", function(e){
+  if(window.__pipfoundBooted) return;
+  if(e && e.message && String(e.message).indexOf("Script error")>=0) return;
+  pipfoundBootWarn();
+});
+setTimeout(function(){ if(!window.__pipfoundBooted) pipfoundBootWarn(); }, 3000);
+</script>
 <style>
 :root{
   --bg:#0b0f17; --panel:#141a26; --panel2:#1b2333; --line:#28324a;
@@ -600,6 +626,37 @@ tr.on td{background:rgba(34,197,94,.05)}
   font-size:15px;padding:14px 20px;border-radius:12px;cursor:pointer;transition:.15s;
   box-shadow:0 0 0 1px rgba(14,165,233,.4),0 4px 18px rgba(99,102,241,.22)}
 .fund-btn:hover{filter:brightness(1.08)}
+/* دکمه‌های کم‌رنگِ نوارِ ابزار: ↻ بروزرسانی و 📁 آرشیو اقتصادی */
+.rf-btn,.ab-btn{background:var(--panel2);border:1px solid var(--line);color:var(--txt);
+  font-weight:700;font-size:14px;padding:12px 16px;border-radius:11px;cursor:pointer;
+  font-family:inherit;transition:.15s;white-space:nowrap}
+.rf-btn:hover,.ab-btn:hover{border-color:var(--accent);color:var(--accent)}
+.rf-btn:disabled,.ab-btn:disabled{opacity:.5;cursor:default}
+.rf-btn .rf-ico{display:inline-block}
+.rf-btn.spin .rf-ico{animation:rfspin .9s linear infinite}
+.rf-btn.ok{border-color:var(--good);color:var(--good)}
+@keyframes rfspin{to{transform:rotate(360deg)}}
+/* مودالِ عمومی (پنجره‌ی آرشیو و …) */
+.modal-overlay{position:fixed;inset:0;background:rgba(2,6,14,.72);display:flex;
+  align-items:center;justify-content:center;z-index:120;padding:20px}
+.modal-box{background:var(--panel);border:1px solid var(--line);border-radius:16px;
+  width:100%;max-width:660px;max-height:82vh;overflow:auto;box-shadow:0 30px 80px rgba(0,0,0,.55)}
+.modal-head{display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:14px 18px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel)}
+.modal-head h3{margin:0;font-size:16px}
+.modal-close{background:transparent;border:1px solid var(--line);color:var(--muted);width:30px;height:30px;
+  border-radius:8px;cursor:pointer;font-family:inherit;font-size:16px;line-height:1}
+.modal-close:hover{border-color:var(--bad);color:var(--bad)}
+.modal-content{padding:14px 18px;font-size:13.5px;line-height:1.9}
+.arc-ev{background:var(--panel2);border:1px solid var(--line);border-radius:12px;
+  padding:12px 14px;margin-bottom:10px}
+.arc-t{font-weight:800;font-size:14.5px}
+.arc-t .arc-en{color:var(--muted);font-size:12px;font-weight:600;margin-inline-start:6px}
+.arc-m{color:var(--muted);font-size:12.5px;margin-top:4px}
+.arc-d{margin-top:6px;color:var(--accent2);font-size:13px}
+.arc-note{color:var(--muted);font-size:12px;border-top:1px dashed var(--line);
+  padding-top:10px;margin-top:8px;line-height:1.9}
+.arc-empty{color:var(--muted);text-align:center;padding:18px;font-size:13px}
 .setups-panel{display:none;margin-top:12px;background:var(--panel);border:1px solid var(--line);
   border-radius:14px;padding:14px}
 .setups-panel.open{display:block}
@@ -706,6 +763,8 @@ tr.on td{background:rgba(34,197,94,.05)}
       <button id="sbBtn" class="sb-btn" title="استراتژیِ سیلوربولتِ نیویورک روی تایمِ ۱ دقیقه — فقط در پنجره‌ی ۰۹:۰۰ تا ۱۱:۰۰ به‌وقتِ نیویورک معتبر است (اوجِ فعالیتِ روز). با کلیک، سبک روی این استراتژی می‌رود، تحلیلِ ۱m اجرا می‌شود و تایمرِ ساعتِ ۹ نمایش داده می‌شود.">🎯 سیلوربولت نیویورک</button>
       <button id="setupsBtn" class="setups-btn" title="سه ستاپِ پیشنهادیِ اسکلپ با وضعیتِ زنده: 🟢 تأییدِ قوی · 🟡 منتظرِ شرایط · 🔴 شرایط نیست. چراغ‌ها از آخرین تحلیل به‌روز می‌شوند؛ با کلیک روی هر ردیف مسیرِ ستاپ باز می‌شود.">📚 ستاپ‌ها</button>
       <button id="fundBtn" class="fund-btn" title="اخبارِ اقتصادیِ پرتأثیر (GDP، تورم، اشتغال، نرخِ بهره) یک روز پیش از اعلام — ساعتِ دقیقِ اعلام به‌وقتِ نیویورک و تهران، به‌همراهِ تحلیلِ اثرِ هر خبر روی جفت‌ارزهای مهم و طلا/نقره. با کلیک، صفحه‌ی جداگانه‌ی فاندمنتال در تبِ نو باز می‌شود.">📰 فاندمنتال</button>
+      <button id="refreshBtn" class="rf-btn" title="همان نمادِ آخرین تحلیل را دوباره با دیتای زنده می‌گیرد — بدونِ رفرشِ کلِ صفحه. تا اولین تحلیل غیرفعال است."><span class="rf-ico">↻</span> بروزرسانی</button>
+      <button id="archiveBtn" class="ab-btn" title="اخبارِ اقتصادیِ پرتأثیرِ ۶ ساعتِ گذشته — هر خبر با ارز، ساعتِ اعلام و جهتِ موردانتظارش روی جفت‌ارزها و طلا/نقره؛ در همین صفحه به‌شکلِ پنجره باز می‌شود.">📁 آرشیو اقتصادی</button>
     </div>
     <div id="setupsPanel" class="setups-panel">
       <div class="sp-head">📚 سه ستاپِ پیشنهادی <span class="jmsg" id="spState">— اول یک تحلیل بگیر تا چراغ‌ها روشن شوند</span></div>
@@ -852,6 +911,25 @@ function startSbTimer(win){
 
 goBtn.onclick=run;
 symIn.addEventListener("keydown",e=>{if(e.key==="Enter")run();});
+
+// دکمه‌ی ↻ بروزرسانی — همان تحلیلِ آخر را با دیتای تازه دوباره می‌گیرد (بدونِ رفرشِ صفحه)
+const refreshBtn=document.getElementById("refreshBtn");
+if(refreshBtn){
+  refreshBtn.disabled=true;
+  refreshBtn.onclick=async ()=>{
+    const sym=(window._last&&window._last.symbol)||symIn.value.trim();
+    if(!sym){ symIn.focus(); return; }
+    symIn.value=sym;
+    refreshBtn.disabled=true; refreshBtn.classList.add("spin");
+    try{
+      await run();
+      refreshBtn.classList.add("ok");
+      setTimeout(()=>refreshBtn.classList.remove("ok"), 1600);
+    }finally{
+      refreshBtn.classList.remove("spin"); refreshBtn.disabled=false;
+    }
+  };
+}
 
 const btBtn = $("#bt"), btRes = $("#btresult");
 btBtn.onclick = runBacktest;
@@ -1173,6 +1251,7 @@ function render(d){
     </div>
   </div>`;
   window._last = d;
+  if(refreshBtn) refreshBtn.disabled = false;
   const jb = document.getElementById("jbtn");
   if(jb) jb.onclick = saveJournal;
   const ab = document.getElementById("alarmBtn");
@@ -1264,6 +1343,55 @@ renderSetups(null);
 // دکمه‌ی فاندمنتال — صفحه‌ی جداگانه‌ی اخبارِ اقتصادی را در تبِ نو باز می‌کند
 const fundBtn=document.getElementById("fundBtn");
 if(fundBtn){ fundBtn.onclick=()=>window.open("/fundamental","_blank","noopener"); }
+
+// پنجره‌ی عمومی (مودال) — بدونِ وابستگیِ بیرونی
+function openModal(title, html){
+  const old=document.getElementById("pipModal");
+  if(old) old.remove();
+  const ov=document.createElement("div");
+  ov.className="modal-overlay"; ov.id="pipModal";
+  ov.innerHTML=`<div class="modal-box">
+    <div class="modal-head"><h3>${title}</h3>
+      <button class="modal-close" title="بستن">×</button></div>
+    <div class="modal-content">${html}</div>
+  </div>`;
+  ov.addEventListener("click", e=>{ if(e.target===ov) ov.remove(); });
+  ov.querySelector(".modal-close").onclick=()=>ov.remove();
+  document.body.appendChild(ov);
+}
+
+// دکمه‌ی 📁 آرشیو اقتصادی — اخبارِ ۶ ساعتِ گذشته + جهتِ موردانتظار، بدونِ رفرشِ صفحه
+const archiveBtn=document.getElementById("archiveBtn");
+if(archiveBtn){
+  archiveBtn.onclick=async ()=>{
+    archiveBtn.disabled=true;
+    try{
+      const r=await fetch("/api/fundamental-archive?hours=6");
+      const data=await r.json();
+      if(data.error){
+        openModal("📁 آرشیو اقتصادی", `<div class="arc-empty">خطا: ${data.error}</div>`);
+        return;
+      }
+      const evs=data.events||[];
+      const gold=x=>(x&&x[0]?` · ${x[0]}: ${x[1]}`:"");
+      const rows = evs.length ? evs.map(e=>{
+        const a=e.analysis||{}, b=a.beat||{}, m=a.miss||{};
+        return `<div class="arc-ev">
+          <div class="arc-t">${a.icon||""} ${e.title_fa||e.title||""}<span class="arc-en">${e.title||""}</span></div>
+          <div class="arc-m">${e.country_fa||e.country||""} · ${e.when_fa||""}${e.minutes_ago!=null?` · ${e.minutes_ago} دقیقه پیش`:""} · ${e.impact==="High"?"پرتأثیر":"متوسط"}</div>
+          <div class="arc-d">⬆ ${b.label||""}: ${b.ccy_dir||""}${gold(b.gold)}</div>
+          <div class="arc-d">⬇ ${m.label||""}: ${m.ccy_dir||""}${gold(m.gold)}</div>
+        </div>`;
+      }).join("") : `<div class="arc-empty">در ۶ ساعتِ گذشته خبرِ پرتأثیری در تقویم نبود.</div>`;
+      openModal(`📁 آرشیو اقتصادی — ۶ ساعتِ اخیر (${data.count||0} خبر)`,
+        rows + `<div class="arc-note">این جهت‌ها «اثرِ موردانتظار»اند (عددِ بهتر یا بدتر از پیش‌بینی)؛ تقویمِ ForexFactory عددِ اعلام‌شدهٔ واقعی را در این خروجی نمی‌دهد و محرکِ واقعیِ بازار انحرافِ عدد از پیش‌بینی است.</div>`);
+    }catch(err){
+      openModal("📁 آرشیو اقتصادی", `<div class="arc-empty">ارتباط ناموفق: ${err}</div>`);
+    }finally{
+      archiveBtn.disabled=false;
+    }
+  };
+}
 
 async function setOteAlarm(){
   const d = window._last;
@@ -1439,6 +1567,14 @@ async function loadAlarms(){
 }
 loadAlarms();
 setInterval(loadAlarms, 30000);
+
+// ثبتِ service worker تا اپ مثلِ یک اپِ نصب‌پذیر بالا بیاید (فقط روی http/https)
+if("serviceWorker" in navigator && (location.protocol==="http:" || location.protocol==="https:")){
+  window.addEventListener("load", ()=>{ navigator.serviceWorker.register("/sw.js").catch(()=>{}); });
+}
+
+// علامتِ پایانِ بوت — اگر این خط اجرا نشود، هشدارِ قرمزِ نگهبانِ بوت بالای صفحه می‌آید
+window.__pipfoundBooted = true;
 </script>
 </body>
 </html>
@@ -1842,6 +1978,52 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, data, shot.get("ctype", "image/png"))
             except Exception as e:
                 return self._send(500, json.dumps({"error": str(e)}))
+        # 🩺 سلامتِ اپ: سینتکس + قراردادِ «هیچ کلیدی گم نشود» + وجودِ اسنپ‌شات
+        if u.path == "/api/selfcheck":
+            try:
+                import selfcheck as SC
+                _root = os.path.dirname(os.path.abspath(__file__))
+                rep = SC.run_checks(_root)
+                rep["snapshot_available"] = os.path.isdir(SC.GOOD)
+                rep["log"] = SC.LOG
+            except Exception as e:
+                rep = {"ok": False, "problems": [f"selfcheck در دسترس نیست: {e}"]}
+            return self._send(200, json.dumps(rep, ensure_ascii=False))
+        # PWA: مانیفست، سرویس‌ورکر و آیکون‌ها — از روی دیسک، بدونِ وابستگیِ بیرونی
+        if u.path in ("/manifest.webmanifest", "/sw.js", "/icon-180.png",
+                      "/icon-192.png", "/icon-192-mask.png",
+                      "/icon-512.png", "/icon-512-mask.png"):
+            ext = os.path.splitext(u.path)[1]
+            wctype = {".webmanifest": "application/manifest+json; charset=utf-8",
+                      ".js": "application/javascript; charset=utf-8",
+                      ".png": "image/png"}.get(ext, "application/octet-stream")
+            fp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              os.path.basename(u.path))
+            if os.path.isfile(fp):
+                try:
+                    with open(fp, "rb") as f:
+                        return self._send(200, f.read(), wctype)
+                except Exception as e:
+                    return self._send(500, json.dumps({"error": str(e)}))
+            return self._send(404, json.dumps({"error": "not found"}))
+        # آرشیوِ اخبارِ اعلام‌شده‌ی N ساعتِ گذشته (پیش‌فرض ۶ ساعت)
+        if u.path == "/api/fundamental-archive":
+            if FUND is None:
+                return self._send(200, json.dumps(
+                    {"error": "موتورِ فاندمنتال در دسترس نیست"}, ensure_ascii=False))
+            try:
+                hours = abs(int(parse_qs(u.query).get("hours", ["6"])[0]))
+            except Exception:
+                hours = 6
+            try:
+                if hasattr(FUND, "archive"):
+                    res = FUND.archive(hours=hours)
+                else:
+                    res = {"ok": False, "error": "archive در موتورِ فاندمنتال نیست", "events": []}
+                return self._send(200, json.dumps(res, ensure_ascii=False))
+            except Exception as e:
+                traceback.print_exc()
+                return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
         return self._send(404, json.dumps({"error": "not found"}))
 
     def do_DELETE(self):
@@ -1866,6 +2048,7 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             return self._send(200, json.dumps({"deleted": sid}))
         return self._send(404, json.dumps({"error": "not found"}))
+
 
     def _handle_upload(self):
         """آپلودِ اسکرین‌شات به‌صورتِ JSON: {symbol, note, dataurl}
@@ -2010,6 +2193,26 @@ def main():
     ap.add_argument("--port", type=int, default=8787)
     ap.add_argument("--host", default="127.0.0.1")
     a = ap.parse_args()
+
+    # 🩺 نگهبانِ سلامتِ کد — پیش از سرو کردنِ صفحه
+    _root = os.path.dirname(os.path.abspath(__file__))
+    try:
+        import selfcheck as SC
+        _rep = SC.run_checks(_root)
+        if _rep.get("ok"):
+            SC.save_snapshot(_root, _rep)
+            print("🩺 سلامتِ کد: ✅ تأیید شد (سینتکس + کلیدها)")
+        else:
+            print("🩺 سلامتِ کد: ❌ " + " | ".join(_rep.get("problems") or [])[:300])
+            _healed = SC.guard(_root)
+            if _healed.get("ok"):
+                print("♻️ نسخه‌ی سالمِ قبلی برگردانده شد — سرور را دوباره اجرا کن (pipfound.app).")
+            else:
+                print("   ترمیمِ خودکار نتیجه نداد. بررسی: python3 selfcheck.py")
+            return 2
+    except Exception as _e:
+        print(f"🩺 سلامتِ کد: بررسی نشد ({_e})")
+
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     url = f"http://{a.host}:{a.port}"
     start_alarm_worker()
@@ -2026,4 +2229,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)
