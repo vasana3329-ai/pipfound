@@ -242,14 +242,18 @@ def run_checks(root, live=False, enforce_contract=True, accept_removals=False):
     inv["routes"] = routes_of(root)
     rep["inventory"] = inv
 
-    # کنترل‌های الزامی
-    missing = [i for i in REQUIRED_IDS if i not in inv["ids"]]
-    if missing:
-        rep["problems"].append("کنترل‌های غایب در صفحه: " + "، ".join(missing))
-
-    # قراردادِ «چیزی گم نشود» بر پایه‌ی نسخه‌ی سالمِ قبلی
+    # ── قراردادِ «هیچ کلیدی گم نشود» ──
+    # مبنای مقایسه، آخرین نسخه‌ی سالم است (نه یک فهرستِ ابدی)؛ پس اگر عمداً
+    # دکمه‌ای را برداشتی، با یک بار --accept-removals مبنای تازه ثبت می‌شود.
+    # فهرستِ REQUIRED_IDS فقط وقتی بکار می‌آید که هنوز هیچ اسنپ‌شاتی نباشد
+    # (کلونِ تازه / اولین اجرا).
     snap = read_snapshot_inventory()
-    if snap and enforce_contract and not accept_removals:
+    missing = [i for i in REQUIRED_IDS if i not in inv["ids"]]
+
+    if accept_removals:
+        if missing:
+            rep["warnings"].append("کنترل‌های غایب (پذیرفته‌شده با --accept-removals): " + "، ".join(missing))
+    elif snap and enforce_contract:
         lost_wired = sorted(set(snap.get("wired", [])) - set(inv["ids"]))
         lost_routes = sorted(set(snap.get("routes", [])) - set(inv["routes"]))
         if lost_wired:
@@ -259,8 +263,10 @@ def run_checks(root, live=False, enforce_contract=True, accept_removals=False):
             rep["problems"].append("مسیرهایی که در نسخه‌ی سالم بود و الان نیست: "
                                    + "، ".join(lost_routes))
     else:
-        if [i for i in REQUIRED_IDS if i not in inv["ids"]]:
-            rep["warnings"].append("مبنای مقایسه (اسنپ‌شات) موجود نیست")
+        if missing:
+            rep["problems"].append("کنترل‌های غایب در صفحه: " + "، ".join(missing))
+        if not snap:
+            rep["warnings"].append("مبنای مقایسه (اسنپ‌شات) موجود نیست — با --snapshot ساخته می‌شود")
 
     if live:
         lp = live_problems()
@@ -368,6 +374,9 @@ def main():
     a = ap.parse_args()
     root = os.path.abspath(a.root)
 
+    if a.accept_removals:
+        _log("ACCEPT-REMOVALS — حذفِ عمدیِ کنترل‌ها پذیرفته شد؛ مبنای «سالم» بازتعریف می‌شود")
+
     if a.guard:
         rep = guard(root)
         if rep.get("ok"):
@@ -376,6 +385,9 @@ def main():
         rep = run_checks(root, live=a.live, accept_removals=a.accept_removals)
         if a.snapshot and rep["ok"]:
             rep["snapshot"] = save_snapshot(root, rep)
+        elif a.snapshot:
+            rep.setdefault("warnings", []).append(
+                "اسنپ‌شات گرفته نشد (فقط نسخه‌ی سالم ذخیره می‌شود) — خطاها را رفع کن یا با --accept-removals تایید کن")
 
     print(json.dumps(rep, ensure_ascii=False, indent=2) if a.json else _human(rep))
     sys.exit(0 if rep.get("ok") else 1)

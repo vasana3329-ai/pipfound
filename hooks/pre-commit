@@ -1,0 +1,67 @@
+#!/bin/bash
+# pipfound · pre-commit
+# ── کدِ خراب هرگز وارد تاریخِ گیت نشود ─────────────────────────────────────
+# چه کار می‌کند:
+#   محتوایِ همین کامیت (index، نه فایل‌های ذخیره‌نشده‌ی ورک‌تری) را در یک پوشه‌ی
+#   موقت می‌ریزد و روی همان، نگهبانِ سلامت را اجرا می‌کند:
+#     • سینتکسِ پایتون‌ها
+#     • سینتکسِ همه‌ی بلوک‌های <script> صفحه (با node --check)
+#     • قراردادِ «هیچ کلیدی گم نشود» + مسیرها
+#   اگر مشکلی بود، کامیت متوقف می‌شود و راهِ رفع را نشان می‌دهد.
+#
+# عبورِ اضطراری:  PIPFOUND_SKIP_SELFCHECK=1 git commit ...
+set -u
+
+REPO="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$REPO" || exit 1
+
+if [ "${PIPFOUND_SKIP_SELFCHECK:-0}" = "1" ]; then
+  echo "🩺 نگهبانِ سلامت: با PIPFOUND_SKIP_SELFCHECK=1 رد شد"
+  exit 0
+fi
+
+PY="python3"
+if [ -x "$HOME/.hermes/hermes-agent/venv/bin/python3" ]; then
+  PY="$HOME/.hermes/hermes-agent/venv/bin/python3"
+fi
+
+CHECKER="$REPO/selfcheck.py"
+if [ ! -f "$CHECKER" ]; then
+  echo "🩺 نگهبانِ سلامت: selfcheck.py نیست — از این چک صرفِ‌نظر شد"
+  exit 0
+fi
+
+# ۱) محتوایِ stage‌شده را در پوشه‌ی موقت بریز (چکِ «همان چیزی که کامیت می‌شود»)
+TMP="$(mktemp -d -t pf_precommit 2>/dev/null || mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+git checkout-index -a --prefix="$TMP/" 2>/dev/null
+
+# اگر نسخه‌ی stage‌شده‌ی selfcheck موجود بود، همان را بکار بگیر (خودسنجیِ همان کامیت)
+CHECK_TARGET="$TMP"
+if [ -f "$TMP/selfcheck.py" ]; then
+  CHECKER="$TMP/selfcheck.py"
+fi
+
+OUT="$("$PY" "$CHECKER" --root "$CHECK_TARGET" 2>&1)"
+RC=$?
+
+if [ "$RC" -eq 0 ]; then
+  printf '%s\n' "$OUT" | sed -n '1p'
+  echo "🩺 نگهبانِ سلامت: ✅ تأیید شد — کامیت ادامه می‌دهد"
+  exit 0
+fi
+
+echo "──────────────────────────────────────────────────────────────"
+printf '%s\n' "$OUT" | sed -n '1,14p'
+echo "──────────────────────────────────────────────────────────────"
+cat <<'MSG'
+✋ کامیت متوقف شد: نگهبانِ سلامت در کدِ اپ مشکل دید.
+
+   دیدنِ جزئیات:                 python3 selfcheck.py
+   ترمیمِ خودکار از نسخه‌ی سالم:  python3 selfcheck.py --guard
+   اگر عمداً دکمه‌ای حذف/تغییر دادی و مطمئنی:
+                                 python3 selfcheck.py --snapshot --accept-removals
+   سرِ صحنه خراب بودی؟ چند ثانیه صبر کن و پیام بالا را بخوان؛
+   عبورِ اضطراری:                PIPFOUND_SKIP_SELFCHECK=1 git commit ...
+MSG
+exit 1
