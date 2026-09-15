@@ -1354,7 +1354,7 @@ function openModal(title, html){
     <div class="modal-head"><h3>${title}</h3>
       <button class="modal-close" title="بستن">×</button></div>
     <div class="modal-content">${html}</div>
-  </div>`;
+  </div>\`;
   ov.addEventListener("click", e=>{ if(e.target===ov) ov.remove(); });
   ov.querySelector(".modal-close").onclick=()=>ov.remove();
   document.body.appendChild(ov);
