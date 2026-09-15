@@ -1,0 +1,92 @@
+name: pipfound health guard
+
+# روی هر پوش و هر Pull Request اجرا می‌شود تا کدِ خراب وارد main نشود.
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: pipfound-selfcheck-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  health:
+    name: نگهبانِ سلامت + اسموک‌تستِ سرور
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: دریافتِ کد
+        uses: actions/checkout@v4
+
+      - name: پایتون
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: نود (برای چکِ سینتکسِ جاوااسکریپت)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # ── لایه‌ی ۱: چکِ سینتکسِ پایتون و JS + قراردادِ «هیچ کلیدی گم نشود» ──
+      # مبنای مقایسه: فایلِ selfcheck-baseline.json که در گیت نگه داشته می‌شود.
+      - name: نگهبانِ سلامت (سینتکس + کلیدها + مسیرها)
+        run: |
+          set +e
+          python3 selfcheck.py --json > /tmp/selfcheck.json
+          rc=$?
+          python3 selfcheck.py || true
+          echo "── نتیجه‌ی نگهبان: exit=$rc ──"
+          exit $rc
+
+      # ── لایه‌ی ۲: سرورِ واقعی بالا بیاید و صفحه و اندپوینت‌ها جواب بدهند ──
+      - name: اسموک‌تستِ سرورِ واقعی
+        run: |
+          python3 app.py --port 8787 > /tmp/pipfound.log 2>&1 &
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:8787/api/health >/dev/null && break
+            sleep 0.5
+          done
+          curl -sf http://127.0.0.1:8787/api/health >/dev/null
+          echo "سرور بالا آمد ✓"
+
+          page="$(curl -sf http://127.0.0.1:8787/)"
+          for id in go bt sym refreshBtn archiveBtn fundBtn sbBtn setupsBtn jbtn; do
+            if ! printf '%s' "$page" | grep -q "id=\"$id\""; then
+              echo "::error::کلیدِ «$id» در صفحه‌ی سرو‌شده نیست"
+              exit 1
+            fi
+          done
+          echo "همه‌ی کلیدهای اصلی در صفحه هستند ✓"
+
+          curl -sf http://127.0.0.1:8787/manifest.webmanifest >/dev/null
+          curl -sf http://127.0.0.1:8787/sw.js >/dev/null
+          echo "فایل‌های PWA سرو می‌شوند ✓"
+
+          curl -sf http://127.0.0.1:8787/api/selfcheck \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); print('selfcheck داخلِ اپ:', d.get('ok')); sys.exit(0 if d.get('ok') else 1)"
+          echo "اسموک‌تست پاس شد ✓"
+
+      # ── گزارشِ دقیقِ خطاها روی همان کامیت/PR ──
+      - name: گزارشِ خطاها
+        if: failure()
+        run: |
+          echo "──────── لاگِ سرور ────────"
+          tail -40 /tmp/pipfound.log 2>/dev/null || true
+          echo "──────── گزارشِ نگهبان ────────"
+          python3 selfcheck.py --json > /tmp/report.json || true
+          python3 - <<'PY'
+          import json
+          try:
+              d = json.load(open("/tmp/report.json", encoding="utf-8"))
+          except Exception:
+              raise SystemExit(0)
+          print("مبنا:", d.get("baseline"), "| موتورِ JS:", d.get("engine"))
+          for p in (d.get("problems") or []):
+              print("::error::" + p)
+          for w in (d.get("warnings") or []):
+              print("::warning::" + w)
+          PY

@@ -46,6 +46,9 @@ TRACKED = ["app.py", "fundamental.py", "confluence.py", "smc_engine.py",
 
 PAGE_CONSTS = ("HTML", "FUND_PAGE")
 
+# فایلِ مبنای «هیچ کلیدی گم نشود» که در گیت کامیت می‌شود تا در CI هم کار کند
+REPO_BASELINE_NAME = "selfcheck-baseline.json"
+
 # کنترل‌هایی که همیشه باید در صفحه باشند (کلیدهای اصلیِ اپ)
 REQUIRED_IDS = ["sym", "go", "bt", "sbBtn", "setupsBtn", "fundBtn",
                 "refreshBtn", "archiveBtn", "jbtn"]
@@ -195,12 +198,40 @@ def routes_of(root):
     return sorted(found)
 
 
-def read_snapshot_inventory():
+def read_baseline(root=None):
+    """مبنای «نسخه‌ی سالم» → (inventory, منبع).
+    اول اسنپ‌شاتِ همین ماشین (~/pipfound/good)، بعد فایلِ نسخه‌بندی‌شده‌ی
+    ریپو (selfcheck-baseline.json)؛ اگر هیچ‌کدام نبود، (None, None)."""
     fp = os.path.join(GOOD, "inventory.json")
     try:
         with open(fp, encoding="utf-8") as f:
-            return json.load(f)
+            return json.load(f), "snapshot"
     except Exception:
+        pass
+    if root:
+        try:
+            with open(os.path.join(root, REPO_BASELINE_NAME), encoding="utf-8") as f:
+                return json.load(f), "repo"
+        except Exception:
+            pass
+    return None, None
+
+
+def write_repo_baseline(root, rep=None):
+    """مبنای کلیدها/مسیرها را در فایلِ نسخه‌بندی‌شده‌ی ریپو می‌نویسد (برای CI)."""
+    try:
+        inv = dict(((rep or {}).get("inventory") or inventory(page_sources(root))))
+        inv["routes"] = inv.get("routes") or routes_of(root)
+        inv["saved_at"] = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+        inv["note"] = ("مبنای «هیچ کلیدی گم نشود» — با "
+                       "python3 selfcheck.py --snapshot بازتعریف می‌شود")
+        fp = os.path.join(root, REPO_BASELINE_NAME)
+        with open(fp, "w", encoding="utf-8") as f:
+            json.dump(inv, f, ensure_ascii=False, indent=2, sort_keys=True)
+        _log(f"BASELINE → {fp} (ids={len(inv.get('ids') or [])}, routes={len(inv.get('routes') or [])})")
+        return fp
+    except Exception as e:
+        _log(f"BASELINE FAILED: {e}")
         return None
 
 
@@ -247,7 +278,8 @@ def run_checks(root, live=False, enforce_contract=True, accept_removals=False):
     # دکمه‌ای را برداشتی، با یک بار --accept-removals مبنای تازه ثبت می‌شود.
     # فهرستِ REQUIRED_IDS فقط وقتی بکار می‌آید که هنوز هیچ اسنپ‌شاتی نباشد
     # (کلونِ تازه / اولین اجرا).
-    snap = read_snapshot_inventory()
+    snap, snap_src = read_baseline(root)
+    rep["baseline"] = snap_src
     missing = [i for i in REQUIRED_IDS if i not in inv["ids"]]
 
     if accept_removals:
@@ -266,7 +298,7 @@ def run_checks(root, live=False, enforce_contract=True, accept_removals=False):
         if missing:
             rep["problems"].append("کنترل‌های غایب در صفحه: " + "، ".join(missing))
         if not snap:
-            rep["warnings"].append("مبنای مقایسه (اسنپ‌شات) موجود نیست — با --snapshot ساخته می‌شود")
+            rep["warnings"].append("مبنای مقایسه (اسنپ‌شات/فایلِ مبنا) موجود نیست — با --snapshot ساخته می‌شود")
 
     if live:
         lp = live_problems()
@@ -349,7 +381,7 @@ def _human(rep):
     lines.append(f"{mark} — {rep.get('root')} (موتورِ JS: {rep.get('engine')})")
     inv = rep.get("inventory") or {}
     lines.append(f"   کلیدها: {len(inv.get('ids') or [])} · کلیدهای سیم‌کشی‌شده: {len(inv.get('wired') or [])}"
-                 f" · مسیرها: {len(inv.get('routes') or [])}")
+                 f" · مسیرها: {len(inv.get('routes') or [])} · مبنا: {rep.get('baseline') or '—'}")
     for p in rep.get("problems") or []:
         lines.append(f"   ✗ {p}")
     for w in rep.get("warnings") or []:
@@ -358,6 +390,8 @@ def _human(rep):
         lines.append(f"   ♻️ نسخه‌ی سالمِ قبلی برگردانده شد از: {rep['restored_from']}")
     if rep.get("snapshot"):
         lines.append(f"   💾 اسنپ‌شات: {rep['snapshot']}")
+    if rep.get("baseline_file"):
+        lines.append(f"   📌 فایلِ مبنا: {rep['baseline_file']}")
     lines.append(f"   📝 لاگ: {LOG}")
     return "\n".join(lines)
 
@@ -385,6 +419,7 @@ def main():
         rep = run_checks(root, live=a.live, accept_removals=a.accept_removals)
         if a.snapshot and rep["ok"]:
             rep["snapshot"] = save_snapshot(root, rep)
+            rep["baseline_file"] = write_repo_baseline(root, rep)
         elif a.snapshot:
             rep.setdefault("warnings", []).append(
                 "اسنپ‌شات گرفته نشد (فقط نسخه‌ی سالم ذخیره می‌شود) — خطاها را رفع کن یا با --accept-removals تایید کن")
