@@ -67,8 +67,76 @@ _JR_FILE = _journal_path()
 _JR_LEGACY = [os.path.join(HOME, "Desktop", "trading-journal", "journal.csv")]
 
 
+# ستون‌های دفتر — همان‌های `trade-journal/scripts/journal.py` (در نوشتارگرِ داخلی به کار می‌روند)
+_JR_FIELDS = ["id", "datetime", "symbol", "direction", "session", "tf", "htf_bias",
+              "entry", "sl", "tp", "rr", "risk_pct", "setup", "poi", "reason",
+              "status", "result", "exit", "realized_r", "mistake", "lesson", "notes"]
+
+
+class _JournalFallback:
+    """نوشتارگرِ داخلیِ ژورنال — فقط وقتی ماژولِ sibling پیدا نشود.
+
+    قبلاً در آن حالت، ثبت در ژورنال بی‌صدا از کار می‌افتاد (پوشهٔ مهارت جابه‌جا شده بود،
+    یا روی ماشینی دیگر). ستون‌ها و رفتارِ افزودن همان ماژولِ اصلی است تا رفت‌وبرگشت
+    در هر دو حالت یکسان باشد و CI هم بتواند همین مسیر را واقعاً تست کند.
+    """
+
+    name = "fallback"
+    FIELDS = _JR_FIELDS
+
+    def _read(self, path):
+        return _journal_rows(path) or []
+
+    def cmd_add(self, a):
+        import csv as _csv
+        import datetime as _dt
+        rows = self._read(a.file)
+        ids = [int(r["id"]) for r in rows if str(r.get("id", "")).isdigit()]
+        nid = str(max(ids) + 1) if ids else "1"
+        row = {f: "" for f in _JR_FIELDS}
+        row.update({
+            "id": nid,
+            "datetime": getattr(a, "datetime", None) or _dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "symbol": str(getattr(a, "symbol", "") or "").upper(),
+            "direction": getattr(a, "direction", "") or "",
+            "session": getattr(a, "session", "") or "",
+            "tf": getattr(a, "tf", "") or "",
+            "htf_bias": getattr(a, "htf_bias", "") or "",
+            "entry": getattr(a, "entry", "") or "",
+            "sl": getattr(a, "sl", "") or "",
+            "tp": getattr(a, "tp", "") or "",
+            "rr": getattr(a, "rr", "") or "",
+            "risk_pct": getattr(a, "risk_pct", "") or "",
+            "setup": getattr(a, "setup", "") or "",
+            "poi": getattr(a, "poi", "") or "",
+            "reason": getattr(a, "reason", "") or "",
+            "status": getattr(a, "status", "") or "open",
+            "result": getattr(a, "result", None) or "",
+            "exit": getattr(a, "exit", None) or "",
+            "realized_r": getattr(a, "realized_r", None) or "",
+            "mistake": getattr(a, "mistake", None) or "",
+            "lesson": getattr(a, "lesson", None) or "",
+            "notes": getattr(a, "notes", "") or "",
+        })
+        d = os.path.dirname(a.file)
+        if d and not os.path.exists(d):
+            os.makedirs(d, exist_ok=True)
+        with open(a.file, "w", newline="", encoding="utf-8") as fh:
+            w = _csv.DictWriter(fh, fieldnames=_JR_FIELDS)
+            w.writeheader()
+            for r in rows:
+                w.writerow({f: r.get(f, "") for f in _JR_FIELDS})
+            w.writerow(row)
+        print(json.dumps({"added": row["id"], "symbol": row["symbol"], "file": a.file},
+                         ensure_ascii=False))
+
+
+_JR = J if J is not None else _JournalFallback()
+_JR_IMPL = "ماژولِ trade-journal" if J is not None else "نوشتارگرِ داخلی"
+
+
 def _journal_fields():
-    return list(getattr(J, "FIELDS", None) or ["id", "datetime", "symbol", "direction"])
+    return list(getattr(_JR, "FIELDS", None) or _JR_FIELDS)
 
 
 def _journal_rows(path):
@@ -2226,9 +2294,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
         if u.path != "/api/journal":
             return self._send(404, json.dumps({"error": "not found"}))
-        if J is None:
-            return self._send(200, json.dumps(
-                {"error": "ماژولِ ژورنال یافت نشد"}, ensure_ascii=False))
         try:
             ln = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(ln) if ln else b"{}"
@@ -2268,7 +2333,7 @@ class Handler(BaseHTTPRequestHandler):
             old = sys.stdout
             sys.stdout = buf
             try:
-                J.cmd_add(ns)
+                _JR.cmd_add(ns)
             finally:
                 sys.stdout = old
             out = json.loads(buf.getvalue().strip() or "{}")
@@ -2304,7 +2369,7 @@ def main():
         print(f"🩺 سلامتِ کد: بررسی نشد ({_e})")
 
     _moved = f" (+{_JR_MOVED} ردیفِ قدیمی)" if _JR_MOVED else ""
-    print(f"   📓 دفترِ معاملات: {_JR_FILE}{_moved}")
+    print(f"   📓 دفترِ معاملات: {_JR_FILE}{_moved}  [{_JR_IMPL}]")
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     url = f"http://{a.host}:{a.port}"
     start_alarm_worker()
