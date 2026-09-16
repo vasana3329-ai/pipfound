@@ -1,9 +1,16 @@
 name: pipfound health guard
 
-# روی هر پوش و هر Pull Request اجرا می‌شود تا کدِ خراب وارد main نشود.
+# چرا «هر پوش» به «پوشِ main + هر PR» تغییر کرد: پوشِ یک شاخهٔ فیچر که PR باز دارد
+# هم رویدادِ push و هم رویدادِ pull_request را می‌افروخت، پس همان چک دو بار اجرا
+# می‌شد (دو برابر دقیقهٔ CI و دو ردیفِ تکراری در پنلِ PR). حالا:
+#   • هر PR (باز شدن / پوشِ تازه / بازگشایی)  ←  pull_request   (پوششِ اصلیِ نگهبان)
+#   • پوشِ main بعد از ادغام                 ←  push (branches: [main])
+# اجرای دستی از تبِ Actions هم با workflow_dispatch ممکن است.
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: pipfound-selfcheck-${{ github.ref }}
