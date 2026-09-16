@@ -48,6 +48,95 @@ try:
 except Exception:
     J = None
 
+# ── مسیرِ دفترِ معاملات (ژورنال): قابلِ تنظیم و بی‌نیاز از پوشه‌های محافظت‌شده ──
+# ترتیبِ انتخاب: PIPFOUND_JOURNAL_CSV → PIPFOUND_JOURNAL_DIR/journal.csv → ~/pipfound/journal.csv
+# چرا: جاب‌های launchd (مثلِ پیش‌نمایش) اجازه‌ی نوشتن در ~/Desktop و ~/Documents را
+# ندارند (محدودیتِ TCC مک). مسیرِ پیش‌فرض بیرونِ آن‌هاست و دفترهای قدیمی هم یک‌بار،
+# فقط با افزودنِ ردیف‌های غایب (بدونِ تغییر یا پاک‌کردنِ فایلِ قدیمی)، منتقل می‌شوند.
+def _journal_path():
+    f = os.environ.get("PIPFOUND_JOURNAL_CSV")
+    if f:
+        return os.path.expanduser(f)
+    d = os.environ.get("PIPFOUND_JOURNAL_DIR")
+    if d:
+        return os.path.join(os.path.expanduser(d), "journal.csv")
+    return os.path.join(HOME, "pipfound", "journal.csv")
+
+
+_JR_FILE = _journal_path()
+_JR_LEGACY = [os.path.join(HOME, "Desktop", "trading-journal", "journal.csv")]
+
+
+def _journal_fields():
+    return list(getattr(J, "FIELDS", None) or ["id", "datetime", "symbol", "direction"])
+
+
+def _journal_rows(path):
+    """ردیف‌های یک دفترِ CSV — None اگر فایل نبود یا خوانده نشد."""
+    import csv as _csv
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, newline="", encoding="utf-8") as fh:
+            return [r for r in _csv.DictReader(fh) if (r.get("symbol") or "").strip()]
+    except Exception:
+        return None
+
+
+def _journal_migrate(path):
+    """ردیف‌های دفترهای قدیمی (Desktop/Documents) را یک‌بار به فایلِ فعلی می‌آورد.
+
+    بی‌خطر و تکرارپذیر: فایلِ قدیمی هیچ‌وقت پاک/عوض نمی‌شود، ردیفِ تکراری اضافه نمی‌شود
+    و شناسه‌ی تازه با یادداشتِ شماره‌ی قبلی داده می‌شود. با env صریح، دست به هیچ فایلی نمی‌زند.
+    """
+    import csv as _csv
+    if os.environ.get("PIPFOUND_JOURNAL_CSV"):
+        return 0
+    fields = _journal_fields()
+    rows = _journal_rows(path) or []
+
+    def key(r):
+        return (r.get("datetime", ""), r.get("symbol", ""),
+                r.get("direction", ""), str(r.get("entry", "")))
+
+    have = {key(r) for r in rows}
+    ids = [int(r["id"]) for r in rows if str(r.get("id", "")).isdigit()]
+    nid = (max(ids) + 1) if ids else 1
+    added = 0
+    for lp in _JR_LEGACY:
+        lp = os.path.expanduser(lp)
+        if not os.path.exists(lp) or os.path.abspath(lp) == os.path.abspath(path):
+            continue
+        for r in (_journal_rows(lp) or []):
+            k = key(r)
+            if k in have:
+                continue
+            nr = {f: r.get(f, "") for f in fields}
+            nr["id"] = str(nid)
+            nid += 1
+            nr["notes"] = (str(nr.get("notes", "")) +
+                           f" · از دفترِ قدیمیِ {lp} (شماره‌ی قبلی {r.get('id', '?')})").strip(" ·")
+            rows.append(nr)
+            have.add(k)
+            added += 1
+    if added:
+        d = os.path.dirname(path)
+        if d and not os.path.exists(d):
+            os.makedirs(d, exist_ok=True)
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            w = _csv.DictWriter(fh, fieldnames=fields)
+            w.writeheader()
+            for r in rows:
+                w.writerow({f: r.get(f, "") for f in fields})
+    return added
+
+
+try:
+    _JR_MOVED = _journal_migrate(_JR_FILE)
+except Exception as _e:
+    _JR_MOVED = 0
+    print(f"📓 ژورنال: انتقالِ ردیف‌های قدیمی انجام نشد ({_e})")
+
 # سبکِ معامله → تایم‌فریم‌ها (HTF اول). engine از این‌ها پشتیبانی می‌کند:
 # 1m 5m 15m 30m 1h 4h 1d 1w
 STYLES = {
@@ -439,6 +528,7 @@ HTML = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>pipfound — تحلیلگرِ اسمارت‌مانی (SMC / ICT)</title>
 <meta name="theme-color" content="#0b0f17">
+<link rel="icon" href="/icon-192.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="pipfound">
 <link rel="manifest" href="/manifest.webmanifest">
@@ -2153,7 +2243,7 @@ class Handler(BaseHTTPRequestHandler):
             tfs = d.get("timeframes") or []
             kz = d.get("killzone") or ""
             ns = argparse.Namespace(
-                file=os.path.join(HOME, "pipfound", "journal.csv"),
+                file=_JR_FILE,
                 symbol=str(d.get("symbol", "")),
                 direction="long" if "صعود" in str(p.get("direction", "")) else "short",
                 session=kz,
@@ -2213,6 +2303,8 @@ def main():
     except Exception as _e:
         print(f"🩺 سلامتِ کد: بررسی نشد ({_e})")
 
+    _moved = f" (+{_JR_MOVED} ردیفِ قدیمی)" if _JR_MOVED else ""
+    print(f"   📓 دفترِ معاملات: {_JR_FILE}{_moved}")
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     url = f"http://{a.host}:{a.port}"
     start_alarm_worker()
