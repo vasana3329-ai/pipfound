@@ -78,6 +78,24 @@ jobs:
           echo "اسموک‌تست پاس شد ✓"
 
       # ── گزارشِ دقیقِ خطاها روی همان کامیت/PR ──
+      # ── لایه‌ی ۳: رندرِ واقعی در مرورگرِ headless — «کلیدها غیب نشده‌اند و سیم‌کشی‌اند؟» ──
+      # چرا لازم است: یک خطای جاوااسکریپت، دکمه‌ها را در HTML نگه می‌دارد ولی بی‌اثر می‌کند؛
+      # چکِ متنیِ HTML این را نمی‌بیند، ولی صفحه‌ی رندرشده لو می‌دهد.
+      - name: تستِ بصری و سیم‌کشیِ کلیدها (headless)
+        run: |
+          set -e
+          MODDIR="$RUNNER_TEMP/pf-visual"
+          mkdir -p "$MODDIR"
+          ( cd "$MODDIR" && npm init -y >/dev/null 2>&1 && npm i puppeteer-core@24 --no-audit --no-fund --silent )
+          BROWSER="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)"
+          if [ -z "$BROWSER" ]; then
+            echo "مرورگری روی رانر نبود — کرومِ headless نصب می‌شود"
+            BROWSER="$(npx --yes @puppeteer/browsers install chrome@stable --path "$MODDIR/browsers" | tail -1 | awk '{print $NF}')"
+          fi
+          echo "مرورگر: $BROWSER"
+          PF_BROWSER="$BROWSER" PF_PUPPETEER_DIR="$MODDIR/node_modules" \
+            node ui_visual_check.cjs --url http://127.0.0.1:8787/ --shot "$RUNNER_TEMP/pf-ui.png"
+
       - name: گزارشِ خطاها
         if: failure()
         run: |
@@ -97,3 +115,13 @@ jobs:
           for w in (d.get("warnings") or []):
               print("::warning::" + w)
           PY
+
+      # اسکرین‌شاتِ تستِ بصری — برای بازبینیِ انسانی، حتی وقتی تست پاس می‌شود.
+      - name: آپلودِ اسکرین‌شاتِ UI
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pipfound-ui-screenshot
+          path: ${{ runner.temp }}/pf-ui.png
+          if-no-files-found: ignore
+          retention-days: 7
