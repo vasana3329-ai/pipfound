@@ -157,11 +157,20 @@ try:
         check(r["status"] == "open" and "pipfound" in r["notes"],
               "وضعیتِ ردیف باید open و یادداشتش نشانِ اپ باشد")
     out2 = post_trade(url, symbol="EURUSD", direction="نزولی")
-    rows2 = read_rows(ledger)
+    rows2 = read_rows(ledger) if os.path.exists(ledger) else []
     check(out2.get("added") == "2" and len(rows2) == 2,
           f"ثبتِ دوم باید added=2 و ردیفِ دوم بسازد (گرفتیم: {out2.get('added')} / {len(rows2)})")
     check(rows2 and rows2[1]["direction"] == "short",
           "جهتِ نزولی باید short ثبت شود")
+    # کدام نوشتارگر استفاده شد؟ (ماژولِ sibling یا نوشتارگرِ داخلیِ اپ)
+    impl = "?"
+    log1_txt = open(log1, encoding="utf-8", errors="replace").read()
+    for cand in ("ماژولِ trade-journal", "نوشتارگرِ داخلی"):
+        if "[" + cand + "]" in log1_txt:
+            impl = cand
+    check(impl != "?", "نوعِ نوشتارگرِ ژورنال باید در لاگِ استارتاپ چاپ شود")
+    notes.append(f"↳ نوشتارگرِ ژورنال در این اجرا: {impl}")
+
     # با env صریح، دفترِ قدیمی نباید وارد شود و مسیرِ پیش‌فرض هم ساخته نشود
     check(not os.path.exists(os.path.join(home1, "pipfound", "journal.csv")),
           "با env صریح، مسیرِ پیش‌فرض (~/pipfound/journal.csv) نباید ساخته شود")
