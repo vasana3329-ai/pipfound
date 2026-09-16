@@ -96,6 +96,14 @@ jobs:
           PF_BROWSER="$BROWSER" PF_PUPPETEER_DIR="$MODDIR/node_modules" \
             node ui_visual_check.cjs --url http://127.0.0.1:8787/ --shot "$RUNNER_TEMP/pf-ui.png"
 
+      # ── لایه‌ی ۴: رفت‌وبرگشتِ ژورنال — مسیرِ دفتر، ثبت/خواندن، مهاجرتِ بی‌خطر ──
+      # خودش نمونه‌های موقتِ اپ را با HOME و env کنترل‌شده بالا می‌آورد، پس به سرورِ 8787
+      # و دفترِ واقعیِ کاربر دست نمی‌زند.
+      - name: تستِ رفت‌وبرگشتِ ژورنال (مسیرِ دفتر)
+        run: |
+          set -e
+          python3 journal_roundtrip_test.py
+
       - name: گزارشِ خطاها
         if: failure()
         run: |
