@@ -30,10 +30,10 @@ const BROWSER = process.env.PF_BROWSER || "";
    توجه: `#jbtn` (ثبت در ژورنال)، `#alarmBtn` و `#pipModal` عمداً فقط بعد از یک تحلیل
    یا باز شدنِ پنجره ساخته می‌شوند و `#bootWarn` هم فقط وقتی _اسکریپتِ اصلی می‌میرد_
    ساخته می‌شود؛ پس این‌ها اینجا نیستند. وجودشان در متنِ سرو‌شده را `selfcheck.py`
-   (قراردادِ ۵۲ کلید) و اسموک‌تستِ CI چک می‌کنند — این تست سراغِ رندرِ واقعی می‌رود. */
+   (قراردادِ ۵۳ کلید) و اسموک‌تستِ CI چک می‌کنند — این تست سراغِ رندرِ واقعی می‌رود. */
 const REQUIRED = ["go", "bt", "sym", "syms", "styles", "chips", "refreshBtn",
   "archiveBtn", "fundBtn", "sbBtn", "setupsBtn", "result", "btPanel",
-  "setupsPanel", "alarmsDock", "tvBox", "shotGrid", "lightbox"];
+  "setupsPanel", "alarmsDock", "tvBox", "shotGrid", "lightbox", "revChip"];
 /* کنترل‌هایی که اپ با `.onclick =` به آن‌ها هندلر می‌دهد؛ اگر این‌ها تابع نباشند
    یعنی بلوکِ اسکریپت اجرا نشده یا نیمه‌کاره مرده است. */
 const WIRED = ["go", "refreshBtn", "bt", "setupsBtn", "fundBtn", "archiveBtn"];
@@ -144,6 +144,29 @@ function loadPuppeteer() {
     }
   } else {
     notes.push("CDP در دسترس نبود؛ بررسیِ رویدادهای addEventListener انجام نشد");
+  }
+
+  /* ۶.۵) نشانگرِ بازنگری: باید مسیرِ /api/revision جواب بدهد و چیپ متنِ واقعی
+     نشان دهد. اگر پروسه‌ای قدیمی نسخه‌ی کهنه را سرو کند، stale=true می‌شود و
+     همین‌جا گرفته می‌شود — دقیقاً همان حالتی که شبیهِ «کلیدها گم شدند» است. */
+  try {
+    const rev = await page.evaluate(async () => {
+      const r = await fetch("/api/revision", { cache: "no-store" });
+      const j = await r.json();
+      const el = document.getElementById("revChip");
+      return { j, text: el ? el.textContent.trim() : null };
+    });
+    if (!rev.j || rev.j.ok !== true) fail("اندپوینتِ /api/revision جوابِ سالم نداد: " + JSON.stringify(rev.j));
+    if (!rev.text || rev.text === "rev …" || rev.text === "rev ?")
+      fail("چیپِ بازنگری با اندپوینت پر نشد (متن: " + JSON.stringify(rev.text) + ")");
+    if (rev.j && rev.j.stale)
+      fail("پروسه‌ی سرو‌کننده نسخه‌ی کهنه است (stale=true) — سرور را از نو بالا بیاور. فایل‌های تازه‌تر: "
+        + ((rev.j.changed_files || []).map((c) => c.file).join(", ") || "—")
+        + (rev.j.sha_drift ? " · SHA دیسک: " + ((rev.j.disk || {}).sha || "?") : ""));
+    if (rev.j && rev.j.ok === true && !rev.j.stale)
+      notes.push(`بازنگری: ${(rev.j.loaded || {}).sha || "?"} (دیسک ${(rev.j.disk || {}).sha || "?"}) · چیپ: ${rev.text}`);
+  } catch (e) {
+    fail("بررسیِ نشانگرِ بازنگری ممکن نشد: " + e.message);
   }
 
   /* ۷) رفتارِ واقعی: کلیک روی چیپ، نماد را پر کند و دکمه‌ی تحلیل را آماده کند. */
