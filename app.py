@@ -642,6 +642,32 @@ def _fmt_ts(ts):
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
 
 
+# ── ری‌استارتِ خودکارِ «کهنه» ─────────────────────────────────────────────
+# چرا: حتی با نشانگرِ بازنگری، کاربر باید خودش دخالت کند. اینجا سرور خودش می‌فهمد
+# کدِ روی دیسک تازه‌تر از پروسهٔ خودش است، کدِ تازه را اول **اعتبارسنجی** می‌کند
+# (تا هرگز پروسهٔ سالم را برای یک ویرایشِ خراب نکشد)، صبر می‌کند هیچ درخواستی
+# در جریان نباشد، و بعد با `os.execv` خود را در همان PID از نو اجرا می‌کند.
+# همان PID مهم است: جابِ launchd و ثبتِ پیش‌نمایش با همان شناسه معتبر می‌مانند.
+def _env_float(name, default):
+    try:
+        return float(os.environ.get(name, "") or default)
+    except Exception:
+        return default
+
+
+_REV_WATCH = {
+    "enabled": (os.environ.get("PIPFOUND_AUTORESTART", "1").strip().lower()
+                not in ("0", "false", "no", "off")),
+    "interval": max(1.0, _env_float("PIPFOUND_AUTORESTART_INTERVAL", 5.0)),
+    "settle": max(0.0, _env_float("PIPFOUND_AUTORESTART_SETTLE", 3.0)),
+    "max_wait_idle": max(0.0, _env_float("PIPFOUND_AUTORESTART_MAXWAIT", 180.0)),
+    "restarts": 0,
+    "waiting": False,
+    "blocked": None,        # کدِ تازه روی دیسک سالم نبود / exec نشد
+    "blocked_mtime": None,
+}
+_REV_LOCK = threading.Lock()
+
 _REV_BOOT = {
     "boot_ts": _BOOT_TS,
     "boot_iso": _fmt_ts(_BOOT_TS),
@@ -651,11 +677,36 @@ _REV_BOOT = {
 }
 
 
+def _rev_state_file():
+    return os.path.join(HOME, "pipfound", "autorestart.json")
+
+
+def _rev_state_read():
+    """آخرین ری‌استارتِ خودکار — از فایل می‌خواند تا بعد از exec هم باقی بماند."""
+    try:
+        with open(_rev_state_file(), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _rev_state_write(rec):
+    fp = _rev_state_file()
+    try:
+        os.makedirs(os.path.dirname(fp), exist_ok=True)
+        tmp = fp + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, fp)
+    except Exception as e:
+        print("⚠️ ثبتِ وضعیتِ ری‌استارت ناموفق: %s" % e, flush=True)
+
+
 def code_rev():
-    """بازنگریِ کدِ بارشده در برابرِ دیسک.
+    """بازنگریِ کدِ بارشده در برابرِ دیسک + وضعیتِ ری‌استارتِ خودکار.
 
     stale=True یعنی چیزی روی دیسک تازه‌تر از استارتِ این پروسه است (یا SHA عوض
-    شده)، پس نسخه‌ای که سرو می‌شود کهنه است و باید اپ را از نو بالا آورد.
+    شده)، پس نسخه‌ای که سرو می‌شود کهنه است.
     """
     now_files = _rev_mtimes()
     changed = []
@@ -669,6 +720,22 @@ def code_rev():
     loaded = _REV_BOOT["git"]
     sha_drift = (disk_git.get("sha") or None) != (loaded.get("sha") or None)
     stale = bool(changed) or sha_drift
+    with _REV_LOCK:
+        ar = {"enabled": _REV_WATCH["enabled"],
+              "interval_s": _REV_WATCH["interval"],
+              "settle_s": _REV_WATCH["settle"],
+              "restarts": _REV_WATCH["restarts"],
+              "waiting": _REV_WATCH["waiting"],
+              "blocked": _REV_WATCH["blocked"]}
+    ar["last"] = _rev_state_read()
+    if not stale:
+        note = "کدِ سروشده با دیسک یکی است"
+    elif ar["blocked"]:
+        note = "نسخه‌ی کهنه سرو می‌شود و کدِ تازه سالم نیست — ری‌استارت انجام نمی‌شود"
+    elif ar["enabled"]:
+        note = "نسخه‌ی کهنه سرو می‌شود — ری‌استارتِ خودکار به‌زودی انجام می‌شود"
+    else:
+        note = "نسخه‌ی کهنه سرو می‌شود — ری‌استارتِ خودکار خاموش است؛ اپ را از نو بالا بیاور"
     return {
         "ok": True,
         "stale": stale,
@@ -681,9 +748,113 @@ def code_rev():
         "sha_drift": sha_drift,
         "changed_files": changed,
         "tracked_files": [{"file": n, "mtime_epoch": m} for n, m in now_files.items()],
-        "note": ("نسخه‌ی کهنه سرو می‌شود — اپ را از نو بالا بیاور"
-                 if stale else "کدِ سروشده با دیسک یکی است"),
+        "autorestart": ar,
+        "note": note,
     }
+
+
+def _rev_argv():
+    """دستورِ خودِ همین پروسه برای اجرای دوباره (orig_argv پرچم‌هایی مثلِ -u را نگه می‌دارد)."""
+    argv = getattr(sys, "orig_argv", None)
+    if argv:
+        return list(argv)
+    return [sys.executable, "-u"] + list(sys.argv)
+
+
+def _rev_validate():
+    """کدِ تازه روی دیسک قبل از ری‌استارت اعتبارسنجی می‌شود.
+
+    بدونِ این مرحله، یک ویرایشِ نیمه‌کاره/خراب سرورِ سالم را می‌کشت.
+    """
+    try:
+        import selfcheck as SC
+        rep = SC.run_checks(REV_ROOT)
+        if rep.get("ok"):
+            return True, "selfcheck ✅"
+        return False, " | ".join(rep.get("problems") or [])[:400] or "selfcheck ❌"
+    except Exception as e:
+        return False, "selfcheck در دسترس نیست: %s" % e
+
+
+def _rev_restart(rev, detail):
+    files = [c["file"] for c in (rev.get("changed_files") or [])]
+    from_sha = (rev.get("loaded") or {}).get("sha")
+    to_sha = (rev.get("disk") or {}).get("sha")
+    with _REV_LOCK:
+        _REV_WATCH["restarts"] += 1
+    _rev_state_write({"at": _fmt_ts(time.time()), "from": from_sha, "to": to_sha,
+                      "files": files, "detail": detail, "pid": _PROC_PID})
+    print("♻️ کدِ تازه روی دیسک دیده شد (%s) — ری‌استارتِ خودکار [%s] · %s → %s"
+          % (", ".join(files), detail, from_sha or "?", to_sha or "?"), flush=True)
+    try:
+        for h in (sys.stdout, sys.stderr):
+            try:
+                h.flush()
+            except Exception:
+                pass
+        os.execv(sys.executable, _rev_argv())
+    except Exception as e:
+        with _REV_LOCK:
+            _REV_WATCH["blocked"] = {"at": _fmt_ts(time.time()),
+                                     "detail": "ری‌استارت انجام نشد: %s" % e}
+            _REV_WATCH["blocked_mtime"] = max(
+                [c["mtime_epoch"] for c in (rev.get("changed_files") or [])] or [None])
+        print("⚠️ ری‌استارتِ خودکار ممکن نشد (%s) — روی همین نسخه ادامه می‌دهم."
+              % e, flush=True)
+
+
+def _rev_watch_once():
+    """یک دورِ بررسی: کهنه است؟ کدِ تازه سالم است؟ درخواستی در جریان نیست؟ → ری‌استارت."""
+    if not _REV_WATCH["enabled"]:
+        return False
+    rev = code_rev()
+    changed = rev.get("changed_files") or []
+    if not changed:
+        with _REV_LOCK:
+            _REV_WATCH["blocked"] = None
+            _REV_WATCH["blocked_mtime"] = None
+        return False
+    newest = max(c["mtime_epoch"] for c in changed)
+    # شاید همین حالا مشغولِ نوشتنِ فایل باشیم → کمی صبر کن
+    if time.time() - newest < _REV_WATCH["settle"]:
+        return False
+    # همان فایلِ خرابی که قبلاً رد شده بود را دوباره اعتبارسنجی نکن (بی‌فایده و گران)
+    with _REV_LOCK:
+        if _REV_WATCH["blocked"] and _REV_WATCH["blocked_mtime"] == newest:
+            return False
+    ok, detail = _rev_validate()
+    if not ok:
+        with _REV_LOCK:
+            fresh = _REV_WATCH["blocked"] is None
+            _REV_WATCH["blocked"] = {"at": _fmt_ts(time.time()), "detail": detail}
+            _REV_WATCH["blocked_mtime"] = newest
+        if fresh:
+            print("⚠️ کدِ تازه روی دیسک هست ولی سالم نیست (%s) — روی نسخه‌ی فعلی می‌مانم."
+                  % detail, flush=True)
+        return False
+    # تمیز: تا هیچ درخواستی در جریان نباشد صبر کن (تا وسطِ یک تحلیل قطع نشود)
+    with _REV_LOCK:
+        _REV_WATCH["waiting"] = True
+    try:
+        waited = 0.0
+        while not _REQ_IDLE.is_set() and waited < _REV_WATCH["max_wait_idle"]:
+            time.sleep(0.2)
+            waited += 0.2
+    finally:
+        with _REV_LOCK:
+            _REV_WATCH["waiting"] = False
+    _rev_restart(rev, detail)
+    return True
+
+
+def _rev_watch_worker():
+    time.sleep(min(4.0, max(1.0, _REV_WATCH["interval"])))
+    while True:
+        time.sleep(max(1.0, _REV_WATCH["interval"]))
+        try:
+            _rev_watch_once()
+        except Exception:
+            traceback.print_exc()
 
 
 HTML = r"""<!doctype html>
@@ -1834,31 +2005,47 @@ if("serviceWorker" in navigator && (location.protocol==="http:" || location.prot
   window.addEventListener("load", ()=>{ navigator.serviceWorker.register("/sw.js").catch(()=>{}); });
 }
 
-// نشانگرِ بازنگریِ کد: اگر پروسهٔ قدیمی نسخه‌ی کهنه را سرو کند، بی‌درنگ دیده شود
+// نشانگرِ بازنگریِ کد + وضعیتِ ری‌استارتِ خودکارِ «کهنه»
+let revFirst=null, revRetry=null;
 async function loadRev(){
   const el=document.getElementById("revChip"); if(!el) return;
   try{
     const r=await fetch("/api/revision",{cache:"no-store"});
     const j=await r.json();
+    if(revRetry){ clearTimeout(revRetry); revRetry=null; }
+    const ar=j.autorestart||{}, blocked=ar.blocked;
     const sha=(j.loaded&&j.loaded.sha)||"?";
     const up=Math.round(j.uptime_s||0);
     const upTxt=up<90 ? up+"s" : (up<5400 ? Math.round(up/60)+"m" : Math.round(up/3600)+"h");
     const extra=[];
     if(j.loaded&&j.loaded.dirty) extra.push("±dirty");
     if(j.sha_drift) extra.push("disk:"+((j.disk&&j.disk.sha)||"?"));
-    el.textContent=(j.stale ? "⚠ " : "")+sha+" · "+upTxt+(extra.length ? " · "+extra.join(" ") : "");
-    el.className="revchip"+(j.stale ? " bad" : "");
+    if(revFirst===null) revFirst=sha;
+    const pageOld=(revFirst!==sha);
+    let cls="revchip", head="";
+    if(pageOld){ cls+=" warn"; head="⟳ صفحه قدیمی است — رفرش کن · "; }
+    else if(j.stale && blocked){ cls+=" bad"; head="⚠ کدِ تازه خراب است · "; }
+    else if(j.stale && ar.enabled){ cls+=" warn"; head="♻ در حالِ ری‌استارت · "; }
+    else if(j.stale){ cls+=" bad"; head="⚠ کهنه · "; }
+    el.textContent=head+sha+" · "+upTxt+(extra.length ? " · "+extra.join(" ") : "");
+    el.className=cls;
+    const p=[];
+    p.push(pageOld
+      ? "این صفحه با بازنگریِ "+revFirst+" بار شده و سرور الان "+sha+" را سرو می‌کند — برای دیدنِ رابطِ تازه صفحه را رفرش کن."
+      : "کدِ سروشده با دیسک یکی است.");
+    p.push("ری‌استارتِ خودکارِ کهنه: "+(ar.enabled ? "روشن (هر "+(ar.interval_s||5)+" ثانیه بررسی می‌شود)" : "خاموش"));
+    if(ar.last && ar.last.at) p.push("آخرین ری‌استارت: "+ar.last.at+" (از "+(ar.last.from||"?")+" به "+(ar.last.to||"?")+") · فایل‌ها: "+((ar.last.files||[]).join(", ")||"—"));
+    if(blocked) p.push("⚠ کدِ تازه روی دیسک سالم نیست، پس ری‌استارت انجام نمی‌شود: "+blocked.detail);
     const chg=(j.changed_files||[]).map(c=>c.file).join(", ");
-    el.title = j.stale
-      ? "⚠ نسخه‌ی کهنه سرو می‌شود — کدِ روی دیسک تازه‌تر از استارتِ این پروسه است"
-        +(chg ? " ("+chg+")" : "")+(j.sha_drift ? " · SHA دیسک: "+((j.disk&&j.disk.sha)||"?") : "")
-        +" — اپ را ببند و از نو بالا بیاور."
-      : "بازنگریِ بارشده: "+sha+(j.loaded&&j.loaded.dirty ? " (کارنکرده)" : "")
-        +" · استارتِ پروسه: "+(j.boot_local||"")+" · pid "+(j.pid||"")
-        +" · SHA دیسک: "+((j.disk&&j.disk.sha)||"?")+" · کدِ سروشده با دیسک یکی است.";
+    if(j.stale && chg) p.push("فایل‌های تازه‌تر از استارتِ پروسه: "+chg);
+    p.push("pid "+(j.pid||"")+" · استارتِ پروسه: "+(j.boot_local||""));
+    el.title=p.join(" · ");
   }catch(e){
-    el.textContent="rev ?"; el.className="revchip warn";
-    el.title="نشانگرِ بازنگری در دسترس نیست: "+e;
+    // سرور ممکن است همین الان خودش را از نو اجرا کرده باشد → زودتر دوباره بپرس
+    el.textContent="♻ در حالِ ری‌استارت…";
+    el.className="revchip warn";
+    el.title="ارتباط با سرور قطع بود (ری‌استارتِ خودکار؟): "+e;
+    if(!revRetry) revRetry=setTimeout(loadRev, 3000);
   }
 }
 loadRev();
@@ -2095,9 +2282,37 @@ setInterval(load, 60000);
 """
 
 
+# شمارشِ درخواست‌های در جریان — ری‌استارتِ خودکار فقط وقتی انجام می‌شود که
+# هیچ درخواستی وسطِ کار نباشد (مثلاً وسطِ یک بک‌تستِ چنددقیقه‌ای قطع نشود).
+_REQ_ACTIVE = [0]
+_REQ_LOCK = threading.Lock()
+_REQ_IDLE = threading.Event()
+_REQ_IDLE.set()
+
+
+def _req_enter():
+    with _REQ_LOCK:
+        _REQ_ACTIVE[0] += 1
+        _REQ_IDLE.clear()
+
+
+def _req_leave():
+    with _REQ_LOCK:
+        _REQ_ACTIVE[0] = max(0, _REQ_ACTIVE[0] - 1)
+        if _REQ_ACTIVE[0] == 0:
+            _REQ_IDLE.set()
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass  # سکوت
+
+    def handle_one_request(self):
+        _req_enter()
+        try:
+            return super().handle_one_request()
+        finally:
+            _req_leave()
 
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
         data = body.encode("utf-8") if isinstance(body, str) else body
@@ -2488,7 +2703,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=8787)
     ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--no-autorestart", action="store_true",
+                    help="ری‌استارتِ خودکارِ «کدِ کهنه» را خاموش کن (پیش‌فرض: روشن)")
     a = ap.parse_args()
+    if a.no_autorestart:
+        _REV_WATCH["enabled"] = False
+    # بدونِ -u خروجیِ ریدایرکتشده به فایل بافر می‌شود و لاگ‌ها (از جمله خطِ
+    # ری‌استارت) دیر یا هرگز نمی‌رسند. پس خودِ اپ خط‌بافر می‌کند.
+    try:
+        if not sys.stdout.isatty():
+            sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
 
     # 🩺 نگهبانِ سلامتِ کد — پیش از سرو کردنِ صفحه
     _root = os.path.dirname(os.path.abspath(__file__))
@@ -2511,6 +2737,12 @@ def main():
 
     _moved = f" (+{_JR_MOVED} ردیفِ قدیمی)" if _JR_MOVED else ""
     print(f"   📓 دفترِ معاملات: {_JR_FILE}{_moved}  [{_JR_IMPL}]")
+    if _REV_WATCH["enabled"]:
+        threading.Thread(target=_rev_watch_worker, daemon=True).start()
+        print("   ♻️ ری‌استارتِ خودکارِ کهنه: روشن (بررسیِ هر %.0f ثانیه، بدونِ قطعِ درخواستِ در جریان)"
+              % _REV_WATCH["interval"])
+    else:
+        print("   ♻️ ری‌استارتِ خودکارِ کهنه: خاموش")
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     url = f"http://{a.host}:{a.port}"
     start_alarm_worker()
