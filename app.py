@@ -589,6 +589,103 @@ def start_fund_alarm_worker():
     return t
 
 
+# ── بازنگریِ کدِ در حالِ اجرا (revision) ──────────────────────────────────────
+# چرا: پایتون کد را *لحظهٔ استارت* می‌خواند. اگر بعد از ادغام، همان پروسهٔ قدیمی
+# سرو کند، رابطِ کهنه دیده می‌شود و دقیقاً شبیهِ «کلیدها گم شدند» به‌نظر می‌رسد،
+# در حالی که کد سالم است. اینجا ثبت می‌کنیم چه کدی در حافظه بار شده و دیسک
+# الان چه چیزی دارد تا «کهنه سرو شدن» بی‌درنگ قابلِ دیدن باشد.
+REV_ROOT = os.path.dirname(os.path.abspath(__file__))
+# فایل‌هایی که تعیین می‌کنند کدام رابط سرو می‌شود (نه داده‌های زمانِ اجرا)
+REV_TRACKED = [
+    "app.py", "selfcheck.py", "confluence.py", "smc_engine.py", "backtest.py",
+    "macro_context.py", "fundamental.py", "sw.js", "manifest.webmanifest",
+]
+_BOOT_TS = time.time()
+_BOOT_MONO = time.monotonic()
+_PROC_PID = os.getpid()
+
+
+def _rev_git(root):
+    """SHA/شاخه/dirty را با git می‌خواند؛ بدونِ git یا بیرونِ ریپو → None."""
+    import subprocess
+    out = {"sha": None, "sha_full": None, "branch": None, "dirty": None}
+
+    def _git(*args):
+        try:
+            r = subprocess.run(["git", "-C", root, *args],
+                               capture_output=True, text=True, timeout=4)
+            return r.stdout.strip() if r.returncode == 0 else None
+        except Exception:
+            return None
+
+    full = _git("rev-parse", "HEAD")
+    if full:
+        out["sha_full"] = full
+        out["sha"] = full[:7]
+        out["branch"] = _git("rev-parse", "--abbrev-ref", "HEAD")
+        st = _git("status", "--porcelain")
+        out["dirty"] = bool(st) if st is not None else None
+    return out
+
+
+def _rev_mtimes():
+    files = {}
+    for name in REV_TRACKED:
+        try:
+            files[name] = os.path.getmtime(os.path.join(REV_ROOT, name))
+        except OSError:
+            files[name] = None
+    return files
+
+
+def _fmt_ts(ts):
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+
+
+_REV_BOOT = {
+    "boot_ts": _BOOT_TS,
+    "boot_iso": _fmt_ts(_BOOT_TS),
+    "pid": _PROC_PID,
+    "files": _rev_mtimes(),
+    "git": _rev_git(REV_ROOT),
+}
+
+
+def code_rev():
+    """بازنگریِ کدِ بارشده در برابرِ دیسک.
+
+    stale=True یعنی چیزی روی دیسک تازه‌تر از استارتِ این پروسه است (یا SHA عوض
+    شده)، پس نسخه‌ای که سرو می‌شود کهنه است و باید اپ را از نو بالا آورد.
+    """
+    now_files = _rev_mtimes()
+    changed = []
+    for name, mt in now_files.items():
+        base = _REV_BOOT["files"].get(name)
+        if mt is None:
+            continue
+        if base is None or mt > base + 1e-6:
+            changed.append({"file": name, "mtime": _fmt_ts(mt), "mtime_epoch": mt})
+    disk_git = _rev_git(REV_ROOT)
+    loaded = _REV_BOOT["git"]
+    sha_drift = (disk_git.get("sha") or None) != (loaded.get("sha") or None)
+    stale = bool(changed) or sha_drift
+    return {
+        "ok": True,
+        "stale": stale,
+        "pid": _PROC_PID,
+        "uptime_s": round(time.monotonic() - _BOOT_MONO, 1),
+        "boot_ts": _REV_BOOT["boot_ts"],
+        "boot_local": _REV_BOOT["boot_iso"],
+        "loaded": loaded,
+        "disk": disk_git,
+        "sha_drift": sha_drift,
+        "changed_files": changed,
+        "tracked_files": [{"file": n, "mtime_epoch": m} for n, m in now_files.items()],
+        "note": ("نسخه‌ی کهنه سرو می‌شود — اپ را از نو بالا بیاور"
+                 if stale else "کدِ سروشده با دیسک یکی است"),
+    }
+
+
 HTML = r"""<!doctype html>
 <html lang="fa" dir="rtl">
 <head>
@@ -638,6 +735,11 @@ body{margin:0;background:radial-gradient(1200px 600px at 80% -10%,#16223b 0%,var
 h1{font-size:22px;margin:0;font-weight:700;letter-spacing:.2px;
   background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
 .sub{color:var(--muted);font-size:13px;margin:2px 0 22px}
+.revchip{margin-left:auto;font-size:11px;color:var(--muted);border:1px solid var(--line);
+  background:var(--panel2);border-radius:999px;padding:4px 10px;white-space:nowrap;cursor:default;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;direction:ltr;transition:.15s}
+.revchip.warn{color:var(--warn);border-color:#a16207;background:#2a1f05}
+.revchip.bad{color:#fca5a5;border-color:#7f1d1d;background:#2a0a0a}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:20px;
   box-shadow:0 20px 50px rgba(0,0,0,.35)}
 .searchrow{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
@@ -903,6 +1005,7 @@ tr.on td{background:rgba(34,197,94,.05)}
     <div>
       <h1>pipfound</h1>
     </div>
+    <span id="revChip" class="revchip" title="بازنگریِ کدِ در حالِ اجرا — SHA بارشده، زمانِ استارتِ پروسه، و اینکه کدِ سروشده با فایل‌های روی دیسک یکی است یا نه.">rev …</span>
   </div>
 
   <div class="card">
@@ -1731,6 +1834,36 @@ if("serviceWorker" in navigator && (location.protocol==="http:" || location.prot
   window.addEventListener("load", ()=>{ navigator.serviceWorker.register("/sw.js").catch(()=>{}); });
 }
 
+// نشانگرِ بازنگریِ کد: اگر پروسهٔ قدیمی نسخه‌ی کهنه را سرو کند، بی‌درنگ دیده شود
+async function loadRev(){
+  const el=document.getElementById("revChip"); if(!el) return;
+  try{
+    const r=await fetch("/api/revision",{cache:"no-store"});
+    const j=await r.json();
+    const sha=(j.loaded&&j.loaded.sha)||"?";
+    const up=Math.round(j.uptime_s||0);
+    const upTxt=up<90 ? up+"s" : (up<5400 ? Math.round(up/60)+"m" : Math.round(up/3600)+"h");
+    const extra=[];
+    if(j.loaded&&j.loaded.dirty) extra.push("±dirty");
+    if(j.sha_drift) extra.push("disk:"+((j.disk&&j.disk.sha)||"?"));
+    el.textContent=(j.stale ? "⚠ " : "")+sha+" · "+upTxt+(extra.length ? " · "+extra.join(" ") : "");
+    el.className="revchip"+(j.stale ? " bad" : "");
+    const chg=(j.changed_files||[]).map(c=>c.file).join(", ");
+    el.title = j.stale
+      ? "⚠ نسخه‌ی کهنه سرو می‌شود — کدِ روی دیسک تازه‌تر از استارتِ این پروسه است"
+        +(chg ? " ("+chg+")" : "")+(j.sha_drift ? " · SHA دیسک: "+((j.disk&&j.disk.sha)||"?") : "")
+        +" — اپ را ببند و از نو بالا بیاور."
+      : "بازنگریِ بارشده: "+sha+(j.loaded&&j.loaded.dirty ? " (کارنکرده)" : "")
+        +" · استارتِ پروسه: "+(j.boot_local||"")+" · pid "+(j.pid||"")
+        +" · SHA دیسک: "+((j.disk&&j.disk.sha)||"?")+" · کدِ سروشده با دیسک یکی است.";
+  }catch(e){
+    el.textContent="rev ?"; el.className="revchip warn";
+    el.title="نشانگرِ بازنگری در دسترس نیست: "+e;
+  }
+}
+loadRev();
+setInterval(loadRev, 30000);
+
 // علامتِ پایانِ بوت — اگر این خط اجرا نشود، هشدارِ قرمزِ نگهبانِ بوت بالای صفحه می‌آید
 window.__pipfoundBooted = true;
 </script>
@@ -2008,6 +2141,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
         if u.path == "/api/health":
             return self._send(200, json.dumps({"ok": True}))
+        # نشانگرِ بازنگری: چه کدی بار شده، دیسک چه دارد، و آیا پروسه کهنه است
+        if u.path == "/api/revision":
+            try:
+                return self._send(200, json.dumps(code_rev(), ensure_ascii=False))
+            except Exception as e:
+                traceback.print_exc()
+                return self._send(200, json.dumps(
+                    {"ok": False, "error": str(e)}, ensure_ascii=False))
         if u.path == "/api/fundamental":
             if FUND is None:
                 return self._send(200, json.dumps(
