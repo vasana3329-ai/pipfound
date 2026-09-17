@@ -163,8 +163,11 @@ function loadPuppeteer() {
       fail("پروسه‌ی سرو‌کننده نسخه‌ی کهنه است (stale=true) — سرور را از نو بالا بیاور. فایل‌های تازه‌تر: "
         + ((rev.j.changed_files || []).map((c) => c.file).join(", ") || "—")
         + (rev.j.sha_drift ? " · SHA دیسک: " + ((rev.j.disk || {}).sha || "?") : ""));
+    const ar = (rev.j && rev.j.autorestart) || {};
+    if (!ar.enabled)
+      fail("ری‌استارتِ خودکارِ کدِ کهنه خاموش است — پروسه‌ی کهنه بی‌صدا سرو می‌شود (باید پیش‌فرض روشن باشد)");
     if (rev.j && rev.j.ok === true && !rev.j.stale)
-      notes.push(`بازنگری: ${(rev.j.loaded || {}).sha || "?"} (دیسک ${(rev.j.disk || {}).sha || "?"}) · چیپ: ${rev.text}`);
+      notes.push(`بازنگری: ${(rev.j.loaded || {}).sha || "?"} (دیسک ${(rev.j.disk || {}).sha || "?"}) · چیپ: ${rev.text} · ری‌استارتِ خودکار: ${ar.enabled ? "روشن" : "خاموش"}`);
   } catch (e) {
     fail("بررسیِ نشانگرِ بازنگری ممکن نشد: " + e.message);
   }
