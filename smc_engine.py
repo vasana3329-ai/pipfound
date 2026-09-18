@@ -39,6 +39,36 @@ YF_RANGE = {"1m":"5d","5m":"1mo","15m":"1mo","30m":"1mo","1h":"3mo","4h":"3mo","
 FX_MAJORS = {"EURUSD","GBPUSD","USDJPY","USDCHF","USDCAD","AUDUSD","NZDUSD",
              "EURJPY","GBPJPY","EURGBP","EURAUD","AUDJPY","EURCHF","GBPCHF"}
 
+# اندیکس‌ها و کامودیتی‌های غیرفلزی → تیکرِ Yahoo (فلزات/انرژی بالاتر هندل شده‌اند).
+# نامِ کاربرپسند سِمتِ چپِ نگاشت است و همان به‌عنوان disp برگردانده می‌شود تا در
+# لاگ/ژورنال/آلارم خوانا بماند و کارِ داخلی به تیکرِ درست برود.
+INDEX_MAP = {
+    "SPX500":"^GSPC","SP500":"^GSPC","US500":"^GSPC","SPX":"^GSPC","^GSPC":"^GSPC",
+    "NAS100":"^NDX","US100":"^NDX","USTEC":"^NDX","NDX":"^NDX","^NDX":"^NDX",
+    "US30":"^DJI","DOW30":"^DJI","DOW":"^DJI","WS30":"^DJI","^DJI":"^DJI",
+    "GER40":"^GDAXI","DE40":"^GDAXI","DAX":"^GDAXI","^GDAXI":"^GDAXI",
+    "UK100":"^FTSE","FTSE":"^FTSE","^FTSE":"^FTSE",
+    "JP225":"^N225","NIKKEI":"^N225","^N225":"^N225",
+    "HK50":"^HSI","^HSI":"^HSI",
+    "VIX":"^VIX","^VIX":"^VIX",
+    "RUT":"^RUT","US2000":"^RUT","^RUT":"^RUT",
+    "DXY":"DX-Y.NYB","USDX":"DX-Y.NYB","DX":"DX-Y.NYB",
+}
+COMMODITY_MAP = {
+    "NATGAS":"NG=F","NATURALGAS":"NG=F","COPPER":"HG=F",
+    "COCOA":"CC=F","COFFEE":"KC=F","SUGAR":"SB=F",
+    "WHEAT":"ZW=F","CORN":"ZC=F",
+}
+
+
+def is_stock(s):
+    """تیکرِ سهام: ۱ تا ۵ حرفِ لاتین.
+
+    جفت‌ارزها دقیقاً ۶ حرف‌اند و کریپتو پسوندِ USDT/USDC/BUSD دارد، پس این قاعده
+    با آن‌ها تضاد ندارد.
+    """
+    return 1 <= len(s) <= 5 and s.isalpha()
+
 def http_get(url):
     req = urllib.request.Request(url, headers=UA)
     with urllib.request.urlopen(req, timeout=20, context=_CTX) as r:
@@ -72,10 +102,14 @@ def resolve(symbol):
     if s in ("XPDUSD","PALLADIUM","XPD"): return ("yahoo","PA=F",s)
     if s in ("WTI","USOIL","CRUDE","CL"): return ("yahoo","CL=F",s)
     if s in ("BRENT","UKOIL"): return ("yahoo","BZ=F",s)
+    if s in INDEX_MAP:     return ("yahoo", INDEX_MAP[s], s)
+    if s in COMMODITY_MAP: return ("yahoo", COMMODITY_MAP[s], s)
     if s.endswith(("USDT","USDC","BUSD")) or (s.endswith(("BTC","ETH")) and len(s)>6):
         return ("binance", s, s)
     if s in FX_MAJORS or (len(s)==6 and s.isalpha()):
         return ("yahoo", s+"=X", s)
+    if is_stock(s):
+        return ("yahoo", s, s)
     # default: try binance
     return ("binance", s, s)
 
