@@ -216,13 +216,21 @@ STYLES = {
     "sb_ny": {"label": "سیلوربولت نیویورک", "tfs": ["15m", "5m", "1m"], "entry_tf": "1m"},
 }
 
-# نمادهای پیشنهادی برای اتوکامپلیت
-SUGGESTIONS = [
-    "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "NZDUSD", "USDCHF",
-    "EURJPY", "GBPJPY", "EURGBP", "AUDJPY",
-    "XAUUSD", "XAGUSD", "XPTUSD", "XPDUSD", "WTI", "BRENT",
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT",
+# انتخابِ سریعِ نماد — دسته‌بندیِ کارآمد در همان کادرِ جستجو.
+# هر گروه = یک ردیفِ چیپ با برچسبِ فارسی؛ همین فهرست اتوکامپلیت را هم می‌سازد.
+# عمداً فقط نمادهایی که مسیرِ دانلودشان تست شده: جفت‌ارزهای مهم، کامودیتی،
+# اندیکس، و استاک (تکر‌های مگاکپ). کریپتو چیپ ندارد ولی با تایپ کار می‌کند.
+SYMBOL_GROUPS = [
+    ("جفت‌ارزهای مهم", ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD",
+                          "USDCHF", "NZDUSD", "EURJPY", "GBPJPY"]),
+    ("کامودیتی", ["XAUUSD", "XAGUSD", "WTI", "BRENT", "NATGAS", "COPPER"]),
+    ("اندیکس", ["SPX500", "NAS100", "US30", "GER40", "UK100", "JP225"]),
+    ("استاک", ["NVDA", "AAPL", "MSFT", "TSLA", "AMZN", "GOOGL", "META"]),
 ]
+
+# نمادهای پیشنهادی برای اتوکامپلیت = همه‌ی چیپ‌ها + کریپتو (که چیپ ندارد)
+SUGGESTIONS = ([s for _, syms in SYMBOL_GROUPS for s in syms]
+               + ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT"])
 
 
 def _setup_statuses(r):
@@ -973,7 +981,10 @@ h1{font-size:22px;margin:0;font-weight:700;letter-spacing:.2px;
 .sbwin .sb-steps{margin:12px 0 0;padding:0;list-style:none;font-size:13px;line-height:1.9;color:#c8d2ea}
 .sbwin .sb-steps li{padding-right:20px;position:relative}
 .sbwin .sb-steps li::before{content:"◆";position:absolute;right:0;color:#a855f7;font-size:11px;top:3px}
-.chips{display:flex;gap:7px;flex-wrap:wrap;margin-top:14px}
+.chips{display:flex;flex-direction:column;gap:7px;margin-top:12px}
+.chipgroup{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+.chiplbl{color:var(--accent);font-size:11px;font-weight:700;background:var(--panel2);
+  border:1px solid var(--line);border-radius:8px;padding:4px 9px;white-space:nowrap}
 /* پنلِ تنظیماتِ بک‌تست */
 .btpanel{margin-top:14px;border-top:1px dashed var(--line);padding-top:14px;display:flex;
   flex-direction:column;gap:10px}
@@ -1212,10 +1223,11 @@ tr.on td{background:rgba(34,197,94,.05)}
 
   <div class="card">
     <div class="searchrow">
-      <input id="sym" class="inp" placeholder="نامِ نماد را بنویس… مثل XAUUSD یا BTCUSDT یا EURUSD"
-             title="نامِ نماد را این‌جا بنویس (XAUUSD, EURUSD, BTCUSDT …). با انتخاب/تایپِ نماد، سبک و دکمه‌ی تحلیل چشمک می‌زنند؛ هیچ‌چیز خودکار اجرا نمی‌شود."
+      <input id="sym" class="inp" placeholder="نامِ نماد… مثل XAUUSD، EURUSD، WTI، SPX500، NAS100، NVDA"
+             title="نامِ نماد را این‌جا بنویس (طلا/نقره، جفت‌ارزهای مهم، کامودیتی، اندیکس، استاک و کریپتو — مثل XAUUSD، EURUSD، WTI، SPX500، NVDA). با انتخاب/تایپِ نماد، سبک و دکمه‌ی تحلیل چشمک می‌زنند؛ هیچ‌چیز خودکار اجرا نمی‌شود."
              list="syms" autocomplete="off" autofocus>
       <datalist id="syms"></datalist>
+      <div class="chips" id="chips"></div>
       <div class="styles" id="styles">
         <button data-k="scalp" title="سبکِ اسکالپ — تایم‌فریمِ پایین. فقط سبک را عوض می‌کند؛ تحلیل را خودکار اجرا نمی‌کند.">اسکالپ</button>
         <button data-k="day" class="active" title="سبکِ روزانه (پیش‌فرض). فقط سبک را عوض می‌کند؛ تحلیل را خودکار اجرا نمی‌کند.">روزانه</button>
@@ -1233,7 +1245,6 @@ tr.on td{background:rgba(34,197,94,.05)}
       <div class="sp-head">📚 سه ستاپِ پیشنهادی <span class="jmsg" id="spState">— اول یک تحلیل بگیر تا چراغ‌ها روشن شوند</span></div>
       <div id="spList"></div>
     </div>
-    <div class="chips" id="chips"></div>
     <div id="btPanel" class="btpanel">
       <div class="btrow">
         <span class="btlbl">بازه‌ی بک‌تست (تاریخِ روی چارت):</span>
@@ -1303,6 +1314,7 @@ window.addEventListener("error", e=>{
   }
 });
 const SUGGESTIONS = __SUGGESTIONS__;
+const SYMBOL_GROUPS = __SYMBOL_GROUPS__;
 let style = "day";
 
 const $ = s => document.querySelector(s);
@@ -1312,11 +1324,20 @@ const symIn = $("#sym"), goBtn = $("#go"), res = $("#result");
 const dl = $("#syms");
 SUGGESTIONS.forEach(s=>{const o=document.createElement("option");o.value=s;dl.appendChild(o);});
 const chips = $("#chips");
-["XAUUSD","XAGUSD","EURUSD","GBPUSD","AUDUSD","USDJPY","BTCUSDT","ETHUSDT"].forEach(s=>{
-  const c=document.createElement("span");c.className="chip";c.textContent=s;
-  // فقط نماد را پُر کن؛ اجرا نکن. کاربر اول سبک و بازه را انتخاب می‌کند.
-  c.onclick=()=>{ symIn.value=s; symIn.focus(); markReady(); };
-  chips.appendChild(c);
+// انتخابِ سریعِ گروه‌بندی‌شده: جفت‌ارزهای مهم · کامودیتی · اندیکس · استاک
+SYMBOL_GROUPS.forEach(([label, syms])=>{
+  const row=document.createElement("div"); row.className="chipgroup";
+  const lb=document.createElement("span"); lb.className="chiplbl"; lb.textContent=label;
+  row.appendChild(lb);
+  syms.forEach(s=>{
+    const c=document.createElement("span");c.className="chip";c.textContent=s;
+    c.setAttribute("data-sym",s);   // تستِ بصریِ CI روی همین می‌چسبد (نباید بی‌صدا حذف شود)
+    c.title="انتخابِ سریعِ "+s+" — فقط کادرِ جستجو را پُر می‌کند؛ اول سبک/بازه را انتخاب کن.";
+    // فقط نماد را پُر کن؛ اجرا نکن. کاربر اول سبک و بازه را انتخاب می‌کند.
+    c.onclick=()=>{ symIn.value=s; symIn.focus(); markReady(); };
+    row.appendChild(c);
+  });
+  chips.appendChild(row);
 });
 
 // وقتی نمادی انتخاب/تایپ شد، کاربر را به انتخابِ سبک/بازه هدایت کن (بدونِ اجرای خودکار)
@@ -2367,9 +2388,18 @@ class Handler(BaseHTTPRequestHandler):
                 "XAUUSD": "OANDA:XAUUSD", "XAGUSD": "OANDA:XAGUSD",
                 "XPTUSD": "OANDA:XPTUSD", "XPDUSD": "OANDA:XPDUSD",
                 "GOLD": "OANDA:XAUUSD", "WTI": "TVC:USOIL", "BRENT": "TVC:UKOIL",
+                # ثروتِ بخشِ تازه: اندیکس‌ها و کامودیتی‌های غیرفلزی و استاک‌ها
+                "SPX500": "SP:SPX", "NAS100": "NASDAQ:NDX", "US30": "DJ:DJI",
+                "GER40": "XETR:DAX", "UK100": "TVC:UKX", "JP225": "TVC:NI225",
+                "NATGAS": "NYMEX:NG1!", "COPPER": "COMEX:HG1!",
+                "NVDA": "NASDAQ:NVDA", "AAPL": "NASDAQ:AAPL", "MSFT": "NASDAQ:MSFT",
+                "TSLA": "NASDAQ:TSLA", "AMZN": "NASDAQ:AMZN",
+                "GOOGL": "NASDAQ:GOOGL", "META": "NASDAQ:META",
             }
             page = (HTML
                     .replace("__SUGGESTIONS__", json.dumps(SUGGESTIONS))
+                    .replace("__SYMBOL_GROUPS__", json.dumps(SYMBOL_GROUPS,
+                                                              ensure_ascii=False))
                     .replace("__TVMAP__", json.dumps(tvmap)))
             return self._send(200, page, "text/html; charset=utf-8")
         if u.path == "/api/analyze":

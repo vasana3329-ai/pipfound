@@ -92,6 +92,30 @@ function loadPuppeteer() {
   if (chips && chips < 8) fail(`تعدادِ چیپ‌ها کم است: ${chips} (انتظار ≥ ۸)`);
   notes.push(`چیپ‌های JS-ساخته: ${chips}`);
 
+  /* ۱.۱) گروه‌بندیِ انتخابِ سریع: چهار دسته در همان کادرِ جستجو.
+     اگر کسی یک گروه/برچسب را حذف کند یا فهرستِ نمادها را خالی کند، این‌جا گرفته می‌شود
+     — همان کلاسی از تغییرِ رابط که یک‌بار «کلیدها گم شدند» را ساخت. */
+  let groups = [];
+  try {
+    groups = await page.$$eval("#chips .chipgroup", (gs) => gs.map((g) => ({
+      label: ((g.querySelector(".chiplbl") || {}).textContent || "").trim(),
+      chips: [...g.querySelectorAll(".chip")].map((c) => c.textContent.trim()),
+    })));
+  } catch (e) {
+    fail("خواندنِ گروه‌های چیپ ممکن نشد: " + e.message);
+  }
+  const WANT_GROUPS = ["جفت‌ارزهای مهم", "کامودیتی", "اندیکس", "استاک"];
+  for (const w of WANT_GROUPS) {
+    const g = groups.find((x) => x.label === w);
+    if (!g) fail(`گروهِ «${w}» در چیپ‌های کادرِ جستجو نیست (موجود: ${groups.map((x) => x.label).join("، ")})`);
+    else if (!g.chips.length) fail(`گروهِ «${w}» هیچ نمادی ندارد`);
+  }
+  const allSyms = groups.flatMap((g) => g.chips);
+  for (const n of ["EURUSD", "XAUUSD", "WTI", "SPX500", "NVDA"]) {
+    if (!allSyms.includes(n)) fail(`نمادِ «${n}» از انتخابِ سریع حذف شده`);
+  }
+  notes.push(`گروه‌های چیپ: ${groups.map((g) => `${g.label}(${g.chips.length})`).join(" · ")}`);
+
   /* ۲) هیچ خطای جاوااسکریپتی در کنسول نباشد. */
   for (const e of pageErrors) fail("خطای زمانِ اجرای جاوااسکریپت: " + e);
   for (const e of consoleErrors) fail("خطای کنسول: " + e);
@@ -172,10 +196,12 @@ function loadPuppeteer() {
     fail("بررسیِ نشانگرِ بازنگری ممکن نشد: " + e.message);
   }
 
-  /* ۷) رفتارِ واقعی: کلیک روی چیپ، نماد را پر کند و دکمه‌ی تحلیل را آماده کند. */
+  /* ۷) رفتارِ واقعی: کلیک روی چیپ، نماد را پر کند و دکمه‌ی تحلیل را آماده کند.
+     عمداً روی چیپِ «اندیکس» می‌چسبیم (نه اولین چیپ) تا ثابت شود دسته‌های تازه هم
+     واقعاً سیم‌کشی شده‌اند، نه فقط در HTML نشسته‌اند. */
   try {
-    const chipText = await page.$eval("#chips .chip", (el) => el.textContent.trim());
-    await page.click("#chips .chip");
+    const chipText = "NAS100";
+    await page.click(`#chips .chip[data-sym="${chipText}"]`);
     await page.waitForFunction(
       (t) => document.querySelector("#sym").value === t, { timeout: 5000 }, chipText);
     const pulsed = await page.$eval("#go", (el) => el.classList.contains("pulse"));
