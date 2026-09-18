@@ -113,6 +113,15 @@ jobs:
           set -e
           python3 autorestart_test.py
 
+      # ── لایه‌ی ۶: نگهبانِ بازگشتِ خودکار (selfcheck_watcher.py) ──
+      # کاملأ سندباکسی: `origin`ِ بَرِ محلی + `gh`ِ جعلی روی PATH؛ بدونِ شبکه و
+      # بدونِ دست‌زدن به گیت‌هابِ واقعی. ثابت می‌کند برگشت فقط با شروطِ امنیت
+      # انجام می‌شود و در هر شش حالتِ ناایمن مسدود می‌ماند.
+      - name: تستِ نگهبانِ برگشتِ خودکار
+        run: |
+          set -e
+          python3 selfcheck_watcher_test.py
+
       - name: گزارشِ خطاها
         if: failure()
         run: |
