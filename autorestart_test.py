@@ -278,11 +278,70 @@ def case_in_flight_request():
         check(j1["pid"] == pid0, "PID بعد از ری‌استارتِ تمیز هم ثابت ماند")
 
 
+# ── D) ری‌استارتِ «فقط SHA عوض شده» (رگرسیونِ نسخه‌ی کهنه‌ای که تا ابد می‌ماند) ──
+def _git_env(home):
+    env = dict(os.environ)
+    env["HOME"] = home
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.path.join(home, "empty.gitconfig")
+    open(env["GIT_CONFIG_GLOBAL"], "w").close()
+    for k, v in (("GIT_AUTHOR_NAME", "t"), ("GIT_AUTHOR_EMAIL", "t@example.invalid"),
+                 ("GIT_COMMITTER_NAME", "t"), ("GIT_COMMITTER_EMAIL", "t@example.invalid")):
+        env[k] = v
+    return env
+
+
+def case_sha_drift_restart():
+    """کامیتی که هیچ فایلِ تعیین‌کننده‌ی رابط را لمس نمی‌کند.
+
+    باگِ واقعی که این تست قفل می‌کند: محرکِ ری‌استارت فقط mtimeِ فهرستِ ثابتِ فایل‌ها
+    بود؛ پس اگر کامیتی فقط مستندات/CI/ابزار را عوض می‌کرد، پروسه تا ابد «کهنه»
+    می‌ماند و چیپ می‌گفت «ری‌استارت در راه است» بدونِ اینکه هیچ‌وقت بیاید.
+    """
+    app_dir, home = copy_tree()
+    genv = _git_env(home)
+    for args in (["init", "-q", "-b", "main", "."],
+                 ["add", "-A"],
+                 ["commit", "-q", "-m", "c0: نقطه‌ی شروع"]):
+        subprocess.run(["git"] + args, cwd=app_dir, env=genv, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    pr, url, log, _ = start(app_dir, home)
+    j0 = rev(url)
+    check(j0.get("stale") is False, "SHA-drift: شروعِ سالم stale=false")
+    check(not (j0.get("changed_files") or []),
+          "SHA-drift: هیچ فایلِ تعیین‌کننده‌ای تازه نشده")
+    check((j0.get("disk") or {}).get("sha") == (j0.get("loaded") or {}).get("sha"),
+          "SHA-drift: SHAِ بارشده با دیسک یکی است")
+    boot0, pid0 = j0["boot_ts"], j0["pid"]
+    mtimes0 = {f["file"]: f["mtime_epoch"] for f in (j0.get("tracked_files") or [])}
+
+    # کامیتِ خالی: SHA عوض می‌شود ولی mtimeِ هیچ فایلی تغییر نمی‌کند
+    subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "c1: فقط SHA"],
+                   cwd=app_dir, env=genv, check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    j1 = wait_restart(url, boot0, timeout=60)
+    if check(j1 is not None,
+             "SHA-driftِ تنها هم ری‌استارت می‌آورد (باگِ قبلی: تا ابد کهنه می‌ماند)"):
+        check(j1["pid"] == pid0, "PID بعد از ری‌استارتِ SHA ثابت ماند")
+        check(j1.get("stale") is False, "بعد از ری‌استارت، stale=false شد")
+        check(not (j1.get("changed_files") or []),
+              "هنوز هیچ فایلِ تعیین‌کننده‌ای تازه نیست (محرک واقعاً SHA بود)")
+        check((j1.get("disk") or {}).get("sha") == (j1.get("loaded") or {}).get("sha"),
+              "SHAِ بارشده روی دیسک نشست")
+        now = {f["file"]: f["mtime_epoch"] for f in (j1.get("tracked_files") or [])}
+        check(now == mtimes0, "mtimeِ هیچ فایلِ ردیابی‌شده‌ای عوض نشده بود")
+    check("فقط SHA عوض شده" in tail(log),
+          "لاگ صریحاً می‌گوید علتِ ری‌استارت «فقط SHA» بود")
+
+
 def main():
     try:
         case_real_restart()
         case_broken_code_stays_alive()
         case_in_flight_request()
+        case_sha_drift_restart()
     finally:
         stop_all()
         for d in TMPDIRS:
@@ -297,7 +356,8 @@ def main():
         print("\n❌ تستِ ری‌استارتِ خودکار رد شد — %d مشکل" % len(problems))
         return 1
     print("\n✅ تستِ ری‌استارتِ خودکار پاس شد: ری‌استارتِ واقعی، محافظت از کدِ خراب، "
-          "و ری‌استارتِ تمیز (بدونِ قطعِ درخواستِ در جریان)")
+          "ری‌استارتِ تمیز (بدونِ قطعِ درخواستِ در جریان)، و ری‌استارتِ «فقط SHA"
+          " عوض شده»")
     return 0
 
 

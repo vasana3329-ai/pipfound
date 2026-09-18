@@ -665,6 +665,8 @@ _REV_WATCH = {
     "waiting": False,
     "blocked": None,        # کدِ تازه روی دیسک سالم نبود / exec نشد
     "blocked_mtime": None,
+    "drift_pair": None,     # «loaded>disk» که در حالِ دیده‌شدن است (برای آرامشِ SHA)
+    "drift_since": None,
 }
 _REV_LOCK = threading.Lock()
 
@@ -776,16 +778,22 @@ def _rev_validate():
         return False, "selfcheck در دسترس نیست: %s" % e
 
 
-def _rev_restart(rev, detail):
+def _rev_restart(rev, detail, guard_key=None):
     files = [c["file"] for c in (rev.get("changed_files") or [])]
     from_sha = (rev.get("loaded") or {}).get("sha")
     to_sha = (rev.get("disk") or {}).get("sha")
+    if guard_key is None:
+        guard_key = max([c["mtime_epoch"] for c in (rev.get("changed_files") or [])]
+                        or [None])
     with _REV_LOCK:
         _REV_WATCH["restarts"] += 1
+        _REV_WATCH["drift_pair"] = None
+        _REV_WATCH["drift_since"] = None
     _rev_state_write({"at": _fmt_ts(time.time()), "from": from_sha, "to": to_sha,
                       "files": files, "detail": detail, "pid": _PROC_PID})
     print("♻️ کدِ تازه روی دیسک دیده شد (%s) — ری‌استارتِ خودکار [%s] · %s → %s"
-          % (", ".join(files), detail, from_sha or "?", to_sha or "?"), flush=True)
+          % (", ".join(files) or "فقط SHA عوض شده", detail,
+             from_sha or "?", to_sha or "?"), flush=True)
     try:
         for h in (sys.stdout, sys.stderr):
             try:
@@ -797,26 +805,49 @@ def _rev_restart(rev, detail):
         with _REV_LOCK:
             _REV_WATCH["blocked"] = {"at": _fmt_ts(time.time()),
                                      "detail": "ری‌استارت انجام نشد: %s" % e}
-            _REV_WATCH["blocked_mtime"] = max(
-                [c["mtime_epoch"] for c in (rev.get("changed_files") or [])] or [None])
+            _REV_WATCH["blocked_mtime"] = guard_key
         print("⚠️ ری‌استارتِ خودکار ممکن نشد (%s) — روی همین نسخه ادامه می‌دهم."
               % e, flush=True)
 
 
 def _rev_watch_once():
-    """یک دورِ بررسی: کهنه است؟ کدِ تازه سالم است؟ درخواستی در جریان نیست؟ → ری‌استارت."""
+    """یک دورِ بررسی: کهنه است؟ کدِ تازه سالم است؟ درخواستی در جریان نیست؟ → ری‌استارت.
+
+    دو نشانه‌ی مستقلِ «کهنه» هر دو باید محرک باشند:
+      · mtimeِ فایل‌های تعیین‌کننده‌ی رابط تازه‌تر از استارتِ پروسه شده باشد؛
+      · SHAِ HEAD روی دیسک با SHAِ بارشده فرق کند — کامیتی که هیچ‌کدام از آن
+        فایل‌های فهرست‌شده را لمس نکرده (مستندات/CI/ابزار) هم پروسه را کهنه
+        می‌کند. اگر این شاخه نادیده گرفته شود، چیپ تا ابد قرمز می‌ماند و می‌گوید
+        «ری‌استارت در راه است» ولی هیچ‌وقت نمی‌آید — بی‌صدا نسخه‌ی کهنه سرو می‌شود.
+    """
     if not _REV_WATCH["enabled"]:
         return False
     rev = code_rev()
     changed = rev.get("changed_files") or []
-    if not changed:
+    drift = bool(rev.get("sha_drift"))
+    if not changed and not drift:
         with _REV_LOCK:
             _REV_WATCH["blocked"] = None
             _REV_WATCH["blocked_mtime"] = None
+            _REV_WATCH["drift_pair"] = None
+            _REV_WATCH["drift_since"] = None
         return False
-    newest = max(c["mtime_epoch"] for c in changed)
-    # شاید همین حالا مشغولِ نوشتنِ فایل باشیم → کمی صبر کن
-    if time.time() - newest < _REV_WATCH["settle"]:
+
+    if changed:
+        settle_from = max(c["mtime_epoch"] for c in changed)
+    else:
+        # هیچ mtimeی برای مقایسه نداریم، پس خودِ «دیده‌شدنِ دریفت» مرجعِ آرامش است
+        # تا وسطِ یک checkout/pullِ نیمه‌کاره ری‌استارت نکنیم.
+        pair = "%s>%s" % ((rev.get("loaded") or {}).get("sha"),
+                           (rev.get("disk") or {}).get("sha"))
+        with _REV_LOCK:
+            if _REV_WATCH["drift_pair"] != pair or _REV_WATCH["drift_since"] is None:
+                _REV_WATCH["drift_pair"] = pair
+                _REV_WATCH["drift_since"] = time.time()
+            settle_from = _REV_WATCH["drift_since"]
+    newest = settle_from
+    # شاید همین حالا مشغولِ نوشتنِ فایل/گیت هستیم → کمی صبر کن
+    if time.time() - settle_from < _REV_WATCH["settle"]:
         return False
     # همان فایلِ خرابی که قبلاً رد شده بود را دوباره اعتبارسنجی نکن (بی‌فایده و گران)
     with _REV_LOCK:
@@ -843,7 +874,7 @@ def _rev_watch_once():
     finally:
         with _REV_LOCK:
             _REV_WATCH["waiting"] = False
-    _rev_restart(rev, detail)
+    _rev_restart(rev, detail, guard_key=newest)
     return True
 
 
