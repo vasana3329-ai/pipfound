@@ -81,16 +81,27 @@ function loadPuppeteer() {
 
   await page.goto(URL, { waitUntil: "load", timeout: 30000 });
 
-  /* ۱) اسکریپت زنده است؟ چیپ‌ها فقط با JS ساخته می‌شوند. */
+  /* ۱) نمای اصلی باید تمیز باشد: **هیچ کلیدِ نمادی** نباید بی‌دخالت دیده شود.
+     فهرست داخلِ یک پنلِ کشویی است که فقط با ورودِ نشانگر/فوکوس به کادرِ نماد باز می‌شود. */
+  try {
+    const vis = await page.$eval("#chips", (el) => getComputedStyle(el).display !== "none");
+    if (vis) fail("پنلِ انتخابِ نماد در نمای اصلی دیده می‌شود — باید فقط با ورودِ نشانگر/فوکوس باز شود");
+    else notes.push("نمای اصلی تمیز است: پنلِ نمادها بسته است");
+  } catch (e) {
+    fail("عنصرِ پنلِ انتخابِ نماد (#chips) پیدا نشد: " + e.message);
+  }
+
+  /* ۱.۱) اسکریپت زنده است؟ پنل فقط با JS ساخته می‌شود؛ با رفتنِ نشانگر داخلِ کادر باید باز شود. */
   let chips = 0;
   try {
-    await page.waitForSelector("#chips .chip", { timeout: 15000 });
+    await page.hover("#sym");
+    await page.waitForSelector("#chips.open .chip", { timeout: 15000 });
     chips = await page.$$eval("#chips .chip", (els) => els.length);
   } catch (e) {
-    fail("چیپ‌های نماد ساخته نشدند — یعنی بلوکِ <script> صفحه اجرا نشده (همان خرابیِ «کلیدها گم شدند»)");
+    fail("با ورودِ نشانگر به کادرِ نماد، فهرستِ انتخاب باز نشد — یعنی بلوکِ <script> اجرا نشده (همان خرابیِ «کلیدها گم شدند»)");
   }
-  if (chips && chips < 8) fail(`تعدادِ چیپ‌ها کم است: ${chips} (انتظار ≥ ۸)`);
-  notes.push(`چیپ‌های JS-ساخته: ${chips}`);
+  if (chips && chips < 8) fail(`تعدادِ نمادهای انتخاب کم است: ${chips} (انتظار ≥ ۸)`);
+  notes.push(`نمادهای انتخابِ سریع (JS-ساخته): ${chips}`);
 
   /* ۱.۱) گروه‌بندیِ انتخابِ سریع: چهار دسته در همان کادرِ جستجو.
      اگر کسی یک گروه/برچسب را حذف کند یا فهرستِ نمادها را خالی کند، این‌جا گرفته می‌شود
@@ -196,19 +207,30 @@ function loadPuppeteer() {
     fail("بررسیِ نشانگرِ بازنگری ممکن نشد: " + e.message);
   }
 
-  /* ۷) رفتارِ واقعی: کلیک روی چیپ، نماد را پر کند و دکمه‌ی تحلیل را آماده کند.
-     عمداً روی چیپِ «اندیکس» می‌چسبیم (نه اولین چیپ) تا ثابت شود دسته‌های تازه هم
-     واقعاً سیم‌کشی شده‌اند، نه فقط در HTML نشسته‌اند. */
+  /* ۷) رفتارِ واقعی: انتخاب از داخلِ پنل باید کادر را پُر کند، دکمه را آماده کند و
+     پنل را ببندد. عمداً روی نمادِ «اندیکس» می‌چسبیم (نه اولین نماد) تا ثابت شود
+     دسته‌های تازه هم واقعاً سیم‌کشی شده‌اند، نه فقط پنل را پر کرده‌اند. */
   try {
     const chipText = "NAS100";
+    await page.hover("#sym");
+    await page.waitForSelector("#chips.open", { timeout: 5000 });
     await page.click(`#chips .chip[data-sym="${chipText}"]`);
     await page.waitForFunction(
       (t) => document.querySelector("#sym").value === t, { timeout: 5000 }, chipText);
     const pulsed = await page.$eval("#go", (el) => el.classList.contains("pulse"));
     if (!pulsed) fail("پس از انتخابِ نماد، دکمه‌ی «تحلیل کن» حالتِ آماده (pulse) نگرفت");
-    notes.push(`کلیکِ چیپ «${chipText}» → نماد پُر شد و دکمه آماده شد`);
+    const stillOpen = await page.$eval("#chips", (el) => el.classList.contains("open"));
+    if (stillOpen) fail("پس از انتخابِ نماد، پنلِ فهرست بسته نشد");
+    notes.push(`انتخابِ «${chipText}» از پنل → نماد پُر شد، دکمه آماده شد، پنل بسته شد`);
+    // پنل باید به حالتِ بسته برگردد تا نمای اصلیِ کاربر تمیز بماند
+    await page.mouse.move(10, 10);
+    await page.waitForFunction(() => {
+      const el = document.querySelector("#chips");
+      return el && getComputedStyle(el).display === "none";
+    }, { timeout: 5000 });
+    notes.push("پس از کنار رفتنِ نشانگر، پنل بسته می‌ماند");
   } catch (e) {
-    fail("کلیکِ چیپ اثر نکرد (هندلرها مرده‌اند؟): " + e.message);
+    fail("انتخاب از پنل اثر نکرد (هندلرها مرده‌اند؟): " + e.message);
   }
 
   /* ۸) رفتارِ واقعی: کلیک روی سبک، حالتِ active را جابه‌جا کند. */

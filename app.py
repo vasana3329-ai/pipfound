@@ -981,10 +981,18 @@ h1{font-size:22px;margin:0;font-weight:700;letter-spacing:.2px;
 .sbwin .sb-steps{margin:12px 0 0;padding:0;list-style:none;font-size:13px;line-height:1.9;color:#c8d2ea}
 .sbwin .sb-steps li{padding-right:20px;position:relative}
 .sbwin .sb-steps li::before{content:"◆";position:absolute;right:0;color:#a855f7;font-size:11px;top:3px}
-.chips{display:flex;flex-direction:column;gap:7px;margin-top:12px}
+/* انتخابِ سریعِ نماد: در نمای اصلیِ صفحه **هیچ کلیدی** دیده نمی‌شود؛ این پنل فقط
+   وقتی نشانگر یا فوکوس داخلِ کادرِ نماد می‌رود باز می‌شود (مثلِ یک کشویی زیرِ کادر). */
+.chips{position:absolute;top:calc(100% + 6px);inset-inline:0;z-index:60;display:none;
+  flex-direction:column;gap:9px;background:var(--panel);border:1px solid var(--line);
+  border-radius:14px;padding:12px;box-shadow:0 18px 40px rgba(0,0,0,.55);
+  max-height:min(430px,64vh);overflow:auto}
+.chips.open{display:flex}
 .chipgroup{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
 .chiplbl{color:var(--accent);font-size:11px;font-weight:700;background:var(--panel2);
   border:1px solid var(--line);border-radius:8px;padding:4px 9px;white-space:nowrap}
+.chiphint{color:var(--muted);font-size:11px;opacity:.85;margin-top:-2px}
+.symwrap{position:relative;flex:1;min-width:200px;display:flex}
 /* پنلِ تنظیماتِ بک‌تست */
 .btpanel{margin-top:14px;border-top:1px dashed var(--line);padding-top:14px;display:flex;
   flex-direction:column;gap:10px}
@@ -1223,11 +1231,13 @@ tr.on td{background:rgba(34,197,94,.05)}
 
   <div class="card">
     <div class="searchrow">
-      <input id="sym" class="inp" placeholder="نامِ نماد… مثل XAUUSD، EURUSD، WTI، SPX500، NAS100، NVDA"
-             title="نامِ نماد را این‌جا بنویس (طلا/نقره، جفت‌ارزهای مهم، کامودیتی، اندیکس، استاک و کریپتو — مثل XAUUSD، EURUSD، WTI، SPX500، NVDA). با انتخاب/تایپِ نماد، سبک و دکمه‌ی تحلیل چشمک می‌زنند؛ هیچ‌چیز خودکار اجرا نمی‌شود."
-             list="syms" autocomplete="off" autofocus>
-      <datalist id="syms"></datalist>
-      <div class="chips" id="chips"></div>
+      <div class="symwrap">
+        <input id="sym" class="inp" placeholder="نامِ نماد… مثل XAUUSD، EURUSD، WTI، SPX500، NVDA"
+               title="نامِ نماد را این‌جا بنویس (طلا/نقره، جفت‌ارزهای مهم، کامودیتی، اندیکس، استاک و کریپتو). نشانگر را داخلِ همین کادر ببر (یا روی آن کلیک کن) تا فهرستِ نمادها زیرِ کادر باز شود و یکی را انتخاب کنی. با انتخاب/تایپِ نماد، سبک و دکمه‌ی تحلیل چشمک می‌زنند؛ هیچ‌چیز خودکار اجرا نمی‌شود."
+               list="syms" autocomplete="off">
+        <datalist id="syms"></datalist>
+        <div class="chips" id="chips"></div>
+      </div>
       <div class="styles" id="styles">
         <button data-k="scalp" title="سبکِ اسکالپ — تایم‌فریمِ پایین. فقط سبک را عوض می‌کند؛ تحلیل را خودکار اجرا نمی‌کند.">اسکالپ</button>
         <button data-k="day" class="active" title="سبکِ روزانه (پیش‌فرض). فقط سبک را عوض می‌کند؛ تحلیل را خودکار اجرا نمی‌کند.">روزانه</button>
@@ -1324,21 +1334,39 @@ const symIn = $("#sym"), goBtn = $("#go"), res = $("#result");
 const dl = $("#syms");
 SUGGESTIONS.forEach(s=>{const o=document.createElement("option");o.value=s;dl.appendChild(o);});
 const chips = $("#chips");
-// انتخابِ سریعِ گروه‌بندی‌شده: جفت‌ارزهای مهم · کامودیتی · اندیکس · استاک
+// انتخابِ سریعِ گروه‌بندی‌شده — جفت‌ارزهای مهم · کامودیتی · اندیکس · استاک.
+// این‌ها در نمای اصلیِ صفحه دیده **نمی‌شوند**: پنل تا وقتی نشانگر/فوکوس داخلِ کادرِ
+// نماد نیامده بسته است، پس صفحه تمیز می‌ماند و انتخاب همیشه در دسترس است.
+const symWrap = symIn.closest(".symwrap") || symIn.parentElement;
 SYMBOL_GROUPS.forEach(([label, syms])=>{
   const row=document.createElement("div"); row.className="chipgroup";
   const lb=document.createElement("span"); lb.className="chiplbl"; lb.textContent=label;
   row.appendChild(lb);
   syms.forEach(s=>{
-    const c=document.createElement("span");c.className="chip";c.textContent=s;
+    const c=document.createElement("button");c.type="button";c.className="chip";c.textContent=s;
     c.setAttribute("data-sym",s);   // تستِ بصریِ CI روی همین می‌چسبد (نباید بی‌صدا حذف شود)
-    c.title="انتخابِ سریعِ "+s+" — فقط کادرِ جستجو را پُر می‌کند؛ اول سبک/بازه را انتخاب کن.";
+    c.title="انتخابِ "+s+" — فقط کادرِ نماد را پُر می‌کند؛ اول سبک/بازه را انتخاب کن.";
     // فقط نماد را پُر کن؛ اجرا نکن. کاربر اول سبک و بازه را انتخاب می‌کند.
-    c.onclick=()=>{ symIn.value=s; symIn.focus(); markReady(); };
+    c.onclick=()=>{ symIn.focus(); symIn.value=s; markReady(); closePick(); };
     row.appendChild(c);
   });
   chips.appendChild(row);
 });
+const hint=document.createElement("div");
+ hint.className="chiphint"; hint.textContent="با تایپ هم می‌توانی نماد را بنویسی؛ این فهرست فقط انتخاب را سریع می‌کند.";
+chips.appendChild(hint);
+
+// باز/بسته شدنِ پنل: با ورودِ نشانگر یا فوکوس؛ بستن با خروجِ نشانگر، کلیکِ بیرون، Esc یا انتخاب
+let pickTimer=null;
+function openPick(){ clearTimeout(pickTimer); chips.classList.add("open"); }
+function closePick(){ clearTimeout(pickTimer); chips.classList.remove("open"); }
+function closePickSoon(){ clearTimeout(pickTimer); pickTimer=setTimeout(closePick, 200); }
+symIn.addEventListener("focus", openPick);
+symIn.addEventListener("click", openPick);
+symWrap.addEventListener("mouseenter", openPick);
+symWrap.addEventListener("mouseleave", closePickSoon);
+symIn.addEventListener("keydown", (e)=>{ if(e.key==="Escape") closePick(); });
+document.addEventListener("click", (e)=>{ if(!symWrap.contains(e.target)) closePick(); });
 
 // وقتی نمادی انتخاب/تایپ شد، کاربر را به انتخابِ سبک/بازه هدایت کن (بدونِ اجرای خودکار)
 function markReady(){
@@ -1346,7 +1374,11 @@ function markReady(){
   $("#styles").classList.toggle("awaiting", has);
   goBtn.classList.toggle("pulse", has);
 }
-symIn.addEventListener("input", markReady);
+symIn.addEventListener("input", ()=>{ markReady();
+  // وقتی کاربر دارد تایپ می‌کند، اتوکامپلیتِ خودِ مرورگر کار می‌کند و پنل بسته می‌شود؛
+  // با خالی شدنِ کادر، پنل برمی‌گردد تا انتخابِ فهرستی همیشه یک قدم فاصله داشته باشد.
+  if(symIn.value.trim()) closePick(); else openPick();
+});
 
 // style toggle — فقط سبک را عوض کن؛ تحلیل را خودکار اجرا نکن
 $("#styles").addEventListener("click",e=>{
