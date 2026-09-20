@@ -238,6 +238,32 @@ try:
 finally:
     stop(pr)
 
+# ── ۵) درصدِ ریسکِ پیکربندی‌شده باید در ردیفِ ژورنال بنشیند (نه عددِ ثابتِ «1») ──
+# چرا: پیش‌تر `risk_pct` در مسیرِ ثبتِ اپ رشتهٔ ثابتِ «1» بود؛ یعنی هر معاملهٔ
+# ثبت‌شده از اپ ریسکِ ۱٪ جا می‌زد، حتی اگر کاربر ۰.۷۵٪ معامله می‌کرد — و بعد
+# آمارِ ژورنال و سقفِ ضررِ روزانه (که روی همین عدد حساب می‌شوند) غلط می‌شد.
+home5 = tempfile.mkdtemp(prefix="pfj5-")
+ledger5 = os.path.join(home5, "data", "journal.csv")
+risk5 = os.path.join(home5, "conf", "risk.json")
+os.makedirs(os.path.dirname(risk5), exist_ok=True)
+with open(risk5, "w", encoding="utf-8") as fh:
+    json.dump({"balance": 20000, "risk_pct": 0.75, "daily_loss_limit_pct": 2.0,
+               "max_open_risk_pct": 4.0}, fh)
+
+pr, url5, _ = start_app(home5, {"PIPFOUND_JOURNAL_CSV": ledger5,
+                                "PIPFOUND_RISK_FILE": risk5})
+try:
+    res5 = post_trade(url5, symbol="XAUUSD")
+    check(bool(res5.get("added")), f"ثبت با تنظیماتِ ریسک موفق بود ({res5})")
+    rows5 = read_rows(ledger5)
+    check(len(rows5) == 1, f"باید یک ردیف ثبت شود (شد: {len(rows5)})")
+    if rows5:
+        check((rows5[0].get("risk_pct") or "").strip() == "0.75",
+              "درصدِ ریسکِ تنظیم‌شده (۰.۷۵) باید در ردیفِ ژورنال بیاید، نه «1» — گرفتیم: "
+              + repr(rows5[0].get("risk_pct")))
+finally:
+    stop(pr)
+
 for n in notes:
     print(n)
 if problems:

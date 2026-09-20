@@ -61,7 +61,7 @@ jobs:
           echo "سرور بالا آمد ✓"
 
           page="$(curl -sf http://127.0.0.1:8787/)"
-          for id in go bt sym refreshBtn archiveBtn fundBtn sbBtn setupsBtn jbtn; do
+          for id in go bt sym refreshBtn archiveBtn fundBtn sbBtn setupsBtn jbtn rkSave rkBalance rkRisk rkDaily rkOpen; do
             if ! printf '%s' "$page" | grep -q "id=\"$id\""; then
               echo "::error::کلیدِ «$id» در صفحه‌ی سرو‌شده نیست"
               exit 1
@@ -103,6 +103,24 @@ jobs:
         run: |
           set -e
           python3 journal_roundtrip_test.py
+
+      # ── لایه‌ی ۴.۵: صداقتِ داده (کندلِ بسته + سنِ داده/باز-بستهی بازار) ──
+      # کاملاً آفلاین و قطعی (کندلِ ساختگی): هرگز تحلیل روی کندلِ ناقص انجام نشود،
+      # بازارِ بسته درجه را ببندد و پلن «قابلِ اجرا» علامت نخورد، و بک‌تست کندلِ
+      # هنوز-بازِ تایم‌فریمِ بالا را (که داده‌ی آینده است) نبیند.
+      - name: تستِ تازگیِ داده و کندلِ بسته
+        run: |
+          set -e
+          python3 data_freshness_test.py
+
+      # ── لایه‌ی ۴.۶: مدلِ ریسک (سایزِ پوزیشن، سقفِ ضررِ روزانه، هم‌بستگی) ──
+      # کاملاً آفلاین و قطعی: مشخصاتِ قرارداد، فرمولِ سایز، گاردها، و هشدارِ
+      # تمرکز. «۱:۳» بدونِ سایز یک عددِ تزئینی است؛ این لایه نمی‌گذارد فرمولِ
+      # سایز یا سقفِ ضررِ روزانه بی‌صدا عوض شود.
+      - name: تستِ مدلِ ریسک
+        run: |
+          set -e
+          python3 risk_test.py
 
       # ── لایه‌ی ۵: ری‌استارتِ خودکارِ «کدِ کهنه» ──
       # مثلِ تستِ ژورنال، روی کپیِ موقتِ پروژه و پورتِ تصادفی کار می‌کند:

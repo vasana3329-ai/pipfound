@@ -40,7 +40,8 @@ LOG = os.path.join(BASE, "selfcheck.log")
 
 # فایل‌هایی که در اسنپ‌شات و بازگردانی دخیل‌اند
 TRACKED = ["app.py", "fundamental.py", "confluence.py", "smc_engine.py",
-           "macro_context.py", "backtest.py", "manifest.webmanifest", "sw.js",
+           "macro_context.py", "backtest.py", "risk.py",
+           "manifest.webmanifest", "sw.js",
            "icon-180.png", "icon-192.png", "icon-192-mask.png",
            "icon-512.png", "icon-512-mask.png"]
 

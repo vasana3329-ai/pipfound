@@ -42,14 +42,26 @@ def _slice_upto(bars, t_now):
 
 def _build_d(series, tfs, t_now, warm=40):
     """دیکشنریِ d که score() انتظار دارد: {tf: analyze_bars(برشِ آن تایم‌فریم)}.
-    اگر یک تایم‌فریم کندلِ کافی تا این لحظه ندارد، آن گام skip می‌شود (None)."""
+    اگر یک تایم‌فریم کندلِ کافی تا این لحظه ندارد، آن گام skip می‌شود (None).
+
+    `t_now` = زمانِ **بازشدنِ** کندلِ ورود؛ پس لحظه‌ی تصمیم = `t_now + ثانیه‌های
+    تایم‌فریمِ ورود` (کلوزی که سیگنال روی آن صادر می‌شود).
+
+    ⛔ کندلِ هنوز-باز حذف می‌شود: پیش‌تر کندلِ ۴ساعته‌ای که کندلِ ورود داخلش بود با
+    **کلوز/های/لویِ نهاییِ خودش** تحلیل می‌شد — یعنی داده‌ی آینده (look-ahead). حالا
+    دقیقاً همان چیزی دیده می‌شود که در لحظه‌ی تصمیم وجود داشت، و همان چیزی که
+    مسیرِ زنده هم می‌بیند (fetch خودش کندلِ ناقص را می‌اندازد).
+    """
+    t_decision = t_now + EG.tf_seconds(tfs[-1]) if tfs else t_now
     d = {}
     for tf in tfs:
         sl = _slice_upto(series[tf], t_now)
+        sl, _dropped = EG.drop_unclosed(sl, tf, now=t_decision)
         if len(sl) < warm:
             return None  # هنوز گرم نشده
         try:
-            d[tf] = EG.analyze_bars(sl, tf, disp=series["_disp"], src="backtest")
+            d[tf] = EG.analyze_bars(sl, tf, disp=series["_disp"], src="backtest",
+                                    now=t_decision)
         except Exception as ex:
             d[tf] = {"error": str(ex)}
     return d

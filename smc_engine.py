@@ -15,7 +15,7 @@ Symbol resolution:
   - EURUSD/GBPUSD/... (6 letters, forex)      -> Yahoo (EURUSD=X)
   - XAUUSD / GOLD                             -> Yahoo (GC=F)
 """
-import sys, json, urllib.request, urllib.parse, argparse, datetime, math, ssl
+import sys, json, urllib.request, urllib.parse, argparse, datetime, math, ssl, time
 
 UA = {"User-Agent": "Mozilla/5.0"}
 
@@ -35,6 +35,34 @@ _CTX=_ssl_ctx()
 BINANCE_TF = {"1m":"1m","5m":"5m","15m":"15m","30m":"30m","1h":"1h","4h":"4h","1d":"1d","1w":"1w"}
 YF_TF = {"1m":"1m","5m":"5m","15m":"15m","30m":"30m","1h":"1h","4h":"1h","1d":"1d","1w":"1wk"}
 YF_RANGE = {"1m":"5d","5m":"1mo","15m":"1mo","30m":"1mo","1h":"3mo","4h":"3mo","1d":"2y","1w":"5y"}
+
+# طولِ هر کندل به ثانیه — مبنای تشخیصِ «کندلِ بسته» و سنِ داده.
+TF_SECONDS = {"1m":60,"5m":300,"15m":900,"30m":1800,
+              "1h":3600,"4h":14400,"1d":86400,"1w":604800}
+
+
+def tf_seconds(tf):
+    return TF_SECONDS.get(tf, 3600)
+
+
+def drop_unclosed(bars, tf, now=None):
+    """کندلِ در حالِ تشکیل (ناقص) را از انتهای آرایه حذف می‌کند.
+
+    ریشه‌ی «repaint»: تا وقتی کندلِ جاری بسته نشده، o/h/l/c آن تغییر می‌کند و هر
+    سطحی که از آن ساخته شود (سوینگ، FVG، اوبی، PD، حتی برچسبِ کیل‌زون) تا لحظه‌ی
+    بسته‌شدن جابه‌جا می‌شود — یعنی «پلن» عوض می‌شود بدونِ اینکه چیزی روی دیسک عوض شود.
+    بک‌تست از پیش فقط کندلِ بسته می‌دید؛ از این پس تحلیلِ زنده هم همان کار را می‌کند
+    تا رفتارِ زنده و بک‌تست بر یک توزیع باشند.
+
+    خروجی: (barsِ بریده‌شده، تعدادِ حذف‌شده)
+    """
+    if now is None:
+        now = time.time()
+    secs = tf_seconds(tf)
+    cut = len(bars)
+    while cut > 0 and (bars[cut-1].get("t", 0) + secs) > now:
+        cut -= 1
+    return bars[:cut], len(bars) - cut
 
 FX_MAJORS = {"EURUSD","GBPUSD","USDJPY","USDCHF","USDCAD","AUDUSD","NZDUSD",
              "EURJPY","GBPJPY","EURGBP","EURAUD","AUDJPY","EURCHF","GBPCHF"}
@@ -180,9 +208,17 @@ def resample(bars,n):
                     "v":sum(x["v"] for x in grp)})
     return out
 
-def fetch(symbol, tf, limit):
+def fetch(symbol, tf, limit, unclosed=False):
+    """کندلِ نماد را از منبعِ درست می‌گیرد و در حالتِ پیش‌فرض فقط کندلِ بسته می‌دهد.
+
+    `unclosed=False` (پیش‌فرض، برای تحلیل): کندلِ در حالِ تشکیل حذف می‌شود تا تحلیل
+    فقط روی کندلِ بسته انجام شود (ضدِ repaint؛ همان چیزی که بک‌تست همیشه می‌دید).
+    `unclosed=True` فقط برای قیمتِ زندهٔ آلارم است — آن‌جا همان کندلِ ناقص `last` است.
+    """
     src,sym,disp=resolve(symbol)
     bars = fetch_binance(sym,tf,limit) if src=="binance" else fetch_yahoo(sym,tf,limit)
+    if not unclosed:
+        bars, _unclosed_n = drop_unclosed(bars, tf)
     # فلزات: Yahoo آتیِ COMEX (GC=F/SI=F) می‌دهد که نسبت به اسپات «بِیسیس» دارد.
     # کلِ سری را به‌اندازه‌ی (اسپات − آخرین‌کلوزِ آتی) شیفت می‌دهیم تا سطوح روی
     # چارتِ اسپاتِ XAU/XAG بنشیند. ساختار/سوینگ‌ها دست‌نخورده می‌ماند.
@@ -694,6 +730,132 @@ def _is_us_dst(dt_utc):
     return dst_start <= dt_utc < dst_end
 
 
+def et_of(ts):
+    """یک لحظه‌ی UTC → زمانِ نیویورک با آفستِ DSTِ درست."""
+    dt_utc = datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
+    return dt_utc - datetime.timedelta(hours=(4 if _is_us_dst(dt_utc) else 5))
+
+
+def symbol_class(sym, src="yahoo"):
+    """دستهٔ دارایی — برای سوئیتِ سشن (فارکس/فلزات/اندیکسِ نقدی آخرِ هفته بسته‌اند،
+    کریپتو ۲۴/۷ است، و سشنِ اصلیِ سهام ۰۹:۳۰–۱۶:۰۰ ET است)."""
+    s = (sym or "").upper().replace("/", "").replace("-", "")
+    if src == "binance" or s.endswith(("USDT", "USDC", "BUSD")):
+        return "crypto"
+    if s in _SPOT_MAP or s in ("GC=F", "SI=F", "XAUUSD", "XAGUSD", "GOLD", "SILVER"):
+        return "metal"
+    if len(s) == 6 and s.isalpha():
+        return "fx"
+    if s in INDEX_MAP or s.startswith("^"):
+        return "index"
+    if is_stock(s):
+        return "stock"
+    return "other"
+
+
+def _is_market_weekend(et):
+    """آخرِ هفتهٔ بازار (ET): جمعه ۱۷:۰۰ → یکشنبه ۱۷:۰۰."""
+    wd = et.weekday()          # Mon=0 … Sun=6
+    if wd == 5:
+        return True
+    if wd == 6 and et.hour < 17:
+        return True
+    if wd == 4 and et.hour >= 17:
+        return True
+    return False
+
+
+def _human_age(secs):
+    """سن به شکلِ خوانا: «۴۵ ثانیه» / «۱۲ دقیقه» / «۳ ساعت» / «۲ روز»."""
+    if secs is None:
+        return "—"
+    s = int(secs)
+    if s < 90:    return f"{s} ثانیه"
+    if s < 5400:  return f"{round(s/60)} دقیقه"
+    if s < 172800:return f"{round(s/3600)} ساعت"
+    return f"{round(s/86400)} روز"
+
+
+def freshness_from(last_bar_ts, tf, sym, src="yahoo", now=None):
+    """سنِ داده + باز/بسته بودنِ بازار، **بدونِ شبکه** (قابلِ محاسبه‌ی مکرر).
+
+    قاعده‌ها (به ترتیب):
+      ۱. آخرِ هفتهٔ تقویمی برای غیرِکریپتو → بسته (مستقل از داده).
+      ۲. سشنِ سهام خارج از ۰۹:۳۰–۱۶:۰۰ ET → نازک (نه بستهٔ کامل).
+      ۳. سنِ آخرین کندلِ **بسته** نسبت به طولِ کندل:
+         ≤ ۱.۵ برابر → تازه · ≤ ۳ برابر → عقب‌افتاده · بیشتر → بسته/بی‌فید.
+
+    خروجی: dict با state ∈ {open, delayed, thin, closed} + دلیلِ فارسی + ساعتِ ET.
+    """
+    if now is None:
+        now = time.time()
+    secs = tf_seconds(tf)
+    et = et_of(now)
+    cls = symbol_class(sym, src)
+    age = None
+    forming = False
+    if last_bar_ts is not None:
+        bar_close = last_bar_ts + secs
+        forming = bar_close > now          # کندلِ جاری هنوز بسته نشده (نباید در تحلیل بیاید)
+        age = max(0.0, now - bar_close)
+    base = {"symbol_class": cls, "source": src, "tf": tf,
+            "bar_seconds": secs, "last_bar_ts": last_bar_ts,
+            "forming": forming,
+            "age_s": (None if age is None else int(age)),
+            "age_human": _human_age(age),
+            "checked_utc": datetime.datetime.fromtimestamp(
+                now, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M"),
+            "et_now": et.strftime("%Y-%m-%d %H:%M")}
+    if last_bar_ts is not None:
+        # زمانِ خوانا در خودِ همین بلوک می‌آید تا هر مصرف‌کننده‌ای (UI/API/alarm)
+        # بدونِ تبدیلِ دوباره بتواند کندلِ آخر را نشان دهد.
+        base["last_bar_utc"] = datetime.datetime.fromtimestamp(
+            last_bar_ts, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
+    if cls != "crypto" and _is_market_weekend(et):
+        base.update({"state": "closed", "session": "weekend",
+                     "reason": ("آخرِ هفته — فارکس/فلزات/اندیکس/سهام از جمعه ۱۷:۰۰ تا "
+                                "یکشنبه ۱۷:۰۰ به‌وقتِ نیویورک بسته‌اند")})
+        return base
+    if age is None:
+        base.update({"state": "closed", "session": "no-data",
+                     "reason": "هیچ کندلِ بسته‌ای در دست نیست"})
+        return base
+    if cls == "stock":
+        h = et.hour + et.minute / 60
+        if et.weekday() < 5 and not (9.5 <= h < 16):
+            base.update({"state": "thin", "session": "outside-rth",
+                         "reason": ("خارج از سشنِ اصلیِ سهام (۰۹:۳۰–۱۶:۰۰ ET) — "
+                                    f"ساعتِ نیویورک {et.strftime('%H:%M')} · نقدینگیِ نازک")})
+            return base
+    if age > 3 * secs:
+        base.update({"state": "closed", "session": "stale-data",
+                     "reason": (f"آخرین کندلِ بسته {_human_age(age)} پیش بسته شده — "
+                                "بازار بسته است یا فید در این تایم‌فریم تازه نیست")})
+        return base
+    if age > 1.5 * secs:
+        base.update({"state": "delayed", "session": "behind",
+                     "reason": f"آخرین کندلِ بسته {_human_age(age)} پیش بسته شده — کمی عقب‌تر از حدِ معمول"})
+        return base
+    base.update({"state": "open", "session": "live",
+                 "reason": f"آخرین کندلِ بسته {_human_age(age)} پیش بسته شد — داده تازه است"})
+    return base
+
+
+def data_status(bars, tf, src="yahoo", sym=None, now=None):
+    """وضعیتِ داده برای یک آرایه‌ی کندلِ ازپیش‌بریده (فقط کندلِ بسته).
+    `now` را بک‌تست صریح می‌دهد (زمانِ بسته‌شدنِ کندلِ سیگنال) تا وضعیت
+    «در لحظهٔ آن کندل» سنجیده شود، نه با ساعتِ اجرا."""
+    last_t = bars[-1]["t"] if bars else None
+    out = freshness_from(last_t, tf, sym or "", src=src, now=now)
+    if last_t is not None:
+        out["last_bar_utc"] = datetime.datetime.fromtimestamp(
+            last_t, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
+        out["bar_closed_utc"] = datetime.datetime.fromtimestamp(
+            last_t + out["bar_seconds"], datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
+    out["bars"] = len(bars)
+    return out
+
+
 def killzone_at(ts=None):
     """کیل‌زونِ ICT بر اساسِ زمانِ نیویورک برای یک لحظه‌ی مشخص.
 
@@ -765,9 +927,15 @@ def silver_bullet_window(ts=None):
     }
 
 
-def analyze_bars(bars, tf, disp=None, src="backtest", sym=None):
+def analyze_bars(bars, tf, disp=None, src="backtest", sym=None, now=None):
     """تحلیلِ ساختار روی آرایه‌ی کندلِ ازپیش‌آماده (بدونِ fetch).
-    هسته‌ی مشترکِ analyze و بک‌تست — دقیقاً همان منطقِ تصحیح‌شده روی هر برشِ تاریخی."""
+    هسته‌ی مشترکِ analyze و بک‌تست — دقیقاً همان منطقِ تصحیح‌شده روی هر برشِ تاریخی.
+
+    نکته‌ی مهم: `bars` باید **فقط کندلِ بسته** داشته باشد. مسیرِ زنده (fetch) خودش
+    کندلِ ناقص را حذف می‌کند و مسیرِ بک‌تست هم کندلِ در حالِ تشکیل ندارد.
+    `now` = لحظه‌ای که باید سنِ داده نسبت به آن سنجیده شود (بک‌تست: بسته‌شدنِ کندلِ
+    سیگنال؛ زنده: None ⇒ همین حالا).
+    """
     if len(bars)<30: raise RuntimeError("not enough bars")
     sw=swings(bars,2)
     trend,labels,bos,choch,meta=structure(bars,sw)
@@ -811,6 +979,9 @@ def analyze_bars(bars, tf, disp=None, src="backtest", sym=None):
         "FVG_unfilled":fvgs(bars),
         "order_blocks":order_blocks(bars),
         "killzone":kz,
+        # سنِ داده + باز/بسته بودنِ بازار: هر پاسخِ تحلیل این را می‌گوید تا «پلنِ
+        # زیبا روی دادهٔ کهنه/بازارِ بسته» بی‌صدا به‌شکلِ سیگنالِ ورود دیده نشود.
+        "data": data_status(bars, tf, src=src, sym=(sym or disp), now=now),
     }
 
 def analyze(symbol, tf, limit=300):
