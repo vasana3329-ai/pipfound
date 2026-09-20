@@ -155,9 +155,49 @@ function loadPuppeteer() {
   }), WIRED);
   if (unwired.length) fail("کلیدهای بی‌هندلر (onclick تابع نیست): " + unwired.join(", "));
 
-  /* دکمه‌ی «↻ بروزرسانی» تا اولین تحلیل باید غیرفعال بماند (رفتارِ طراحی‌شده). */
-  const refreshDisabled = await page.$eval("#refreshBtn", (el) => el.disabled);
-  if (!refreshDisabled) fail("دکمه‌ی «↻ بروزرسانی» از همان ابتدا فعال است (باید تا اولین تحلیل غیرفعال باشد)");
+  /* ۶.۶) دکمه‌ی «↻ بروزرسانی» باید از همان بارگذاری *واکنش* نشان دهد.
+     باگِ واقعیِ گزارش‌شده: دکمه disabledبود، پس کلیک روی آن در اپِ تازه‌باز هیچ
+     اتفاقی نمی‌انداخت (نه پیام، نه راهنما) و به‌نظرِ «دکمه‌ی خراب» می‌آمد.
+     قراردادِ تازه: دکمه فعال است و با کادرِ نمادِ خالی، کاربر را به انتخابِ نماد
+     هدایت می‌کند (فوکوس + فهرستِ نمادها + اشاره‌ی ملایم + پیامِ روشن) و هنوز هیچ
+     درخواستی نمی‌فرستد. */
+  const rfReact = await page.evaluate(async () => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const b = document.getElementById("refreshBtn"), inp = document.getElementById("sym"),
+          res = document.getElementById("result"), chips = document.getElementById("chips");
+    const prevLast = window._last;               // بعد از تست برمی‌گردانیم
+    const before = res.innerHTML.trim();
+    window._last = null; inp.value = ""; inp.blur();
+    const out = { disabled: b.disabled, wasEmpty: before === "" };
+    b.click();
+    await wait(260);
+    out.focused = document.activeElement === inp;
+    out.panelOpen = chips.classList.contains("open");
+    out.nudged = inp.classList.contains("nudge");
+    out.hint = res.innerHTML.trim() !== before;
+    out.hintText = (res.textContent || "").slice(0, 70);
+    out.startedWork = /در حالِ تحلیل/.test(res.textContent || "");
+    out.busy = b.getAttribute("aria-busy") === "true";
+    out.live = (b.querySelector(".rf-live") || {}).textContent || "";
+    inp.classList.remove("nudge");
+    window._last = prevLast;
+    return out;
+  });
+  if (rfReact.disabled)
+    fail("دکمه‌ی بروزرسانی در بارگذاری غیرفعال است — کلیک روی آن هیچ واکنشی ندارد");
+  if (rfReact.startedWork || rfReact.busy)
+    fail("دکمه‌ی بروزرسانی با کادرِ خالی بی‌دلیل تحلیل را شروع کرد (باید اول راهنمایی کند)");
+  if (!rfReact.focused || !rfReact.panelOpen)
+    fail("دکمه‌ی بروزرسانی با کادرِ خالی، کاربر را به انتخابِ نماد نمی‌برد "
+      + `(فوکوس=${rfReact.focused} · فهرستِ نمادها=${rfReact.panelOpen})`);
+  if (rfReact.wasEmpty && !rfReact.hint)
+    fail("دکمه‌ی بروزرسانی با کادرِ خالی هیچ پیامی نشان نمی‌دهد (بی‌صدا می‌ماند)");
+  if (rfReact.hint && !/نماد/.test(rfReact.hintText))
+    fail("پیامِ راهنمای دکمه‌ی بروزرسانی درباره‌ی انتخابِ نماد نیست: " + rfReact.hintText);
+  if (!rfReact.live)
+    fail("دکمه‌ی بروزرسانی برای صفحه‌خوان‌ها پیامی نمی‌گذارد (ناحیه‌ی زنده خالی است)");
+  notes.push(`دکمه‌ی بروزرسانی: فعال از بارگذاری · راهنمای کادرِ خالی `
+    + `(فوکوس=${rfReact.focused} · پنل=${rfReact.panelOpen} · اشاره=${rfReact.nudged}) ✓`);
 
   /* ۶) کنترل‌های addEventListener-محور — با CDP (اگر در دسترس بود). */
   let cdp = null;
@@ -447,6 +487,9 @@ function loadPuppeteer() {
      دسته‌های تازه هم واقعاً سیم‌کشی شده‌اند، نه فقط پنل را پر کرده‌اند. */
   try {
     const chipText = "NAS100";
+    // اول نشانگر را از کادر بیرون ببر؛ وگرنه اگر نشانگر از قبل روی همان نقطه باشد،
+    // رویدادِ mouseenter دوباره رخ نمی‌دهد و تست به حالتِ پنلِ قبلی وابسته می‌شود.
+    await page.mouse.move(10, 10);
     await page.hover("#sym");
     await page.waitForSelector("#chips.open", { timeout: 5000 });
     await page.click(`#chips .chip[data-sym="${chipText}"]`);
