@@ -165,39 +165,66 @@ function loadPuppeteer() {
     const wait = (ms) => new Promise((r) => setTimeout(r, ms));
     const b = document.getElementById("refreshBtn"), inp = document.getElementById("sym"),
           res = document.getElementById("result"), chips = document.getElementById("chips");
-    const prevLast = window._last;               // بعد از تست برمی‌گردانیم
+    const prevLast = window._last, prevSeen = window._lastSeen; // بعد از تست برمی‌گردانیم
+    // حافظه‌ی سرور (آخرین تحلیلِ ثبت‌شده) نتیجه را تعیین می‌کند: اگر نمادی یادش باشد،
+    // دکمه باید *همان* را بازتازه کند؛ اگر نه، فقط پیام بدهد. پس اول خودمان می‌پرسیم.
+    let mem = null;
+    try {
+      const s = await fetch("/api/data_status", { cache: "no-store" });
+      mem = (((await s.json()) || {}).analyzed) || null;
+    } catch (e) { mem = null; }
     const before = res.innerHTML.trim();
-    window._last = null; inp.value = ""; inp.blur();
+    window._last = null; window._lastSeen = null; inp.value = ""; inp.blur();
+    chips.classList.remove("open");          // مستقل از وضعیتِ قبلیِ پنل بسنجیم
     const out = { disabled: b.disabled, wasEmpty: before === "" };
     b.click();
-    await wait(260);
-    out.focused = document.activeElement === inp;
-    out.panelOpen = chips.classList.contains("open");
-    out.nudged = inp.classList.contains("nudge");
+    // تمامِ بازهٔ بعد از کلیک را می‌پاییم (نه فقط یک لحظه): کاربر «باز شدنِ پنجره»
+    // را حتی اگر لحظه‌ای باشد می‌بیند و خرابی می‌داند.
+    out.focused = false; out.panelOpen = false; out.nudged = false;
+    for (let i = 0; i < 16; i++) {
+      if (document.activeElement === inp) out.focused = true;
+      if (chips.classList.contains("open")) out.panelOpen = true;
+      if (inp.classList.contains("nudge")) out.nudged = true;
+      await wait(50);
+    }
+    await wait(300);          // فرصتِ کافی برای یک رفت‌وبرگشتِ محلیِ /api/data_status
     out.hint = res.innerHTML.trim() !== before;
-    out.hintText = (res.textContent || "").slice(0, 70);
+    out.hintText = (res.textContent || "").slice(0, 200);   // کوتاه نکن که وسطِ کلمه بُرده شود
     out.startedWork = /در حالِ تحلیل/.test(res.textContent || "");
     out.busy = b.getAttribute("aria-busy") === "true";
     out.live = (b.querySelector(".rf-live") || {}).textContent || "";
+    out.serverMemory = (mem && mem.symbol) ? mem.symbol : null;
     inp.classList.remove("nudge");
-    window._last = prevLast;
+    window._last = prevLast; window._lastSeen = prevSeen;
     return out;
   });
   if (rfReact.disabled)
     fail("دکمه‌ی بروزرسانی در بارگذاری غیرفعال است — کلیک روی آن هیچ واکنشی ندارد");
-  if (rfReact.startedWork || rfReact.busy)
-    fail("دکمه‌ی بروزرسانی با کادرِ خالی بی‌دلیل تحلیل را شروع کرد (باید اول راهنمایی کند)");
-  if (!rfReact.focused || !rfReact.panelOpen)
-    fail("دکمه‌ی بروزرسانی با کادرِ خالی، کاربر را به انتخابِ نماد نمی‌برد "
-      + `(فوکوس=${rfReact.focused} · فهرستِ نمادها=${rfReact.panelOpen})`);
-  if (rfReact.wasEmpty && !rfReact.hint)
-    fail("دکمه‌ی بروزرسانی با کادرِ خالی هیچ پیامی نشان نمی‌دهد (بی‌صدا می‌ماند)");
-  if (rfReact.hint && !/نماد/.test(rfReact.hintText))
-    fail("پیامِ راهنمای دکمه‌ی بروزرسانی درباره‌ی انتخابِ نماد نیست: " + rfReact.hintText);
+  if (!rfReact.serverMemory && (rfReact.startedWork || rfReact.busy))
+    fail("دکمه‌ی بروزرسانی بی‌نماد و بی‌حافظه‌ی سرور، بی‌دلیل تحلیل را شروع کرد");
+  if (rfReact.serverMemory && !rfReact.startedWork && !rfReact.busy)
+    fail(`حافظه‌ی سرور «${rfReact.serverMemory}» را داشت ولی دکمه‌ی بروزرسانی کاری نکرد`);
+  // اثرِ جانبیِ ممنوع: نمی‌شود پنجره/فوکوس را قاپید. یک‌بار همین کار خودِ تجربه‌ی
+  // کاربر را خراب کرد («کلیک روی بروزرسانی پنجره‌ی نمادها را باز می‌کند») — الان
+  // قرارداد این است که دکمه *فقط پیام بدهد* و هیچ پنجره‌ای باز نکند.
+  if (rfReact.panelOpen)
+    fail("کلیکِ دکمه‌ی بروزرسانی پنجره‌ی نمادها را باز می‌کند — اثرِ جانبیِ ناخواسته");
+  if (rfReact.focused)
+    fail("کلیکِ دکمه‌ی بروزرسانی فوکوس را از کاربر می‌قاپد و به کادرِ نماد می‌برد");
+  if (rfReact.nudged)
+    fail("کلیکِ دکمه‌ی بروزرسانی کادرِ نماد را چشمک می‌زند (باید فقط پیام بدهد)");
+  if (!rfReact.serverMemory) {
+    if (rfReact.wasEmpty && !rfReact.hint)
+      fail("دکمه‌ی بروزرسانی بی‌نماد و بی‌حافظه هیچ پیامی نشان نمی‌دهد (بی‌صدا می‌ماند)");
+    if (rfReact.hint && !/نماد/.test(rfReact.hintText))
+      fail("پیامِ راهنمای دکمه‌ی بروزرسانی درباره‌ی انتخابِ نماد نیست: " + rfReact.hintText);
+  }
   if (!rfReact.live)
     fail("دکمه‌ی بروزرسانی برای صفحه‌خوان‌ها پیامی نمی‌گذارد (ناحیه‌ی زنده خالی است)");
-  notes.push(`دکمه‌ی بروزرسانی: فعال از بارگذاری · راهنمای کادرِ خالی `
-    + `(فوکوس=${rfReact.focused} · پنل=${rfReact.panelOpen} · اشاره=${rfReact.nudged}) ✓`);
+  notes.push("دکمه‌ی بروزرسانی: فعال از بارگذاری · بدونِ باز کردنِ پنجره/قاپیدنِ فوکوس"
+    + (rfReact.serverMemory
+        ? ` · کادرِ خالی → بازتازه‌سازیِ حافظه‌ی سرور (${rfReact.serverMemory}) ✓`
+        : " · کادرِ خالی → پیامِ روشن ✓"));
 
   /* ۶) کنترل‌های addEventListener-محور — با CDP (اگر در دسترس بود). */
   let cdp = null;
@@ -377,6 +404,15 @@ function loadPuppeteer() {
        روشن‌بودنِ دکمه در حینِ کار (نه محوِ disabled) و اندازه‌ی ثابت.
        عمداً بعد از هر تغییرِ کلاس کمی صبر می‌کنیم تا از پلِ ترنزیشن رد شویم؛ وگرنه
        getComputedStyle مقدارِ *قبل از تغییر* را برمی‌گرداند و تست بی‌دلیل رد می‌شود. */
+    // اگر تحلیلِ در جریان یا تیکِ موقتِ پایانِ مرحله‌ی قبل باقی مانده باشد، خواندنِ
+    // حالت‌ها را خراب می‌کند (دکمه واقعاً در حالتِ کار یا تأیید است) — پس تا
+    // رسیدن به حالتِ تمیز و پایدارِ بی‌کار صبر می‌کنیم.
+    try {
+      await page.waitForFunction(
+        () => { const b = document.getElementById("refreshBtn");
+                return b && !b.classList.contains("loading") && !b.classList.contains("ok"); },
+        { timeout: 120000 });
+    } catch (e) { /* اگر تمام نشد، سنجش‌ها می‌گویند */ }
     const rf = await page.evaluate(async () => {
       const wait = (ms) => new Promise((r) => setTimeout(r, ms));
       const b = document.getElementById("refreshBtn");
@@ -384,6 +420,7 @@ function loadPuppeteer() {
       const spin = b.querySelector(".rf-spin"), ico = b.querySelector(".rf-ico"),
             arc = b.querySelector(".rf-arc"), chk = b.querySelector(".rf-check");
       if (!spin || !ico || !arc || !chk) return { missing: "اسلاتِ نشانگر/گلیف/تیک" };
+      await wait(420);   // از پلِ ترنزیشنِ حالتِ قبلی (ok → عادی) رد شویم
       const was = b.disabled;
       const idle = { spin: +getComputedStyle(spin).opacity, ico: +getComputedStyle(ico).opacity,
                      width: Math.round(b.getBoundingClientRect().width),
