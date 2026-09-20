@@ -35,13 +35,13 @@ const REQUIRED = ["go", "bt", "sym", "syms", "styles", "chips", "refreshBtn",
   "archiveBtn", "fundBtn", "sbBtn", "setupsBtn", "result", "btPanel",
   "setupsPanel", "alarmsDock", "tvBox", "shotGrid", "lightbox", "revChip",
   "dataChip", "riskPanel", "rkBalance", "rkRisk", "rkDaily", "rkOpen",
-  "rkStat", "rkSave"];
+  "rkStat", "rkSave", "installBtn"];
+const HANDLER_IDS = new Set(["rkSave", "installBtn"]);   // وایر داخلِ IIFE — با CDP سنجیده می‌شود
 /* کنترل‌هایی که اپ با `.onclick =` به آن‌ها هندلر می‌دهد؛ اگر این‌ها تابع نباشند
    یعنی بلوکِ اسکریپت اجرا نشده یا نیمه‌کاره مرده است. */
 const WIRED = ["go", "refreshBtn", "bt", "setupsBtn", "fundBtn", "archiveBtn",
   "rkSave"];
-/* این‌ها با addEventListener وصل می‌شوند (نه onclick) — با CDP سنجیده می‌شوند. */
-const LISTENER_ONLY = ["sbBtn", "styles"];
+const LISTENER_ONLY = ["sbBtn", "styles", "installBtn"];
 
 const problems = [];
 const notes = [];

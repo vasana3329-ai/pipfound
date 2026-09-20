@@ -12,7 +12,7 @@
 
 هستهٔ تحلیل همان confluence.py + smc_engine.py + macro_context.py است.
 """
-import sys, os, json, argparse, traceback, threading, time, datetime
+import sys, os, json, argparse, traceback, threading, time, datetime, re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -1309,6 +1309,27 @@ tr.on td{background:rgba(34,197,94,.05)}
   font-weight:700;font-size:14px;padding:12px 16px;border-radius:11px;cursor:pointer;
   font-family:inherit;transition:.15s;white-space:nowrap}
 .rf-btn:hover,.ab-btn:hover{border-color:var(--accent);color:var(--accent)}
+/* حالتِ «آمادهٔ نصبِ مستقیم»: دو تپشِ نرم روی حاشیه — همان زبانِ آرامِ بقیهٔ حالت‌ها */
+@keyframes instpulse{0%,100%{box-shadow:0 0 0 0 rgba(77,163,255,0)}45%{box-shadow:0 0 0 6px rgba(77,163,255,.22)}}
+.ab-btn.pulsing{border-color:var(--accent);color:var(--accent);animation:instpulse 1.6s ease-in-out 3}
+/* پنلِ نصب (داخلِ مودالِ عمومی) */
+.inst-h{font-size:13px;font-weight:800;color:var(--accent);margin:16px 0 8px}
+.inst-h:first-child{margin-top:0}
+.inst-url{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 14px;
+  font-size:14px;font-weight:700;color:var(--txt);direction:ltr;text-align:left;
+  user-select:all;overflow-x:auto;white-space:nowrap}
+.inst-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.inst-cp{background:linear-gradient(135deg,var(--accent),var(--accent2));border:0;color:#04121f;
+  font-weight:800;font-size:13px;padding:9px 16px;border-radius:10px;cursor:pointer;font-family:inherit}
+.inst-note{color:var(--muted);font-size:12px;line-height:1.7;flex:1;min-width:200px}
+.inst-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media(max-width:560px){.inst-grid{grid-template-columns:1fr}}
+.inst-card{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.inst-card .t{font-weight:800;font-size:13px;margin-bottom:8px}
+.inst-card ol{margin:0;padding-inline-start:18px;color:var(--muted);font-size:12.5px;line-height:2}
+.inst-status{margin-top:14px;font-size:12.5px;color:var(--good);font-weight:700}
+.inst-warn{margin-top:10px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);
+  border-radius:10px;padding:10px 12px;font-size:12px;line-height:1.8;color:#f6d99a}
 .rf-btn:disabled,.ab-btn:disabled{opacity:.5;cursor:default}
 /* ── دکمه‌ی بروزرسانی: حالتِ «در حالِ انجام» به‌جای گلیفِ چرخانِ متنی ──
    همه‌ی سه حالت (گلیفِ آماده / نشانگرِ چرخان / تیکِ تأیید) در یک اسلاتِ ثابتِ ۱۸px
@@ -1511,6 +1532,7 @@ tr.on td{background:rgba(34,197,94,.05)}
         <span class="rf-live" role="status" aria-live="polite"></span>
       </button>
       <button id="archiveBtn" class="ab-btn" title="اخبارِ اقتصادیِ پرتأثیرِ ۶ ساعتِ گذشته — هر خبر با ارز، ساعتِ اعلام و جهتِ موردانتظارش روی جفت‌ارزها و طلا/نقره؛ در همین صفحه به‌شکلِ پنجره باز می‌شود.">📁 آرشیو اقتصادی</button>
+      <button id="installBtn" class="ab-btn" title="همین اپ را به‌شکلِ آیکونِ مستقل روی گوشی/تبلت/کامپیوتر نصب کن — آدرسِ قابل‌اشتراک و راهنمای هر دستگاه.">📲 نصب روی دستگاه</button>
     </div>
     <div id="setupsPanel" class="setups-panel">
       <div class="sp-head">📚 سه ستاپِ پیشنهادی <span class="jmsg" id="spState">— اول یک تحلیل بگیر تا چراغ‌ها روشن شوند</span></div>
@@ -2256,6 +2278,87 @@ renderSetups(null);
 const fundBtn=document.getElementById("fundBtn");
 if(fundBtn){ fundBtn.onclick=()=>window.open("/fundamental","_blank","noopener"); }
 
+// دکمه‌ی 📲 نصب روی دستگاه — آدرسِ قابل‌اشتراک + راهنمای هر پلتفرم + رویدادِ نصب
+(function(){
+  const ib=document.getElementById("installBtn");
+  if(!ib) return;
+  let deferredPrompt=null, installed=false;
+  window.addEventListener("beforeinstallprompt", (e)=>{
+    e.preventDefault(); deferredPrompt=e;
+    if(installed) return;
+    ib.classList.add("pulsing");
+    ib.title="✅ مرورگرِ این دستگاه نصبِ مستقیم را پیشنهاد می‌دهد — کلیک کن و «نصب» را بزن.";
+  });
+  window.addEventListener("appinstalled", ()=>{
+    installed=true; deferredPrompt=null; ib.classList.remove("pulsing");
+  });
+  ib.onclick=async ()=>{
+    if(deferredPrompt && !installed){
+      try{
+        deferredPrompt.prompt();
+        const res=await deferredPrompt.userChoice;
+        if(res && res.outcome==="accepted"){ installed=true; ib.classList.remove("pulsing"); return; }
+        // رد کرد → پنجرهٔ راهنما را نشان بده (کاربر شاید توضیح می‌خواهد)
+      }catch(e){}
+    }
+    let base="";
+    try{
+      const r=await fetch("/api/install",{cache:"no-store"});
+      const j=await r.json();
+      if(j && j.lan && j.lan.url) base=j.lan.url;
+    }catch(e){}
+    const own=base || location.origin;
+    const open=own.replace(/\/$/, "") + "/";
+    const sw=("serviceWorker" in navigator);
+    const swTxt=sw ? "✅ سرویس‌ورکر ثبت شده — آفلاین هم باز می‌شود" : "⚠ سرویس‌ورکر در این مرورگر نیست — نصبِ PWA ممکن نیست";
+    openModal("📲 نصبِ pipfound روی دستگاه", `
+      <div class="inst-h">آدرسِ این اپ</div>
+      <div class="inst-url" id="instUrl">${open}</div>
+      <div class="inst-row">
+        <button class="inst-cp" id="instCopy">📋 کپیِ آدرس</button>
+        <span class="inst-note">این آدرس را در مرورگرِ هر دستگاهی که به همین شبکه است باز کن — روی گوشی از طریقِ Wi-Fiِ خانه.</span>
+      </div>
+      <div class="inst-h">راهنمای هر دستگاه</div>
+      <div class="inst-grid">
+        <div class="inst-card"><div class="t">🤖 اندروید (کروم)</div><ol><li>آدرس را باز کن</li><li>منوی ⋮ → «Add to Home screen / نصب برنامه»</li><li>«Install / نصب» را بزن</li></ol></div>
+        <div class="inst-card"><div class="t">🍎 آیفون/آیپد (سافاری)</div><ol><li>آدرس را در سافاری باز کن</li><li>دکمهٔ اشتراک ⬆ → «Add to Home Screen»</li><li>«Add» را بزن</li></ol></div>
+        <div class="inst-card"><div class="t">💻 ویندوز (کروم/اج)</div><ol><li>آدرس را باز کن</li><li>آیکونِ ⊕ در نوارِ آدرس (یا منوی ⋯ → Apps)</li><li>«Install» را بزن</li></ol></div>
+        <div class="inst-card"><div class="t">💻 مک (کروم/اج)</div><ol><li>آدرس را باز کن</li><li>آیکونِ ⊕ در نوارِ آدرس</li><li>«Install» — اپ جدا از مرورگر باز می‌شود</li></ol></div>
+      </div>
+      <div class="inst-status">${swTxt}${(deferredPrompt||installed)?" · وضعیتِ نصبِ این مرورگر: "+(installed?"نصب شده":"آمادهٔ نصبِ مستقیم"):""}</div>
+      <div class="inst-warn">نکتهٔ سافاریِ آیفون: اگر این سرور با HTTPSِ خودگواهی‌شده باز شده، اول یک بار هشدارِ گواهی را بپذیر و صفحه را کامل باز کن — بعد «Add to Home Screen» کار می‌کند.</div>
+    `);
+    const cp=document.getElementById("instCopy");
+    if(cp){ cp.onclick=async ()=>{
+      try{ await navigator.clipboard.writeText(open); cp.textContent="✅ کپی شد"; }
+      catch(e){
+        // فالبک بدونِ HTTPS: انتخابِ متن برای کپیِ دستی
+        const u=document.getElementById("instUrl");
+        if(u){ const rg=document.createRange(); rg.selectNodeContents(u);
+               const s=getSelection(); s.removeAllRanges(); s.addRange(rg); }
+        cp.textContent="متن انتخاب شد — ⌘C بزن";
+      }
+      setTimeout(()=>{ cp.textContent="📋 کپیِ آدرس"; }, 1800);
+    }; }
+  };
+})();
+
+// بنرِ «نسخهٔ تازهٔ اپ آماده است» — وقتی سرویس‌ورکرِ جدید فعال می‌شود
+if("serviceWorker" in navigator){
+  navigator.serviceWorker.addEventListener("controllerchange", ()=>{
+    // فقط اگر صفحه از قبل کامل بار شده (نصبِ اول نیست)
+    if(!window.__pfReady) return;
+    const old=document.getElementById("pfSwBanner"); if(old) return;
+    const b=document.createElement("div"); b.id="pfSwBanner";
+    b.setAttribute("style","position:fixed;bottom:14px;inset-inline-start:14px;z-index:2147483646;"+
+      "background:linear-gradient(135deg,#0ea5e9,#6366f1);color:#04121f;padding:10px 16px;border-radius:12px;"+
+      "font:700 13px/1.6 inherit,system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);cursor:pointer;display:flex;gap:10px;align-items:center");
+    b.innerHTML="🔄 نسخهٔ تازهٔ اپ آماده است — برای فعال‌شدن، رفرش کن";
+    b.onclick=()=>location.reload();
+    document.body.appendChild(b);
+  });
+}
+
 // پنجره‌ی عمومی (مودال) — بدونِ وابستگیِ بیرونی
 function openModal(title, html){
   const old=document.getElementById("pipModal");
@@ -2530,6 +2633,7 @@ async function loadRev(){
 }
 loadRev();
 setInterval(loadRev, 30000);
+window.__pfReady = true;   // بعد از این، controllerchange یعنی «به‌روزرسانی»، نه نصبِ اول
 
 // چیپِ «سنِ داده / باز-بستهٔ بازار» — مستقل از چیپِ کد و بدونِ هزینه‌ی شبکه‌ی سنگین:
 // اندپوینت فقط وضعیتِ آخرین تحلیل را می‌خواند و سنِ داده را همین‌حالا بازمحاسبه می‌کند.
@@ -2897,6 +3001,103 @@ def _req_leave():
             _REQ_IDLE.set()
 
 
+# ── نصب روی دستگاه (PWA روی LAN) ─────────────────────────────────
+# host=0.0.0.0 یعنی «باز برای شبکه»؛ در آن حالت بدونِ گیتِ توکن، هر دستگاهی
+# داخلِ شبکه هم می‌تواند ببیند و هم در ژورنال بنویسد. --lan خودش یک توکنِ
+# تصادفی می‌سازد و HTTPSِ خودگواهی‌شده می‌آورد (نصبِ PWA روی سافاری فقط روی
+# https کار می‌کند) و یک پورتِ HTTPِ محلی برای «راه‌اندازیِ اولیه» باز می‌کند.
+_ACCESS_TOKEN = ""      # خالی = بدونِ گیت (فقط host 127.0.0.1)
+_ACCESS_COOKIE = "pf_tok"
+_TLS_CERT = None        # مسیرِ گواهیِ موقت در حالتِ --lan
+_TLS_KEY = None
+_TLS_PORT = None        # پورتِ HTTPS واقعی (وقتی بوت‌استرپِ HTTP فعال است)
+lan_open = False        # host=0.0.0.0 بدونِ TLS (فقط برای گزارشِ /api/install)
+CURRENT_PORT = 8787     # در main() ست می‌شود؛ برای گزارشِ /api/install
+
+
+def _install_info():
+    """اطلاعاتِ اتصال برای پنلِ نصب: آدرسِ LAN و آدرس‌های هر اینترفیس."""
+    import socket
+    addrs = []
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip not in addrs and not ip.startswith("127."):
+                addrs.append(ip)
+    except Exception:
+        pass
+    lan_port = _TLS_PORT or CURRENT_PORT
+    scheme = "https" if _TLS_PORT else "http"
+    lan_url = f"{scheme}://<ip-of-this-mac>:{lan_port}" if not addrs else \
+              f"{scheme}://{addrs[0]}:{lan_port}"
+    return {
+        "ok": True,
+        "lan": {"enabled": bool(_TLS_PORT or _ACCESS_TOKEN or lan_open),
+                "url": lan_url, "port": lan_port, "scheme": scheme,
+                "https": bool(_TLS_PORT), "token_required": bool(_ACCESS_TOKEN),
+                "addresses": addrs},
+        "local": f"http://127.0.0.1:{CURRENT_PORT}",
+    }
+
+
+def _make_self_signed_cert():
+    """گواهیِ خودگواهی‌شده با opensslِ سیستم (stdlib گواهی نمی‌سازد).
+    مسیرِ فایل‌ها در ~/pipfound/tls تا بینِ ری‌استارت‌ها ثابت بماند."""
+    import subprocess
+    d = os.path.join(HOME, "pipfound", "tls")
+    os.makedirs(d, exist_ok=True)
+    cert, key = os.path.join(d, "cert.pem"), os.path.join(d, "key.pem")
+    if not (os.path.isfile(cert) and os.path.isfile(key)):
+        subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+             "-keyout", key, "-out", cert, "-days", "825",
+             "-subj", "/CN=pipfound-local",
+             "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"],
+            check=True, capture_output=True, timeout=60)
+    return cert, key
+
+
+def _check_auth(self, qs):
+    """گیتِ توکن: کوکیِ معتبر یا ?token= یا هدرِ Authorization.
+    مسیرهای آزاد: ورود (?token=) و سلامتِ سرور."""
+    if not _ACCESS_TOKEN:
+        return True
+    cookies = (self.headers.get("Cookie") or "")
+    m = re.search(rf"{ _ACCESS_COOKIE }=([A-Za-z0-9_\-]+)", cookies)
+    if m and m.group(1) == _ACCESS_TOKEN:
+        return True
+    if (qs.get("token", [""])[0]) == _ACCESS_TOKEN:
+        return True
+    auth = self.headers.get("Authorization") or ""
+    if auth.startswith("Bearer ") and auth[7:] == _ACCESS_TOKEN:
+        return True
+    return False
+
+
+def _auth_page(self):
+    """صفحهٔ ورودِ توکن — بعد از ورود، کوکیِ یک‌ساله ست می‌شود."""
+    html = ("<!doctype html><html lang=\"fa\" dir=\"rtl\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            "<title>pipfound — ورود</title>"
+            "<style>body{margin:0;background:#0b0f17;color:#e8eefc;min-height:100vh;"
+            "display:grid;place-items:center;font-family:-apple-system,Vazirmatn,Tahoma,sans-serif}"
+            ".c{background:#141a26;border:1px solid #28324a;border-radius:16px;padding:28px;"
+            "max-width:360px;width:calc(100% - 40px);text-align:center}"
+            "h1{font-size:19px;margin:0 0 6px}p{color:#8a97b3;font-size:13px;margin:0 0 18px}"
+            "input{width:100%;padding:12px;border-radius:10px;border:1px solid #28324a;"
+            "background:#1b2333;color:#e8eefc;font-size:15px;direction:ltr;text-align:center}"
+            "button{margin-top:12px;width:100%;padding:12px;border:0;border-radius:10px;"
+            "background:linear-gradient(135deg,#0ea5e9,#6366f1);color:#04121f;font-weight:800;"
+            "font-size:14px;cursor:pointer}.err{color:#fca5a5;font-size:13px;margin-top:10px}</style></head>"
+            "<body><div class=\"c\"><h1>🔐 ورود به pipfound</h1>"
+            "<p>این سرور روی شبکهٔ خانه باز است؛ توکنِ دسترسی که هنگامِ بالا آمدن در ترمینال چاپ شده را وارد کن.</p>"
+            "<form method=\"GET\" action=\"/\"><input name=\"token\" placeholder=\"توکنِ دسترسی\" autofocus>"
+            "<button>ورود</button></form>"
+            "<div class=\"err\">" + ("توکن درست نیست — دوباره تلاش کن" if "token" in (self.path or "") else "") + "</div>"
+            "</div></body></html>")
+    return self._send(200, html, "text/html; charset=utf-8")
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass  # سکوت
@@ -2922,6 +3123,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         u = urlparse(self.path)
+        qs = parse_qs(u.query)
+        # گیتِ توکن فقط وقتی فعال است که سرور روی شبکه باز باشد (--lan / --token)
+        # فقط /api/health و /api/install آزادند (وضعیتِ اتصال برای پنلِ نصب لازم است)
+        if _ACCESS_TOKEN and u.path not in ("/api/health", "/api/install"):
+            if (qs.get("token", [""])[0]) == _ACCESS_TOKEN and u.path == "/":
+                # ورود موفق → کوکی بده و بدونِ token در URL برو (توکن در هیستوری نمی‌ماند)
+                self.send_response(302)
+                self.send_header("Location", "/")
+                self.send_header("Set-Cookie",
+                                 f"{_ACCESS_COOKIE}={_ACCESS_TOKEN}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if not _check_auth(self, qs):
+                return _auth_page(self)
         if u.path in ("/", "/index.html"):
             tvmap = {
                 "BTCUSDT": "BINANCE:BTCUSDT", "ETHUSDT": "BINANCE:ETHUSDT",
@@ -2960,6 +3176,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
         if u.path == "/api/health":
             return self._send(200, json.dumps({"ok": True}))
+        # اطلاعاتِ نصب روی دستگاه: آدرسِ LAN و وضعیتِ HTTPS/توکن — ارزان و محلی
+        if u.path == "/api/install":
+            return self._send(200, json.dumps(_install_info(), ensure_ascii=False))
         # وضعیتِ داده: ساعتِ سرور/نیویورک، کیل‌زونِ فعلی، و سنِ آخرین تحلیل.
         # عمداً فقط محاسبه‌ی محلی (بدونِ شبکه) تا این اندپوینت هر ۳۰ ثانیه ارزان باشد.
         if u.path == "/api/data_status":
@@ -3193,6 +3412,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         u = urlparse(self.path)
+        qs = parse_qs(u.query)
+        if _ACCESS_TOKEN and not _check_auth(self, qs):
+            return self._send(401, json.dumps({"error": "دسترسی لازم است"}, ensure_ascii=False))
         if u.path == "/api/alarm":
             aid = (parse_qs(u.query).get("id", [""])[0])
             with _alarms_lock:
@@ -3261,6 +3483,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urlparse(self.path)
+        qs = parse_qs(u.query)
+        if _ACCESS_TOKEN and u.path != "/api/health" and not _check_auth(self, qs):
+            return self._send(401, json.dumps({"error": "برای نوشتن باید وارد شوی: صفحه را با توکن باز کن"},
+                                              ensure_ascii=False))
         # ذخیره‌ی تنظیماتِ ریسک (سرمایه/درصد/سقف‌ها) — تا در دفترِ ریسک بماند و
         # بعد از هر ری‌استارتِ خودکارِ اپ دوباره از دست نرود.
         if u.path == "/api/risk":
@@ -3382,6 +3608,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    global _ACCESS_TOKEN, _TLS_CERT, _TLS_KEY, _TLS_PORT, lan_open, CURRENT_PORT
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=int(os.environ.get("PIPFOUND_PORT", "8787")))
     ap.add_argument("--host", default=os.environ.get("PIPFOUND_HOST", "127.0.0.1"),
@@ -3398,6 +3625,9 @@ def main():
         if not a.token:
             import secrets
             a.token = secrets.token_urlsafe(12)
+    _ACCESS_TOKEN = a.token
+    CURRENT_PORT = a.port
+    lan_open = (a.host == "0.0.0.0")
     if a.no_autorestart:
         _REV_WATCH["enabled"] = False
     # بدونِ -u خروجیِ ریدایرکتشده به فایل بافر می‌شود و لاگ‌ها (از جمله خطِ
@@ -3437,9 +3667,40 @@ def main():
         print("   ♻️ ری‌استارتِ خودکارِ کهنه: خاموش")
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     url = f"http://{a.host}:{a.port}"
+    # حالتِ LAN: HTTPSِ خودگواهی‌شده برای نصبِ PWA (سافاریِ iOS فقط روی https نصب می‌کند)
+    if a.lan:
+        try:
+            import ssl as _ssl
+            _TLS_CERT, _TLS_KEY = _make_self_signed_cert()
+            _TLS_PORT = a.port
+            ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(_TLS_CERT, _TLS_KEY)
+            srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+            url = f"https://{a.host}:{a.port}  (گواهیِ خودگواهی‌شده — اولین باز، هشدارِ مرورگر را بپذیر)"
+            # بوت‌استرپ: یک پورتِ HTTPِ محلی برای «راه‌اندازیِ اولیه» — توکن را بدونِ
+            # قبولِ گواهی می‌شود وارد کرد، بعد بقیه از HTTPS می‌رود.
+            try:
+                bs = ThreadingHTTPServer(("127.0.0.1", a.port + 1), Handler)
+                threading.Thread(target=bs.serve_forever, daemon=True).start()
+                print(f"   🚪 ورودِ آسان: http://127.0.0.1:{a.port + 1}  (فقط همین دستگاه — بعد از ورود، آدرسِ https را به دستگاه‌های دیگر بده)")
+            except OSError:
+                pass
+        except FileNotFoundError:
+            print("⚠️ openssl پیدا نشد — بدونِ HTTPS ادامه می‌دهم (نصب روی سافاریِ iOS کار نمی‌کند)")
+            _TLS_PORT = None
+        except Exception as e:
+            print(f"⚠️ HTTPS برپا نشد ({e}) — بدونِ TLS ادامه می‌دهم")
+            _TLS_PORT = None
     start_alarm_worker()
     start_fund_alarm_worker()
     print(f"✅ pipfound روی {url} بالا آمد.")
+    if a.lan:
+        info = _install_info()
+        print("   📲 نصب روی دستگاه‌های دیگر (همان Wi-Fi):")
+        for ip in (info["lan"]["addresses"] or ["<ip-of-this-mac>"]):
+            print(f"        {info['lan']['scheme']}://{ip}:{_TLS_PORT or a.port}")
+        print(f"   🔑 توکنِ دسترسی: {a.token}")
+        print("      (در هر دستگاه یک بار با ?token=… باز کن؛ بعد از آن کوکی به یاد می‌سپارد)")
     print("   نمادها: XAUUSD, XAGUSD, EURUSD, BTCUSDT, ... — Ctrl+C برای توقف.")
     print("   🔔 موتورِ آلارم فعال شد (بررسیِ هر ۹۰ ثانیه).")
     print("   📰 آلارمِ فاندمنتال فعال شد (هشدارِ ~۲۴ ساعت پیش از هر خبرِ پرتأثیر).")
