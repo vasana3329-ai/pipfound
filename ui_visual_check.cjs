@@ -222,11 +222,18 @@ function loadPuppeteer() {
       return { j, text: el ? el.textContent.trim() : null };
     });
     if (!ds.j || ds.j.ok !== true) fail("اندپوینتِ /api/data_status جوابِ سالم نداد: " + JSON.stringify(ds.j));
-    if (!ds.text || ds.text === "داده …" || ds.text === "⚪ داده؟")
-      fail("چیپِ داده با اندپوینت پر نشد (متن: " + JSON.stringify(ds.text) + ")");
     if (!ds.j.killzone) fail("وضعیتِ کیل‌زون در /api/data_status نیست");
     if (ds.j.fresh && ds.j.fresh.forming)
       fail("سنِ داده روی یک کندلِ **در حالِ تشکیل** حساب شده — تحلیل باید فقط کندلِ بسته را ببیند");
+    if (ds.j.analyzed) {
+      // ماشینی که قبلاً تحلیل ثبت کرده: چیپ باید با اندپوینت پر شده باشد
+      if (!ds.text || ds.text === "داده …" || ds.text === "⚪ داده؟")
+        fail("چیپِ داده با اندپوینت پر نشد (متن: " + JSON.stringify(ds.text) + ")");
+    } else {
+      // رانرِ تازه: هنوز هیچ تحلیلی ثبت نشده، پس «⚪ داده؟» وضعیتِ **درست** است،
+      // نه خرابیِ چیپ. چکِ واقعیِ پر شدن چیپ بعد از تحلیل، پایین‌تر (بعد از ۶.۶) می‌آید.
+      notes.push("هنوز تحلیلی ثبت نشده — چیپ درست است که «⚪ داده؟» بماند");
+    }
     notes.push(`وضعیتِ داده: ${ds.text} · کیل‌زون: ${ds.j.killzone}`);
   } catch (e) {
     fail("بررسیِ چیپِ سنِ داده ممکن نشد: " + e.message);
@@ -254,6 +261,20 @@ function loadPuppeteer() {
         notes.push(`تحلیلِ کریپتو: درجه ${an.grade} · وضعیتِ داده ${an.data.state} (${an.data.age_human}) · کندلِ آخر ${an.data.last_bar_utc} UTC`);
       }
     }
+    // بلافاصله بعد از یک تحلیل، چیپِ داده باید پر شود (نه متنِ جانشین) — این
+    // همان چیزی است که روی رانرِ تازه قابلِ سنجیدن است.
+    const chipAfter = await page.evaluate(async () => {
+      if (typeof loadData === "function") { try { await loadData(); } catch (e) {} }
+      const el = document.getElementById("dataChip");
+      const r = await fetch("/api/data_status", { cache: "no-store" });
+      const j = await r.json();
+      return { text: el ? el.textContent.trim() : null, analyzed: !!j.analyzed };
+    });
+    if (!chipAfter.analyzed)
+      fail("بعد از یک تحلیل، /api/data_status وضعیتِ تحلیل را نگه نداشت (data_seen خالی ماند)");
+    else if (!chipAfter.text || chipAfter.text === "داده …" || chipAfter.text === "⚪ داده؟")
+      fail("بعد از یک تحلیل، چیپِ داده همچنان خالی است (متن: " + JSON.stringify(chipAfter.text) + ")");
+    else notes.push("چیپِ داده بعد از تحلیل پر شد: " + chipAfter.text);
   } catch (e) {
     fail("تحلیلِ کنترلیِ کریپتو ممکن نشد: " + e.message);
   }
