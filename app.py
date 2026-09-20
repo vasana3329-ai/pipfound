@@ -1219,8 +1219,16 @@ h1{font-size:22px;margin:0;font-weight:700;letter-spacing:.2px;
 #result{margin-top:22px}
 .hidden{display:none}
 .status{color:var(--muted);text-align:center;padding:26px 0;font-size:15px}
-.spin{display:inline-block;width:18px;height:18px;border:3px solid var(--line);border-top-color:var(--accent);
-  border-radius:50%;animation:sp .7s linear infinite;vertical-align:-4px;margin-left:8px}
+/* نشانگرِ «در حالِ کار» در متنِ وضعیت: حلقه‌ی گرادیانی با دُمِ محو (نه کمانِ بریده‌ی
+   border-top) و چرخشِ نرم — همان زبانِ بصریِ دکمه‌ی بروزرسانی. */
+.spin{display:inline-block;width:15px;height:15px;border-radius:50%;vertical-align:-3px;
+  margin-inline-start:8px;
+  background-image:conic-gradient(from 0turn,rgba(77,163,255,0),rgba(77,163,255,.3) .42turn,
+    var(--accent) .92turn,rgba(77,163,255,.9) 1turn),
+    linear-gradient(rgba(77,163,255,.16),rgba(77,163,255,.16));
+  -webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 2px));
+  mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 2px));
+  animation:sp .95s linear infinite}
 @keyframes sp{to{transform:rotate(360deg)}}
 .err{color:var(--bad);text-align:center;padding:20px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);border-radius:12px}
 .warn{color:#eab308;padding:10px 14px;background:rgba(234,179,8,.08);border:1px solid rgba(234,179,8,.35);border-radius:10px;font-size:13px;line-height:1.7}
@@ -1302,10 +1310,63 @@ tr.on td{background:rgba(34,197,94,.05)}
   font-family:inherit;transition:.15s;white-space:nowrap}
 .rf-btn:hover,.ab-btn:hover{border-color:var(--accent);color:var(--accent)}
 .rf-btn:disabled,.ab-btn:disabled{opacity:.5;cursor:default}
-.rf-btn .rf-ico{display:inline-block}
-.rf-btn.spin .rf-ico{animation:rfspin .9s linear infinite}
-.rf-btn.ok{border-color:var(--good);color:var(--good)}
-@keyframes rfspin{to{transform:rotate(360deg)}}
+/* ── دکمه‌ی بروزرسانی: حالتِ «در حالِ انجام» به‌جای گلیفِ چرخانِ متنی ──
+   همه‌ی سه حالت (گلیفِ آماده / نشانگرِ چرخان / تیکِ تأیید) در یک اسلاتِ ثابتِ ۱۸px
+   روی هم می‌نشینند تا نه اندازه‌ی دکمه بتپد و نه متن جابه‌جا شود. */
+/* ── دکمهی بروزرسانی: حالتِ «در حالِ انجام» ──
+   همهی سه حالت (گلیفِ آماده / نشانگرِ چرخان / تیکِ تأیید) در یک اسلاتِ ثابتِ ۱۶px روی
+   هم مینشینند تا نه اندازهی دکمه بتپد و نه متن جابهجا شود.
+   اصلِ طراحی: حرکتِ کم و دقیق. حلقه با سرعتِ *ثابت* میچرخد و فقط دُمش نفس میکشد
+   (چرخش با easing در هر دور تند-و-کند میشود و حسِ آماتوری میدهد).
+   حالتِ کار با «وضعیتِ» خودِ دکمه دیده میشود (پسزمینه، حاشیه، هاله)، نه با افکت. */
+.rf-btn{position:relative;overflow:hidden;display:inline-flex;align-items:center;gap:8px;
+  transition:border-color .22s ease,background .22s ease,color .22s ease,box-shadow .3s ease}
+.rf-btn.loading{cursor:progress}
+.rf-slot{position:relative;width:16px;height:16px;flex:0 0 16px;display:inline-block}
+.rf-ico,.rf-spin,.rf-check{position:absolute;inset:0;display:flex;align-items:center;
+  justify-content:center;transition:opacity .2s ease,transform .2s ease}
+.rf-ico svg,.rf-spin svg,.rf-check svg{width:16px;height:16px;display:block;overflow:visible}
+.rf-ico svg path{fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.rf-spin,.rf-check{opacity:0;transform:scale(.72)}
+.rf-spin svg circle{fill:none;stroke-width:2;stroke-linecap:round}
+.rf-track{stroke:var(--accent);stroke-opacity:.16}
+.rf-arc{stroke:var(--accent);transform-origin:50% 50%}
+.rf-check svg path{fill:none;stroke:var(--good);stroke-width:2.6;stroke-linecap:round;stroke-linejoin:round}
+.rf-live{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
+  clip:rect(0 0 0 0);white-space:nowrap;border:0}
+/* هنگامِ کار: گلیف کنار می‌رود، حلقه‌ی بدونِ‌سر ظاهر می‌شود و نوارِ نازکِ پایین می‌خزد */
+/* هنگامِ کار: گلیف کنار میرود و حلقه ظاهر میشود — چرخشِ خطی، دُمِ نفسکش.
+   دکمه در این حالت disabled است؛ عمداً محو نمیشود تا وضعیتِ کار *روشن* دیده شود. */
+.rf-btn.loading:disabled,.rf-btn.ok:disabled{opacity:1}
+.rf-btn.loading{color:var(--txt);border-color:var(--accent);
+  background:linear-gradient(180deg,rgba(77,163,255,.14),rgba(77,163,255,.05));
+  box-shadow:0 0 0 1px rgba(77,163,255,.18),0 6px 20px rgba(77,163,255,.14)}
+.rf-btn.loading .rf-ico{opacity:0;transform:scale(.72)}
+.rf-btn.loading .rf-spin{opacity:1;transform:none}
+.rf-btn.loading .rf-spin svg{animation:rfrot .9s linear infinite}
+.rf-btn.loading .rf-arc{stroke-dasharray:8 49;animation:rfdash 1.5s ease-in-out infinite}
+.rf-btn.loading .rf-lbl{opacity:.9}
+/* تأییدِ پایان: تیک «کشیده» می‌شود (بدونِ پرشِ رنگ) */
+/* تأییدِ پایان: تیک «کشیده» میشود و دکمه بهآرامی به رنگِ سالم میگراید */
+.rf-btn.ok{border-color:var(--good);color:var(--good);
+  background:linear-gradient(180deg,rgba(52,211,153,.16),rgba(52,211,153,.05));
+  box-shadow:0 0 0 1px rgba(52,211,153,.2),0 6px 20px rgba(52,211,153,.16)}
+.rf-btn.ok .rf-ico{opacity:0;transform:scale(.72)}
+.rf-btn.ok .rf-spin{opacity:0;transform:scale(.72)}
+.rf-btn.ok .rf-check{opacity:1;transform:none}
+.rf-btn.ok .rf-check svg path{stroke-dasharray:24;stroke-dashoffset:24;animation:rfdraw .36s cubic-bezier(.2,.9,.3,1) .04s forwards}
+@keyframes rfrot{to{transform:rotate(360deg)}}
+@keyframes rfdash{0%{stroke-dasharray:8 49;stroke-dashoffset:8}
+  50%{stroke-dasharray:30 27;stroke-dashoffset:-8}
+  100%{stroke-dasharray:8 49;stroke-dashoffset:-49}}
+@keyframes rfdraw{to{stroke-dashoffset:0}}
+/* احترام به کاهشِ حرکت (دسترسی‌پذیری): فقط یک تپشِ نرم، بدونِ چرخش و نور */
+@media (prefers-reduced-motion: reduce){
+  .rf-btn.loading .rf-spin svg,.rf-btn.loading .rf-arc{animation:none}
+  .rf-btn.loading .rf-arc{stroke-dasharray:30 27}
+  .spin,.rf-btn.loading .rf-spin{animation:rfsoft 1.6s ease-in-out infinite}
+}
+@keyframes rfsoft{0%,100%{opacity:.45}50%{opacity:1}}
 /* مودالِ عمومی (پنجره‌ی آرشیو و …) */
 .modal-overlay{position:fixed;inset:0;background:rgba(2,6,14,.72);display:flex;
   align-items:center;justify-content:center;z-index:120;padding:20px}
@@ -1440,7 +1501,15 @@ tr.on td{background:rgba(34,197,94,.05)}
       <button id="sbBtn" class="sb-btn" title="استراتژیِ سیلوربولتِ نیویورک روی تایمِ ۱ دقیقه — فقط در پنجره‌ی ۰۹:۰۰ تا ۱۱:۰۰ به‌وقتِ نیویورک معتبر است (اوجِ فعالیتِ روز). با کلیک، سبک روی این استراتژی می‌رود، تحلیلِ ۱m اجرا می‌شود و تایمرِ ساعتِ ۹ نمایش داده می‌شود.">🎯 سیلوربولت نیویورک</button>
       <button id="setupsBtn" class="setups-btn" title="سه ستاپِ پیشنهادیِ اسکلپ با وضعیتِ زنده: 🟢 تأییدِ قوی · 🟡 منتظرِ شرایط · 🔴 شرایط نیست. چراغ‌ها از آخرین تحلیل به‌روز می‌شوند؛ با کلیک روی هر ردیف مسیرِ ستاپ باز می‌شود.">📚 ستاپ‌ها</button>
       <button id="fundBtn" class="fund-btn" title="اخبارِ اقتصادیِ پرتأثیر (GDP، تورم، اشتغال، نرخِ بهره) یک روز پیش از اعلام — ساعتِ دقیقِ اعلام به‌وقتِ نیویورک و تهران، به‌همراهِ تحلیلِ اثرِ هر خبر روی جفت‌ارزهای مهم و طلا/نقره. با کلیک، صفحه‌ی جداگانه‌ی فاندمنتال در تبِ نو باز می‌شود.">📰 فاندمنتال</button>
-      <button id="refreshBtn" class="rf-btn" title="همان نمادِ آخرین تحلیل را دوباره با دیتای زنده می‌گیرد — بدونِ رفرشِ کلِ صفحه. تا اولین تحلیل غیرفعال است."><span class="rf-ico">↻</span> بروزرسانی</button>
+      <button id="refreshBtn" class="rf-btn" title="همان نمادِ آخرین تحلیل را دوباره با دیتای زنده می‌گیرد — بدونِ رفرشِ کلِ صفحه. تا اولین تحلیل غیرفعال است.">
+        <span class="rf-slot" aria-hidden="true">
+          <span class="rf-ico"><svg viewBox="0 0 24 24"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></span>
+          <span class="rf-spin"><svg viewBox="0 0 24 24"><circle class="rf-track" cx="12" cy="12" r="9"/><circle class="rf-arc" cx="12" cy="12" r="9"/></svg></span>
+          <span class="rf-check"><svg viewBox="0 0 24 24"><path d="M5 12.8l4.3 4.3L19 7.4"/></svg></span>
+        </span>
+        <span class="rf-lbl">بروزرسانی</span>
+        <span class="rf-live" role="status" aria-live="polite"></span>
+      </button>
       <button id="archiveBtn" class="ab-btn" title="اخبارِ اقتصادیِ پرتأثیرِ ۶ ساعتِ گذشته — هر خبر با ارز، ساعتِ اعلام و جهتِ موردانتظارش روی جفت‌ارزها و طلا/نقره؛ در همین صفحه به‌شکلِ پنجره باز می‌شود.">📁 آرشیو اقتصادی</button>
     </div>
     <div id="setupsPanel" class="setups-panel">
@@ -1640,21 +1709,40 @@ function startSbTimer(win){
 goBtn.onclick=run;
 symIn.addEventListener("keydown",e=>{if(e.key==="Enter")run();});
 
-// دکمه‌ی ↻ بروزرسانی — همان تحلیلِ آخر را با دیتای تازه دوباره می‌گیرد (بدونِ رفرشِ صفحه)
+// دکمه‌ی بروزرسانی — همان تحلیلِ آخر را با دیتای تازه دوباره می‌گیرد (بدونِ رفرشِ صفحه).
+// وضعیتِ کار با کلاسِ `.loading` روی خودِ دکمه نشان داده می‌شود (حلقه‌ی بدونِ‌سر +
+// هالهٔ ملایم — بدونِ افکتِ تصویری) — متن و اندازه‌ی دکمه ثابت می‌ماند تا چیزی نپرد.
 const refreshBtn=document.getElementById("refreshBtn");
 if(refreshBtn){
+  const rfLive=refreshBtn.querySelector(".rf-live");
+  const rfIdleTitle=refreshBtn.getAttribute("title")||"";
+  const rfSay=s=>{ if(rfLive) rfLive.textContent=s||""; };
   refreshBtn.disabled=true;
   refreshBtn.onclick=async ()=>{
     const sym=(window._last&&window._last.symbol)||symIn.value.trim();
     if(!sym){ symIn.focus(); return; }
     symIn.value=sym;
-    refreshBtn.disabled=true; refreshBtn.classList.add("spin");
+    refreshBtn.disabled=true;
+    refreshBtn.classList.remove("ok");
+    refreshBtn.classList.add("loading");
+    refreshBtn.setAttribute("aria-busy","true");
+    refreshBtn.title="در حالِ بروزرسانیِ «"+sym+"» با دیتای زنده…";
+    rfSay("در حالِ بروزرسانی…");
+    let ok=false;
     try{
       await run();
+      ok=true;
       refreshBtn.classList.add("ok");
-      setTimeout(()=>refreshBtn.classList.remove("ok"), 1600);
+      refreshBtn.title="بروزرسانی شد — «"+sym+"» با دیتای تازه دوباره تحلیل شد.";
+      rfSay("بروزرسانی شد");
+      setTimeout(()=>refreshBtn.classList.remove("ok"), 1900);
+    }catch(e){
+      rfSay("بروزرسانی ناموفق بود");
     }finally{
-      refreshBtn.classList.remove("spin"); refreshBtn.disabled=false;
+      refreshBtn.classList.remove("loading");
+      refreshBtn.disabled=false;
+      refreshBtn.removeAttribute("aria-busy");
+      if(!ok) refreshBtn.title=rfIdleTitle;
     }
   };
 }
