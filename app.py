@@ -12,12 +12,15 @@
 
 هستهٔ تحلیل همان confluence.py + smc_engine.py + macro_context.py است.
 """
-import sys, os, json, argparse, traceback, threading, time
+import sys, os, json, argparse, traceback, threading, time, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 HOME = os.path.expanduser("~")
 ALARMS_FILE = os.path.join(HOME, "pipfound", "alarms.json")
+# وضعیتِ داده‌ی آخرین تحلیل‌ها — روی دیسک نگه داشته می‌شود چون خودِ اپ با هر تغییرِ
+# کد ری‌استارتِ درجا می‌کند و اگر در حافظه بماند، چیپِ «سنِ داده» بعد از هر ادغام خالی می‌شود.
+DATA_SEEN_FILE = os.path.join(HOME, "pipfound", "data_seen.json")
 SHOTS_DIR = os.path.join(HOME, "pipfound", "screenshots")
 _ALLOWED_IMG = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
                 "webp": "image/webp", "gif": "image/gif"}
@@ -38,6 +41,10 @@ try:
     import fundamental as FUND
 except Exception:
     FUND = None
+try:
+    import risk as RK          # مدلِ ریسک: سایزِ پوزیشن، سقفِ روزانه، هم‌بستگی
+except Exception:
+    RK = None
 
 # ماژولِ ژورنال از پوشه‌ی همسایه‌ی trade-journal
 _JRN_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
@@ -286,6 +293,62 @@ def _setup_statuses(r):
     return out
 
 
+def _risk_settings():
+    """تنظیماتِ ریسکِ کاربر؛ اگر ماژول بار نشده باشد، پیش‌فرض‌های همان ماژول.
+
+    مرجعِ واحدِ مسیر/پیش‌فرض‌ها خودِ `risk.py` است (نه یک کپیِ دوم در app) تا دو
+    جای مختلف دو جوابِ متفاوت ندهند. مسیر با `PIPFOUND_RISK_FILE` قابلِ جابه‌جایی است.
+    """
+    if RK is None:
+        return {"balance": 10000.0, "account_ccy": "USD", "risk_pct": 1.0,
+                "daily_loss_limit_pct": 3.0, "max_open_risk_pct": 5.0,
+                "usd_per_quote": {}}
+    try:
+        return RK.load_settings()
+    except Exception:
+        return RK.DEFAULTS
+
+
+def _risk_block(symbol, r):
+    """بلوکِ ریسک برای یک تحلیل + اعمالِ «گیتِ سقفِ ضررِ روزانه».
+
+    عمداً در همین حلقه (app) و نه در `confluence.py` محاسبه می‌شود: این بلوک به
+    تنظیماتِ کاربر و دفترِ معاملات نیاز دارد؛ اگر داخلِ گریدر برود، نتیجه‌ی
+    بک‌تست هم عوض می‌شود در حالی که بک‌تست اصلاً سرمایه/دفتر ندارد.
+
+    گیت: وقتی سقفِ ضررِ روزانه پر شده یا مجموعِ ریسکِ باز از سقف گذشته باشد،
+    پلن دیگر «سیگنالِ ورود» نیست — مثلِ حالتِ «بازار بسته» درجه سقف می‌خورد و
+    مهرِ ورود صادر نمی‌شود، ولی خودِ پلن برای آماده‌سازی می‌ماند.
+    """
+    if RK is None:
+        return None
+    try:
+        st = RK.load_settings()
+        rows = _journal_rows(_JR_FILE) or []
+        blk = RK.evaluate(symbol, (r or {}).get("plan"), st, rows)
+    except Exception:
+        traceback.print_exc()
+        return None
+    plan = (r or {}).get("plan")
+    if blk.get("blocked") and plan:
+        reason = blk.get("block_reason") or "محدودیتِ ریسک"
+        plan["executable_now"] = False
+        plan["blocked_reason"] = reason
+        plan["risk_blocked"] = True
+        if r.get("grade") in ("A+", "A", "B"):
+            r["grade"] = "C"
+        r["verdict"] = ("⛔ " + reason +
+                        " — طبقِ همین سقف، ورودِ جدید مجاز نیست. " +
+                        (r.get("verdict") or ""))
+        es = r.get("entry_stamp")
+        if isinstance(es, dict):
+            es["stamped"] = False
+            rs = es.setdefault("reasons", [])
+            if reason not in rs:
+                rs.insert(0, reason)
+    return blk
+
+
 def analyze(symbol, style):
     """اجرای اسکنر برای یک نماد + سبک و برگرداندنِ دیکشنریِ کامل."""
     sty = STYLES.get(style, STYLES["day"])
@@ -353,8 +416,67 @@ def analyze(symbol, style):
         r["sb_window"] = E.silver_bullet_window()
     except Exception:
         r["sb_window"] = None
+    # ── مدلِ ریسک: سایزِ پوزیشن + سقفِ ضررِ روزانه + هشدارِ هم‌بستگی ──
+    # بعد از همه‌ی گیت‌ها می‌آید تا پلنِ نهایی (و درجه‌ای که ممکن است سقف خورده
+    # باشد) را ببیند؛ خودش هم می‌تواند درجه را سقف بزند.
+    r["risk"] = _risk_block(symbol, r)
     r["is_sb_mode"] = (style == "sb_ny")
     return r
+
+
+# آخرین وضعیتِ داده‌ی هر نماد (از آخرین تحلیل) → برای اندپوینتِ /api/data_status.
+# چرا: چیپِ «سنِ داده» باید ارزشپیش از هر تحلیلی هم چیزی بگوید، و نمی‌خواهیم برای
+# هر بارِ لودِ صفحه چند تایم‌فریم را از نو دانلود کنیم (محدودیتِ نرخ).
+_last_seen_lock = threading.Lock()
+
+
+def _load_seen():
+    """آخرین وضعیتِ داده‌ی تحلیل‌ها را از دیسک می‌خواند (خرابی/نبود ⇒ دیکشنریِ خالی)."""
+    try:
+        with open(DATA_SEEN_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+_LAST_SEEN = _load_seen()
+
+
+def _save_seen():
+    """نوشتنِ اتمیک؛ خطا نباید تحلیل را بشکند (این فقط یک نشانگر است)."""
+    try:
+        os.makedirs(os.path.dirname(DATA_SEEN_FILE), exist_ok=True)
+        tmp = DATA_SEEN_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_LAST_SEEN, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, DATA_SEEN_FILE)
+    except Exception:
+        pass
+
+
+def _remember_analysis(symbol, style, r):
+    """خلاصه‌ی بلوکِ داده‌ی یک تحلیلِ تازه را نگه می‌دارد (فقط برای /api/data_status)."""
+    try:
+        d = (r or {}).get("data") or {}
+        if not d:
+            return
+        key = (symbol or "").strip().upper()
+        with _last_seen_lock:
+            _LAST_SEEN[key] = {
+                "symbol": key, "style": style,
+                "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "state": d.get("state"), "reason": d.get("reason"),
+                "tf": d.get("tf"), "last_bar_ts": d.get("last_bar_ts"),
+                "tf_seconds": d.get("bar_seconds"),
+                "symbol_class": d.get("symbol_class"), "source": d.get("source"),
+            }
+            if len(_LAST_SEEN) > 40:
+                for k in sorted(_LAST_SEEN, key=lambda k: _LAST_SEEN[k].get("at", ""))[:10]:
+                    _LAST_SEEN.pop(k, None)
+            _save_seen()
+    except Exception:
+        pass
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -383,9 +505,13 @@ def _save_alarms(alarms):
 
 
 def _live_price(symbol):
-    """قیمتِ زنده‌ی نماد را از موتور می‌گیرد (آخرین کندلِ ۵m)."""
+    """قیمتِ زنده‌ی نماد را از موتور می‌گیرد (آخرین کندلِ ۵m).
+
+    `unclosed=True` مهم است: این‌جا برخلافِ تحلیل، **خودِ کندلِ در حالِ تشکیل**
+    همان قیمتِ زنده است (آلارم باید ببیند «الان» قیمت کجاست، نه کلوزِ ۵ دقیقه پیش).
+    """
     try:
-        src, sym, disp, bars = E.fetch(symbol.strip().upper(), "5m", 3)
+        src, sym, disp, bars = E.fetch(symbol.strip().upper(), "5m", 3, unclosed=True)
         if bars:
             return float(bars[-1]["c"])
     except Exception:
@@ -608,6 +734,32 @@ REV_TRACKED = [
     "app.py", "selfcheck.py", "confluence.py", "smc_engine.py", "backtest.py",
     "macro_context.py", "fundamental.py", "sw.js", "manifest.webmanifest",
 ]
+
+
+def _rev_track_imported():
+    """هر ماژولِ هم‌پوشه‌ای که واقعاً import شده را به فهرستِ ردیابی اضافه می‌کند.
+
+    چرا لازم شد: همین فهرستِ دستی یک بار ماژولِ تازه (`risk.py`) را از قلم
+    انداخته بود؛ نتیجه‌اش این بود که ویرایشِ آن ماژول هیچ‌وقت ری‌استارتِ خودکار را
+    تریگر نمی‌کرد و پروسه تا ابد نسخهٔ قدیمیِ آن ماژول را سرو می‌کرد — بی‌صدا،
+    دقیقاً همان «کهنه سرو شدن»ی که این مکانیزم برای بستنش ساخته شد.
+    """
+    for mod in (C, E, BT, M, FUND, RK):
+        try:
+            p = getattr(mod, "__file__", None)
+            if not p:
+                continue
+            p = os.path.abspath(p)
+            if os.path.dirname(p) != REV_ROOT:
+                continue          # ماژولِ همسایه (مثلِ ژورنال) مسیرِ دیگری دارد
+            name = os.path.basename(p)
+            if name not in REV_TRACKED:
+                REV_TRACKED.append(name)
+        except Exception:
+            pass
+
+
+_rev_track_imported()
 _BOOT_TS = time.time()
 _BOOT_MONO = time.monotonic()
 _PROC_PID = os.getpid()
@@ -945,11 +1097,48 @@ body{margin:0;background:radial-gradient(1200px 600px at 80% -10%,#16223b 0%,var
 h1{font-size:22px;margin:0;font-weight:700;letter-spacing:.2px;
   background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
 .sub{color:var(--muted);font-size:13px;margin:2px 0 22px}
-.revchip{margin-left:auto;font-size:11px;color:var(--muted);border:1px solid var(--line);
+.revchip{font-size:11px;color:var(--muted);border:1px solid var(--line);
   background:var(--panel2);border-radius:999px;padding:4px 10px;white-space:nowrap;cursor:default;
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace;direction:ltr;transition:.15s}
 .revchip.warn{color:var(--warn);border-color:#a16207;background:#2a1f05}
 .revchip.bad{color:#fca5a5;border-color:#7f1d1d;background:#2a0a0a}
+.chiprow{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+/* بنرِ تازگیِ داده/بازار در کارتِ نتیجه — قبل از پلن خوانده می‌شود */
+.datanote{margin:10px 0 4px;padding:9px 12px;border-radius:12px;font-size:12.5px;line-height:1.8;
+  border:1px solid var(--line);background:var(--panel2);direction:rtl}
+.datanote b{font-weight:700}
+.datanote-why{margin-top:3px;font-size:12px;opacity:.92}
+.datanote.data-ok{color:#4ade80;border-color:rgba(74,222,128,.35)}
+.datanote.data-warn{color:var(--warn);border-color:#a16207;background:#2a1f05}
+.datanote.data-closed{color:#fca5a5;border-color:#7f1d1d;background:#2a0a0a}
+/* پنلِ ریسک — سرمایه/درصد/سقف‌ها + وضعیتِ امروز (ژورنال) */
+.riskpanel{margin-top:12px;padding:12px 12px 10px;border:1px solid var(--line);border-radius:14px;
+  background:var(--panel2)}
+.risktitle{font-size:12.5px;color:var(--muted);font-weight:700;margin-bottom:9px;line-height:1.8}
+.riskrow{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.rinp{background:var(--panel);border:1px solid var(--line);border-radius:10px;color:var(--txt);
+  font-size:14px;padding:8px 10px;outline:none;width:104px;direction:ltr;text-align:center;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;transition:.15s}
+.rinp:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(77,163,255,.18)}
+.rinp.wide{width:132px}
+.riskbtn{background:var(--accent);color:#04241b;border:0;border-radius:10px;padding:9px 16px;
+  font-family:inherit;font-size:13px;font-weight:700;cursor:pointer}
+.riskbtn:disabled{opacity:.5;cursor:default}
+.riskstat{margin-top:9px;font-size:12px;color:var(--muted);line-height:1.9}
+.riskstat b{color:var(--txt)}
+.riskstat .bad{color:#fca5a5}
+.riskstat .good{color:var(--good)}
+.riskstat .warn{color:var(--warn)}
+/* بنرِ هشدار/وضعیتِ ریسک در کارتِ نتیجه */
+.riskwarn{margin:10px 0 4px;padding:9px 12px;border-radius:12px;font-size:12.5px;line-height:1.9;
+  border:1px solid #7f1d1d;background:#2a0a0a;color:#fca5a5;direction:rtl}
+.riskwarn.caution{border-color:#a16207;background:#2a1f05;color:var(--warn)}
+.riskwarn.quiet{border-color:var(--line);background:var(--panel2);color:var(--muted)}
+.riskwarn ul{margin:4px 0 0;padding-inline-start:18px}
+/* سلول‌های سایزِ پوزیشن در کارتِ پلن */
+.pcell.size{background:rgba(34,211,165,.10);border-color:rgba(34,211,165,.35)}
+.pcell.size .v{color:var(--accent2)}
+.sizenote{margin-top:8px;font-size:11.5px;color:var(--muted);line-height:1.85}
 .card{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:20px;
   box-shadow:0 20px 50px rgba(0,0,0,.35)}
 .searchrow{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
@@ -1226,7 +1415,10 @@ tr.on td{background:rgba(34,197,94,.05)}
     <div>
       <h1>pipfound</h1>
     </div>
-    <span id="revChip" class="revchip" title="بازنگریِ کدِ در حالِ اجرا — SHA بارشده، زمانِ استارتِ پروسه، و اینکه کدِ سروشده با فایل‌های روی دیسک یکی است یا نه.">rev …</span>
+    <div class="chiprow">
+      <span id="dataChip" class="revchip" title="تازگیِ داده و باز/بسته بودنِ بازار — اگر آخرین کندلِ بسته کهنه باشد یا بازار بسته باشد، تحلیل «آماده‌سازی» است نه سیگنالِ ورود.">داده …</span>
+      <span id="revChip" class="revchip" title="بازنگریِ کدِ در حالِ اجرا — SHA بارشده، زمانِ استارتِ پروسه، و اینکه کدِ سروشده با فایل‌های روی دیسک یکی است یا نه.">rev …</span>
+    </div>
   </div>
 
   <div class="card">
@@ -1282,6 +1474,26 @@ tr.on td{background:rgba(34,197,94,.05)}
         <input id="btWalk" class="btinp narrow" type="number" min="100" max="8000" step="100" value="2000"
                title="عمقِ پیمایشِ walk-forward = تعدادِ کندلِ ورودی که ماشین روی آن قدم‌به‌قدم جلو می‌رود. برای نمونه‌ی آماریِ معتبر ≥ ۲۰۰۰ توصیه می‌شود.">
       </div>
+    </div>
+    <div class="riskpanel" id="riskPanel">
+      <div class="risktitle">💰 مدیریتِ ریسک — سرمایه و درصدِ ریسکت را بده تا کنارِ هر پلن «سایزِ پوزیشن» و ریسکِ دلاری‌اش را بدهد، و سقفِ ضررِ روزانه/تمرکزِ معاملات را هم بپاید</div>
+      <div class="riskrow">
+        <span class="btlbl">سرمایه</span>
+        <input id="rkBalance" class="rinp wide" type="number" min="0" step="100" autocomplete="off"
+               title="سرمایه‌ی حساب (به ارزِ حساب، پیش‌فرض دلار). سایزِ پوزیشن از همین عدد و درصدِ ریسک حساب می‌شود.">
+        <span class="btlbl">ریسکِ هر معامله (٪)</span>
+        <input id="rkRisk" class="rinp" type="number" min="0" max="100" step="0.1" autocomplete="off"
+               title="درصدی از سرمایه که در هر معامله ریسک می‌کنی (پیش‌فرض ۱٪). سایز = (سرمایه × این درصد) ÷ فاصله‌ی استاپ.">
+        <span class="btlbl">سقفِ ضررِ روزانه (٪)</span>
+        <input id="rkDaily" class="rinp" type="number" min="0" max="100" step="0.5" autocomplete="off"
+               title="اگر ضررِ محقق‌شده‌ی امروز به این درصد برسد، اپ ورودِ جدید را مسدود می‌کند، درجه را سقف C می‌زند و مهرِ ورود صادر نمی‌کند.">
+        <span class="btlbl">سقفِ ریسکِ باز (٪)</span>
+        <input id="rkOpen" class="rinp" type="number" min="0" max="100" step="0.5" autocomplete="off"
+               title="مجموعِ ریسکِ معاملاتِ بازِ تو (از ژورنال). عبور از این سقف = تمرکزِ زیاد؛ اپ ورودِ جدید را مسدود می‌کند.">
+        <button id="rkSave" class="riskbtn" title="تنظیماتِ ریسک را ذخیره کن. در ~/pipfound/risk.json می‌ماند و بعد از ری‌استارتِ خودکارِ اپ هم حفظ می‌شود.">ذخیره</button>
+        <span id="rkMsg" class="jmsg"></span>
+      </div>
+      <div class="riskstat" id="rkStat">در حالِ خواندنِ وضعیتِ ریسک…</div>
     </div>
   </div>
 
@@ -1638,12 +1850,52 @@ function render(d){
     </tr>`;
   }).join("");
 
+  // بلوکِ تازگیِ داده + باز/بسته بودنِ بازار — پیش از پلن خوانده می‌شود تا پلنِ
+  // بازارِ بسته اشتباه به‌شکلِ سیگنالِ ورود دیده نشود.
+  let dataHtml="";
+  const dd = d.data||{};
+  if(dd.last_bar_utc){
+    const st=dd.state;
+    const cls = st==="open"?"data-ok" : st==="closed"?"data-closed" : "data-warn";
+    const head = st==="open"?"🟢 داده تازه" : st==="closed"?"🔴 بازار بسته است" : "🟡 داده عقب‌تر از حدِ معمول";
+    dataHtml=`<div class="datanote ${cls}">
+      <b>${head}</b> — آخرین کندلِ بسته: <b>${dd.last_bar_utc} UTC</b> (${dd.tf}) · سنِ داده: <b>${dd.age_human}</b> · نیویورک: ${dd.et_now}
+      ${st!=="open"?`<div class="datanote-why">${dd.reason||""} — پس این تحلیل «آماده‌سازی» است، نه سیگنالِ ورود؛ پلنِ زیر برای سشنِ بعدی است.</div>`:""}
+    </div>`;
+  }
+
+  // بلوکِ ریسک: سقفِ ضررِ روزانه + هشدارِ تمرکز/هم‌بستگی — پیش از پلن خوانده
+  // می‌شود تا پلنی که با سقفِ روزانه مسدود شده اشتباه به‌شکلِ سیگنالِ ورود دیده نشود.
+  const rk = d.risk || null;
+  let riskHtml="";
+  if(rk){
+    const warns = rk.warnings || [];
+    const day = rk.daily || {};
+    if(warns.length){
+      riskHtml = `<div class="riskwarn${rk.blocked?"":" caution"}">
+        <b>${rk.blocked?"⛔ محدودیتِ ریسک — ورودِ جدید مجاز نیست":"⚠ هشدارِ ریسک"}</b>
+        <ul>${warns.map(w=>`<li>${w}</li>`).join("")}</ul>
+      </div>`;
+    } else if(day.closed_today || day.open_count){
+      riskHtml = `<div class="riskwarn quiet">
+        <b>💰 وضعیتِ ریسکِ امروز</b> — ضررِ محقق‌شده: <b>${day.realized_pct}٪</b>
+        (${day.realized_r}R · ${day.closed_today} معامله) · باقی‌مانده تا سقف: <b>${day.remaining_pct}٪</b>
+        · ریسکِ باز: <b>${day.open_risk_pct}٪</b> از سقفِ ${day.open_risk_limit_pct}٪ (${day.open_count} پوزیشن)
+      </div>`;
+    }
+  }
+
   let planHtml="";
   if(d.plan){
     const p=d.plan;
+    const closed = (p.executable_now===false);
     const et = p.entry_type==="market"
-      ? `<span class="badge g-green">ورودِ بازار (الان)</span>`
-      : `<span class="badge g-amber">لیمیت در OTE — منتظرِ پولبک</span>`;
+      ? (closed
+          ? `<span class="badge g-red">ورودِ بازار — ولی الان قابلِ اجرا نیست (بازار بسته/داده کهنه)</span>`
+          : `<span class="badge g-green">ورودِ بازار (الان)</span>`)
+      : (closed
+          ? `<span class="badge g-amber">لیمیت در OTE — منتظرِ پولبک</span><span class="badge g-red">الان قابلِ اجرا نیست (بازار بسته)</span>`
+          : `<span class="badge g-amber">لیمیت در OTE — منتظرِ پولبک</span>`);
     // مهرِ تاییدِ ورودِ اختیاری (مدلِ عرضه/تقاضا: نمره>۷۰٪ + نفوذِ ۳۰٪ + تاییدِ چرخشِ LTF)
     const es = d.entry_stamp || {};
     let stampHtml = "";
@@ -1655,6 +1907,23 @@ function render(d){
       stampHtml = `<div class="stamp stamp-no" title="یک یا چند شرطِ مدلِ عرضه/تقاضا برقرار نیست — ورود توصیه نمی‌شود.">
         ⛔ بدونِ مهرِ تایید — شرایطِ ورود کامل نیست
         <div class="stamp-why">${(es.reasons||[]).join(" · ")}</div></div>`;
+    }
+    // سایزِ پوزیشن برای همین پلن — از سرمایه/درصدِ ریسکِ پنلِ بالای صفحه
+    const sz = (d.risk && d.risk.size) || {};
+    let sizeHtml = "";
+    if(sz.ok){
+      const ccy = sz.account_ccy || "USD";
+      const szNotes = (sz.notes||[]).length
+        ? `<div class="sizenote">ℹ ${(sz.notes||[]).join(" · ")}</div>` : "";
+      sizeHtml = `
+      <div class="pgrid" style="margin-top:10px">
+        <div class="pcell size"><div class="k">سایزِ پوزیشن${sz.approx?" (تقریبی — تنظیم‌پذیر)":""}</div><div class="v">${sz.size} ${sz.unit_fa}</div></div>
+        <div class="pcell"><div class="k">ریسکِ این معامله</div><div class="v">${sz.actual_risk_amount} ${ccy}</div></div>
+        <div class="pcell"><div class="k">سود در هدف (۱:${p.rr})</div><div class="v">${sz.reward_amount!=null?sz.reward_amount:"—"} ${ccy}</div></div>
+        <div class="pcell"><div class="k">ارزشِ هر پوینت / فاصله‌ی استاپ</div><div class="v">${sz.value_per_point} ${ccy} · ${sz.stop_pips}p</div></div>
+      </div>${szNotes}`;
+    } else if(sz.reason){
+      sizeHtml = `<div class="sizenote">💰 سایزِ پوزیشن محاسبه نشد: ${sz.reason}</div>`;
     }
     planHtml=`<div class="plan">
       <h3>📌 پلنِ پیشنهادی — تایم‌فریمِ ورود: <b>${d.entry_tf}</b> · سبک: ${d.style} &nbsp; ${et}</h3>
@@ -1669,6 +1938,7 @@ function render(d){
         <div class="pcell"><div class="k">هدف (حدِ سود · ۲ تا ۳R)</div><div class="v">${fmt(p.tp)}</div></div>
         ${p.liq_target && p.rr_to_liq && p.rr_to_liq>p.rr ? `<div class="pcell"><div class="k">کششِ رانر (لیکوئیدیتیِ بعدی)</div><div class="v">${fmt(p.liq_target)} <span style="color:var(--muted);font-size:12px">۱:${p.rr_to_liq}</span></div></div>` : ""}
       </div>
+      ${sizeHtml}
     </div>`;
   }
 
@@ -1740,7 +2010,7 @@ function render(d){
     <div class="rhead">
       <div class="sym">${d.symbol}</div>
       <span class="dir ${dirClass(d.direction)}">${d.direction}</span>
-      <span class="price">قیمت: ${fmt(d.last_price)}</span>
+      <span class="price" title="کلوزِ آخرین کندلِ بستهٔ تایم‌فریمِ ورود (نه قیمتِ لحظه‌ایِ کندلِ ناقص).">قیمت: ${fmt(d.last_price)}</span>
       <div class="spacer"></div>
       <div class="grade" style="background:${gradeColor(d.grade)}">${d.grade}</div>
     </div>
@@ -1749,6 +2019,8 @@ function render(d){
       <span>تایم‌فریم‌ها: <b>${(d.timeframes||[]).join(" ، ")}</b></span>
       ${biasStrip?`<span>بایاس: <b>${biasStrip}</b></span>`:""}
     </div>
+    ${dataHtml}
+    ${riskHtml}
     <div class="scorebar"><div class="scorefill" style="width:${pct}%;background:${gradeColor(d.grade)}"></div></div>
     <div class="scoretxt">امتیاز: <b style="color:var(--txt)">${d.score}</b> از ${d.max_score} (${pct}٪)</div>
     <table>
@@ -1777,6 +2049,8 @@ function render(d){
   else if(_sbTimer){ clearInterval(_sbTimer); _sbTimer=null; }
   // چراغ‌های ستاپ‌ها بعد از هر تحلیل تازه شوند (اگر پنل باز است)
   renderSetups(d.setup_statuses);
+  // چیپِ سنِ داده فوراً تازه شود (بدونِ انتظارِ ۳۰ ثانیه‌ی تایمر)
+  loadData();
 }
 
 // ── پنلِ ستاپ‌ها: همیشه بالای صفحه، مستقل از کارتِ نتیجه ──────────────
@@ -2135,6 +2409,119 @@ async function loadRev(){
 loadRev();
 setInterval(loadRev, 30000);
 
+// چیپِ «سنِ داده / باز-بستهٔ بازار» — مستقل از چیپِ کد و بدونِ هزینه‌ی شبکه‌ی سنگین:
+// اندپوینت فقط وضعیتِ آخرین تحلیل را می‌خواند و سنِ داده را همین‌حالا بازمحاسبه می‌کند.
+async function loadData(){
+  const el=document.getElementById("dataChip"); if(!el) return;
+  try{
+    const r=await fetch("/api/data_status",{cache:"no-store"});
+    const j=await r.json();
+    const f=j.fresh||{}, a=j.analyzed||{};
+    const st=f.state||a.state;
+    const icon = st==="open"?"🟢" : st==="closed"?"🔴" : st?"🟡":"⚪";
+    const label = st==="open"?"داده زنده" : st==="closed"?"بازار بسته" : st==="thin"?"سشنِ نازک" : st==="delayed"?"داده عقب" : "داده؟";
+    const shortAge = f.age_human && st==="open" ? " · "+f.age_human : "";
+    el.textContent = icon+" "+label+shortAge;
+    el.className = "revchip"+(st==="closed"?" bad" : (st&&st!=="open"?" warn" : ""));
+    const p=[];
+    if(!st) p.push("هنوز هیچ تحلیلی ثبت نشده — بعد از اولین تحلیل، سنِ داده همین‌جا می‌آید.");
+    else p.push((f.reason||a.reason||"")+(!f.reason&&a.reason?" (واحد در زمانِ تحلیل)":""));
+    if(a.symbol) p.push("آخرین تحلیل: "+a.symbol+(a.tf?" · "+a.tf:"")+(a.style?" · سبکِ "+a.style:"")+(a.at?" · "+a.at:""));
+    if(f.last_bar_ts) p.push("آخرین کندلِ بسته: "+(f.last_bar_utc||"?")+" UTC · سنِ داده: "+(f.age_human||"—"));
+    p.push("ساعتِ نیویورک: "+(f.et_now||j.et_now||"—"));
+    if(j.killzone) p.push("کیل‌زون: "+j.killzone);
+    if(st && st!=="open") p.push("⚠ در این حالت پلن «الان قابلِ اجرا» نیست — فقط آماده‌سازیِ سناریو.");
+    el.title=p.join(" · ");
+  }catch(e){
+    el.textContent="⚪ داده؟";
+    el.className="revchip";
+    el.title="وضعیتِ داده در دسترس نیست: "+e;
+  }
+}
+loadData();
+setInterval(loadData, 30000);
+
+// ── پنلِ ریسک: سرمایه/درصد/سقف‌ها + وضعیتِ امروز (از ژورنال) ──────────
+// عناصر با `getElementById` صریح گرفته می‌شوند (نه هِلپِرِ غیرمستقیم) تا نگهبانِ
+// سلامت هم بتواند سیم‌کشی‌شان را ببیند و اگر روزی قطع شد، کامیت/CI رد شود.
+const rkBalanceEl = document.getElementById("rkBalance");
+const rkRiskEl    = document.getElementById("rkRisk");
+const rkDailyEl   = document.getElementById("rkDaily");
+const rkOpenEl    = document.getElementById("rkOpen");
+const rkStatEl    = document.getElementById("rkStat");
+const rkSaveEl    = document.getElementById("rkSave");
+const rkMsgEl     = document.getElementById("rkMsg");
+// مقدار را فقط وقتی می‌گذاریم که کاربر در حالِ تایپ در همان کادر نباشد
+function _rkSet(el, v){ if(!el) return; if(document.activeElement===el) return; el.value=(v==null?"":v); }
+function rkRenderStat(j){
+  const el=rkStatEl; if(!el) return;
+  const s=(j&&j.settings)||{}, d=(j&&j.daily)||{};
+  const ccy=s.account_ccy||"USD";
+  const bal=Number(s.balance||0), rp=Number(s.risk_pct||0), rpct=Number(d.realized_pct||0);
+  const perTrade=(bal>0&&rp>0)?(bal*rp/100):0;
+  const cls = d.breached ? "bad" : (rpct<0 ? "warn" : "good");
+  const parts=[];
+  parts.push("سرمایه: <b>"+(s.balance!=null?Number(s.balance).toLocaleString():"—")+" "+ccy+"</b>");
+  parts.push("ریسکِ هر معامله: <b>"+(s.risk_pct!=null?s.risk_pct:"—")+"٪</b>"+(perTrade?" (= <b>"+perTrade.toFixed(2)+" "+ccy+"</b>)":""));
+  parts.push("امروز: <b class=\""+cls+"\">"+(rpct>0?"+":"")+rpct+"٪</b> ("+Number(d.realized_r||0)+"R · "+(d.closed_today||0)+" معاملهٔ بسته)");
+  if(d.remaining_pct!=null) parts.push("باقی‌مانده تا سقفِ "+d.limit_pct+"٪: <b>"+d.remaining_pct+"٪</b>"+(d.remaining_amount!=null?" ("+d.remaining_amount+" "+ccy+")":""));
+  parts.push("ریسکِ باز: <b class=\""+(d.open_breached?"bad":"")+"\">"+Number(d.open_risk_pct||0)+"٪</b> از سقفِ "+d.open_risk_limit_pct+"٪ ("+(d.open_count||0)+" پوزیشن)");
+  if(d.breached) parts.push("<span class=\"bad\">⛔ سقفِ ضررِ روزانه پر شده — امروز ورودِ جدید مجاز نیست.</span>");
+  else if(d.open_breached) parts.push("<span class=\"bad\">⛔ سقفِ ریسکِ باز پر شده — اول یک پوزیشنِ باز را ببند.</span>");
+  el.innerHTML = parts.join(" · ");
+}
+async function loadRisk(){
+  try{
+    const r = await fetch("/api/risk",{cache:"no-store"});
+    const j = await r.json();
+    if(!j || j.ok===false){
+      if(rkStatEl) rkStatEl.textContent = "ماژولِ ریسک در دسترس نیست: "+((j&&j.error)||"؟");
+      return;
+    }
+    const s=j.settings||{};
+    _rkSet(rkBalanceEl, s.balance);
+    _rkSet(rkRiskEl,    s.risk_pct);
+    _rkSet(rkDailyEl,   s.daily_loss_limit_pct);
+    _rkSet(rkOpenEl,    s.max_open_risk_pct);
+    rkRenderStat(j);
+  }catch(e){
+    if(rkStatEl) rkStatEl.textContent = "وضعیتِ ریسک در دسترس نیست: "+e;
+  }
+}
+async function saveRisk(){
+  const btn=rkSaveEl, msg=rkMsgEl;
+  const num = (el) => { const v=((el||{}).value||"").trim(); return v===""?null:Number(v); };
+  btn.disabled=true; msg.textContent="در حالِ ذخیره…"; msg.className="jmsg";
+  try{
+    const r = await fetch("/api/risk",{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({balance:num(rkBalanceEl), risk_pct:num(rkRiskEl),
+                            daily_loss_limit_pct:num(rkDailyEl), max_open_risk_pct:num(rkOpenEl)})
+    });
+    const j = await r.json();
+    if(j.error){ msg.textContent="خطا: "+j.error; msg.className="jmsg bad"; return; }
+    msg.textContent="✅ ذخیره شد"; msg.className="jmsg good";
+    rkRenderStat(j);
+    // اگر تحلیلی روی صفحه است، سایزِ پوزیشن را فوراً با تنظیماتِ تازه دوباره بگیر
+    const l = window._last;
+    if(l && l.symbol){
+      const rr = await fetch("/api/analyze?symbol="+encodeURIComponent(l.symbol)+"&style="+(l.style_key||"day"));
+      const nd = await rr.json();
+      if(!nd.error) render(nd);
+    }
+  }catch(e){
+    msg.textContent="ارتباط ناموفق: "+e; msg.className="jmsg bad";
+  }finally{
+    btn.disabled=false;
+    setTimeout(()=>{ if(msg.textContent==="✅ ذخیره شد") msg.textContent=""; }, 4000);
+  }
+}
+if(rkSaveEl) rkSaveEl.onclick = saveRisk;
+[rkBalanceEl, rkRiskEl, rkDailyEl, rkOpenEl].forEach(el=>{
+  if(el) el.addEventListener("keydown", e=>{ if(e.key==="Enter") saveRisk(); });
+});
+loadRisk();
+
 // علامتِ پایانِ بوت — اگر این خط اجرا نشود، هشدارِ قرمزِ نگهبانِ بوت بالای صفحه می‌آید
 window.__pipfoundBooted = true;
 </script>
@@ -2443,12 +2830,60 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(400, json.dumps({"error": "نماد وارد نشده"}, ensure_ascii=False))
             try:
                 r = analyze(sym, style)
+                _remember_analysis(sym, style, r)
                 return self._send(200, json.dumps(r, ensure_ascii=False))
             except Exception as e:
                 traceback.print_exc()
                 return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
         if u.path == "/api/health":
             return self._send(200, json.dumps({"ok": True}))
+        # وضعیتِ داده: ساعتِ سرور/نیویورک، کیل‌زونِ فعلی، و سنِ آخرین تحلیل.
+        # عمداً فقط محاسبه‌ی محلی (بدونِ شبکه) تا این اندپوینت هر ۳۰ ثانیه ارزان باشد.
+        if u.path == "/api/data_status":
+            q = parse_qs(u.query)
+            sym = (q.get("symbol", [""])[0]).strip().upper()
+            now = time.time()
+            with _last_seen_lock:
+                seen = dict(_LAST_SEEN)
+            item = None
+            if sym and sym in seen:
+                item = seen[sym]
+            elif seen:
+                item = max(seen.values(), key=lambda x: x.get("at", ""))
+            out = {
+                "ok": True,
+                "server_utc": datetime.datetime.fromtimestamp(
+                    now, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                "et_now": E.et_of(now).strftime("%Y-%m-%d %H:%M"),
+                "killzone": E.killzone_now(),
+                "silver_bullet": E.silver_bullet_window(),
+                "analyzed": item,
+            }
+            if item and item.get("last_bar_ts") is not None:
+                # سنِ داده **همین حالا** دوباره حساب می‌شود (نه مقدارِ یخ‌زده‌ی تحلیلِ قبل)
+                out["fresh"] = E.freshness_from(
+                    item["last_bar_ts"], item.get("tf") or "15m",
+                    item.get("symbol") or sym,
+                    src=item.get("source") or "yahoo", now=now)
+            return self._send(200, json.dumps(out, ensure_ascii=False))
+        # وضعیتِ ریسک: تنظیماتِ کاربر + ضررِ محقق‌شده‌ی امروز + ریسکِ بازِ فعلی.
+        # محاسبه‌ی صددرصد محلی (بدونِ شبکه) — مثلِ /api/data_status ارزان است.
+        if u.path == "/api/risk":
+            try:
+                st = _risk_settings()
+                rows = _journal_rows(_JR_FILE) or []
+                day = RK.daily_state(rows, st) if RK is not None else {}
+                return self._send(200, json.dumps({
+                    "ok": RK is not None,
+                    "settings": st,
+                    "daily": day,
+                    "journal_file": _JR_FILE,
+                    "settings_file": (RK.settings_path() if RK is not None else None),
+                }, ensure_ascii=False))
+            except Exception as e:
+                traceback.print_exc()
+                return self._send(200, json.dumps(
+                    {"ok": False, "error": str(e)}, ensure_ascii=False))
         # نشانگرِ بازنگری: چه کدی بار شده، دیسک چه دارد، و آیا پروسه کهنه است
         if u.path == "/api/revision":
             try:
@@ -2703,6 +3138,37 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         u = urlparse(self.path)
+        # ذخیره‌ی تنظیماتِ ریسک (سرمایه/درصد/سقف‌ها) — تا در دفترِ ریسک بماند و
+        # بعد از هر ری‌استارتِ خودکارِ اپ دوباره از دست نرود.
+        if u.path == "/api/risk":
+            try:
+                if RK is None:
+                    return self._send(200, json.dumps(
+                        {"error": "ماژولِ ریسک بار نشد"}, ensure_ascii=False))
+                ln = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(ln) if ln else b"{}"
+                d = json.loads(body.decode("utf-8"))
+                cur = RK.load_settings()
+                for k in ("balance", "risk_pct", "daily_loss_limit_pct",
+                          "max_open_risk_pct"):
+                    if d.get(k) is not None and str(d.get(k)).strip() != "":
+                        cur[k] = d[k]
+                if d.get("account_ccy"):
+                    cur["account_ccy"] = str(d["account_ccy"]).upper()[:3]
+                if isinstance(d.get("usd_per_quote"), dict):
+                    cur["usd_per_quote"] = dict(cur.get("usd_per_quote") or {}, **d["usd_per_quote"])
+                RK.save_settings(cur)
+                st = RK.load_settings()
+                rows = _journal_rows(_JR_FILE) or []
+                return self._send(200, json.dumps({
+                    "ok": True, "settings": st,
+                    "daily": RK.daily_state(rows, st),
+                    "settings_file": RK.settings_path(),
+                }, ensure_ascii=False))
+            except Exception as e:
+                traceback.print_exc()
+                return self._send(200, json.dumps(
+                    {"error": str(e)}, ensure_ascii=False))
         if u.path == "/api/screenshot":
             return self._handle_upload()
         if u.path == "/api/alarm":
@@ -2767,7 +3233,7 @@ class Handler(BaseHTTPRequestHandler):
                 sl=str(p.get("sl", "")),
                 tp=str(p.get("tp", "")),
                 rr=str(p.get("rr", "")),
-                risk_pct="1",
+                risk_pct=str((_risk_settings().get("risk_pct", 1.0))),
                 setup=f"{d.get('style','')} · درجه {d.get('grade','')} · "
                       f"امتیاز {d.get('score','')}/{d.get('max_score','')}",
                 poi=(p.get("poi") or ""),

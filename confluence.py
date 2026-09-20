@@ -140,6 +140,30 @@ def score(symbol, tfs, d=None):
     pd_src = d.get(pd_tf, {}).get("premium_discount") or {}
     ote = ote_zone(pd_src, direction, price)
 
+    # --- 0. صداقتِ داده: تازگی + باز بودنِ بازار (مبنای همه‌ی معیارهای بعدی) ---
+    # پلنی که روی دادهٔ کهنه یا بازارِ بسته ساخته شود «سیگنالِ ورود» نیست؛ فرضِ
+    # ورود «الان» در حالی که هیچ کندلِ تازه‌ای نیست، خطای اجرایی است.
+    ltf_data = (d.get(ltf, {}) or {}).get("data") or {}
+    dstate = ltf_data.get("state")
+    market_closed = (dstate == "closed")
+    market_thin = (dstate in ("delayed", "thin"))
+    if dstate == "open":
+        row("تازگیِ داده و باز بودنِ بازار", True, 1.0,
+            f"دادهٔ {ltf} تازه است — آخرین کندلِ بسته {ltf_data.get('age_human', '—')} پیش "
+            f"(نیویورک {ltf_data.get('et_now', '—')})")
+    elif market_thin:
+        checklist.append({"name": "تازگیِ داده و باز بودنِ بازار", "status": "◐",
+                          "weight": 1.0, "got": 0.5,
+                          "detail": ltf_data.get("reason", "داده کمی عقب‌تر از حدِ معمول است")})
+        pts += 0.5
+    elif market_closed:
+        row("تازگیِ داده و باز بودنِ بازار", False, 1.0,
+            (ltf_data.get("reason", "بازار بسته است") +
+             (f" · آخرین کندلِ بسته: {ltf_data.get('last_bar_utc', '—')} UTC"
+              if ltf_data.get("last_bar_utc") else "")))
+    else:
+        row("تازگیِ داده و باز بودنِ بازار", None, 1.0, "وضعیتِ داده در پاسخ نیست")
+
     # --- 1. HTF bias clarity ---
     row("بایاسِ تایم‌فریم بالا واضح", htf_bias != 0, 1.0,
         f"{htf} = {bias_word[htf_bias]}" if htf_bias else f"{htf} خنثی/رِنج — لبه‌ی جهت‌دار ضعیف")
@@ -452,6 +476,13 @@ def score(symbol, tfs, d=None):
     if direction == 0:
         grade = "بدونِ معامله"
         verdict = "بایاس نامشخص است؛ منتظرِ ساختارِ واضح بمان."
+    elif market_closed:
+        # گیتِ صداقت: روی بازارِ بسته هیچ‌چیز «قابلِ اجرا» نیست — پلن برای سشنِ بعدی
+        # آماده می‌شود. پیش‌تر اپ روی دادهٔ بستهٔ جمعه هم درجهٔ قابلِ اجرا می‌داد.
+        grade = "C"
+        verdict = ("⏸ بازار بسته است — " + ltf_data.get("reason", "داده تازه نیست") + ". "
+                   "این تحلیل «آماده‌سازیِ سناریو» است، نه سیگنالِ ورود: پلنِ زیر برای "
+                   "سشنِ بعدی است. نزدیکِ بازشدن دوباره تحلیل کن و منتظرِ کندلِ تازه بمان.")
     elif location_bad:
         # قیمت در محلِ اشتباه است — حتی با ساختارِ خوب، ورودِ الان ممنوع
         grade = "C"
@@ -477,6 +508,19 @@ def score(symbol, tfs, d=None):
     else:
         grade = "بدونِ معامله"; verdict = "شرایطِ کافی برقرار نیست — صبر کن."
 
+    # سقفِ درجه در حالتِ «داده عقب‌تر از حدِ معمول / سشنِ نازک»: A و A+ فقط روی دادهٔ
+    # تازه معنا دارند؛ وگرنه سطحِ نخوابیده.
+    if market_thin and grade in ("A+", "A"):
+        grade = "B"
+        verdict = "◐ " + verdict + " [سقفِ B: " + ltf_data.get("reason", "داده عقب است") + "]"
+
+    # پلن فقط وقتی «الان قابلِ اجرا» است که بازار باز و داده تازه باشد؛ وگرنه صریح
+    # علامت می‌خورد تا در رابط/ژورنال/آلارم اشتباه گرفته نشود.
+    if plan:
+        plan["executable_now"] = bool(dstate == "open")
+        if dstate != "open":
+            plan["blocked_reason"] = ltf_data.get("reason") or "بازار بسته یا داده کهنه"
+
     return {
         "symbol": symbol,
         "timeframes": tfs,
@@ -492,14 +536,22 @@ def score(symbol, tfs, d=None):
         "ote": ote,
         "killzone": d.get(ltf, {}).get("killzone"),
         "news_gate": gate_status,
+        # وضعیتِ داده در تایم‌فریمِ ورود + همان بلوک برای همه‌ی تایم‌فریم‌ها
+        # (API و رابط هر دو از همین می‌خوانند؛ هیچ‌جای دیگری محاسبه‌ی موازی نیست).
+        "data": ltf_data,
+        "data_by_tf": {tf_: (x.get("data") or {})
+                       for tf_, x in d.items()
+                       if isinstance(x, dict) and "error" not in x},
         "entry_stamp": _entry_stamp(direction, plan, price, ratio, seq_ok,
                                     ltf_disp, ltf_choch, fresh_sweep, conflict,
-                                    wrong_zone),
+                                    wrong_zone,
+                                    market_ok=not market_closed,
+                                    market_reason=(ltf_data.get("reason") if market_closed else None)),
     }
 
 
 def _entry_stamp(direction, plan, price, ratio, seq_ok, ltf_disp, ltf_choch,
-                 fresh_sweep, conflict, wrong_zone):
+                 fresh_sweep, conflict, wrong_zone, market_ok=True, market_reason=None):
     """مهرِ تاییدِ ورودِ اختیاری (خواسته‌ی کاربر: نمره > ۷۰٪).
 
     مدلِ عرضه/تقاضای ویدیوی Smart Risk (استخراج‌شده و بک‌تست‌شده، نه کپیِ ادعای
@@ -522,6 +574,11 @@ def _entry_stamp(direction, plan, price, ratio, seq_ok, ltf_disp, ltf_choch,
         return {"stamped": False, "threshold_pct": thr,
                 "reasons": ["پلنِ معتبرِ RR ≥ ۱:۲ ساخته نشد یا جهت نامشخص است"]}
     ok = True
+    # ۰) بازار باید باز و داده تازه باشد؛ مهرِ «ورود» روی بازارِ بسته/دادهٔ کهنه
+    #    تناقض است (پلن آن‌وقت «آماده‌سازی» است، نه اجازه‌ی ورود).
+    if not market_ok:
+        ok = False
+        reasons.append(market_reason or "بازار بسته است یا داده کهنه — مهرِ ورود صادر نمی‌شود")
     # ۱) آستانه‌ی نمره
     pct = round(ratio * 100, 1)
     if pct <= thr:

@@ -33,10 +33,13 @@ const BROWSER = process.env.PF_BROWSER || "";
    (قراردادِ ۵۳ کلید) و اسموک‌تستِ CI چک می‌کنند — این تست سراغِ رندرِ واقعی می‌رود. */
 const REQUIRED = ["go", "bt", "sym", "syms", "styles", "chips", "refreshBtn",
   "archiveBtn", "fundBtn", "sbBtn", "setupsBtn", "result", "btPanel",
-  "setupsPanel", "alarmsDock", "tvBox", "shotGrid", "lightbox", "revChip"];
+  "setupsPanel", "alarmsDock", "tvBox", "shotGrid", "lightbox", "revChip",
+  "dataChip", "riskPanel", "rkBalance", "rkRisk", "rkDaily", "rkOpen",
+  "rkStat", "rkSave"];
 /* کنترل‌هایی که اپ با `.onclick =` به آن‌ها هندلر می‌دهد؛ اگر این‌ها تابع نباشند
    یعنی بلوکِ اسکریپت اجرا نشده یا نیمه‌کاره مرده است. */
-const WIRED = ["go", "refreshBtn", "bt", "setupsBtn", "fundBtn", "archiveBtn"];
+const WIRED = ["go", "refreshBtn", "bt", "setupsBtn", "fundBtn", "archiveBtn",
+  "rkSave"];
 /* این‌ها با addEventListener وصل می‌شوند (نه onclick) — با CDP سنجیده می‌شوند. */
 const LISTENER_ONLY = ["sbBtn", "styles"];
 
@@ -205,6 +208,123 @@ function loadPuppeteer() {
       notes.push(`بازنگری: ${(rev.j.loaded || {}).sha || "?"} (دیسک ${(rev.j.disk || {}).sha || "?"}) · چیپ: ${rev.text} · ری‌استارتِ خودکار: ${ar.enabled ? "روشن" : "خاموش"}`);
   } catch (e) {
     fail("بررسیِ نشانگرِ بازنگری ممکن نشد: " + e.message);
+  }
+
+  /* ۶.۵) سنِ داده و باز/بسته بودنِ بازار — هم اندپوینت و هم چیپِ رابط.
+     این بخش خلافِ رگرسیونِ «تحلیل روی کندلِ ناقص/بازارِ بسته» را می‌گیرد: پاسخِ
+     تحلیل باید بلوکِ data داشته باشد، کندلِ تحلیل‌شده **بسته** باشد (forming=false)،
+     و چیپِ داده نباید متنِ جانشینِ اولیه بماند. */
+  try {
+    const ds = await page.evaluate(async () => {
+      const r = await fetch("/api/data_status", { cache: "no-store" });
+      const j = await r.json();
+      const el = document.getElementById("dataChip");
+      return { j, text: el ? el.textContent.trim() : null };
+    });
+    if (!ds.j || ds.j.ok !== true) fail("اندپوینتِ /api/data_status جوابِ سالم نداد: " + JSON.stringify(ds.j));
+    if (!ds.j.killzone) fail("وضعیتِ کیل‌زون در /api/data_status نیست");
+    if (ds.j.fresh && ds.j.fresh.forming)
+      fail("سنِ داده روی یک کندلِ **در حالِ تشکیل** حساب شده — تحلیل باید فقط کندلِ بسته را ببیند");
+    if (ds.j.analyzed) {
+      // ماشینی که قبلاً تحلیل ثبت کرده: چیپ باید با اندپوینت پر شده باشد
+      if (!ds.text || ds.text === "داده …" || ds.text === "⚪ داده؟")
+        fail("چیپِ داده با اندپوینت پر نشد (متن: " + JSON.stringify(ds.text) + ")");
+    } else {
+      // رانرِ تازه: هنوز هیچ تحلیلی ثبت نشده، پس «⚪ داده؟» وضعیتِ **درست** است،
+      // نه خرابیِ چیپ. چکِ واقعیِ پر شدن چیپ بعد از تحلیل، پایین‌تر (بعد از ۶.۶) می‌آید.
+      notes.push("هنوز تحلیلی ثبت نشده — چیپ درست است که «⚪ داده؟» بماند");
+    }
+    notes.push(`وضعیتِ داده: ${ds.text} · کیل‌زون: ${ds.j.killzone}`);
+  } catch (e) {
+    fail("بررسیِ چیپِ سنِ داده ممکن نشد: " + e.message);
+  }
+
+  /* ۶.۶) یک تحلیلِ واقعی روی کریپتو (۲۴/۷): بلوکِ data باید در پاسخ باشد و فقط
+     کندلِ بسته را تحلیل کرده باشد. حالتِ بازار روی رانرِ CI بسته/باز متفاوت است،
+     پس این‌جا روی «باز بودن» چسب نمی‌چسبیم — فقط ساختار و بسته‌بودنِ کندل. */
+  try {
+    const an = await page.evaluate(async () => {
+      const r = await fetch("/api/analyze?symbol=BTCUSDT&style=scalp", { cache: "no-store" });
+      const j = await r.json();
+      return { err: j.error || null, data: j.data || null, grade: j.grade || null,
+               plan: j.plan ? { executable_now: j.plan.executable_now } : null,
+               dataByTf: j.data_by_tf || null };
+    });
+    if (an.err) fail("تحلیلِ BTCUSDT خطا داد: " + an.err);
+    else {
+      if (!an.data || !an.data.state) fail("پاسخِ تحلیل بلوکِ data (سنِ داده) ندارد");
+      else {
+        if (an.data.forming) fail("تحلیل روی کندلِ در حالِ تشکیل انجام شده (forming=true)");
+        if (!an.data.last_bar_utc) fail("last_bar_utc در بلوکِ data نیست");
+        if (an.data.state !== "open" && an.plan && an.plan.executable_now === true)
+          fail("بازار بسته/کهنه است ولی پلن «قابلِ اجرا» علامت خورده");
+        notes.push(`تحلیلِ کریپتو: درجه ${an.grade} · وضعیتِ داده ${an.data.state} (${an.data.age_human}) · کندلِ آخر ${an.data.last_bar_utc} UTC`);
+      }
+    }
+    // بلافاصله بعد از یک تحلیل، چیپِ داده باید پر شود (نه متنِ جانشین) — این
+    // همان چیزی است که روی رانرِ تازه قابلِ سنجیدن است.
+    const chipAfter = await page.evaluate(async () => {
+      if (typeof loadData === "function") { try { await loadData(); } catch (e) {} }
+      const el = document.getElementById("dataChip");
+      const r = await fetch("/api/data_status", { cache: "no-store" });
+      const j = await r.json();
+      return { text: el ? el.textContent.trim() : null, analyzed: !!j.analyzed };
+    });
+    if (!chipAfter.analyzed)
+      fail("بعد از یک تحلیل، /api/data_status وضعیتِ تحلیل را نگه نداشت (data_seen خالی ماند)");
+    else if (!chipAfter.text || chipAfter.text === "داده …" || chipAfter.text === "⚪ داده؟")
+      fail("بعد از یک تحلیل، چیپِ داده همچنان خالی است (متن: " + JSON.stringify(chipAfter.text) + ")");
+    else notes.push("چیپِ داده بعد از تحلیل پر شد: " + chipAfter.text);
+  } catch (e) {
+    fail("تحلیلِ کنترلیِ کریپتو ممکن نشد: " + e.message);
+  }
+
+  /* ۶.۷) مدلِ ریسک: پنل باید پر شود (نه متنِ جانشینِ اولیه)، اندپوینت سالم باشد،
+     و مسیرِ ذخیره واقعاً کار کند. نوشتنِ تنظیمات **با همان مقادیرِ فعلی** انجام
+     می‌شود تا اجرای تست، تنظیماتِ کاربر را عوض نکند — فقط مسیرِ نوشتن را می‌سنجد. */
+  try {
+    const rk = await page.evaluate(async () => {
+      const r = await fetch("/api/risk", { cache: "no-store" });
+      const j = await r.json();
+      const st = (document.getElementById("rkStat") || {}).textContent || "";
+      const bal = (document.getElementById("rkBalance") || {}).value;
+      const rp = (document.getElementById("rkRisk") || {}).value;
+      const dl = (document.getElementById("rkDaily") || {}).value;
+      const op = (document.getElementById("rkOpen") || {}).value;
+      return { j, st, bal, rp, dl, op };
+    });
+    if (!rk.j || rk.j.ok !== true)
+      fail("اندپوینتِ /api/risk جوابِ سالم نداد: " + JSON.stringify(rk.j));
+    const s = (rk.j && rk.j.settings) || {};
+    if (!(Number(s.balance) > 0)) fail("سرمایه‌ی پیش‌فرض در /api/risk عددِ مثبت نیست: " + JSON.stringify(s));
+    if (!(Number(s.risk_pct) > 0)) fail("درصدِ ریسکِ پیش‌فرض در /api/risk مثبت نیست: " + JSON.stringify(s));
+    if (!(Number(s.daily_loss_limit_pct) > 0)) fail("سقفِ ضررِ روزانه در /api/risk تنظیم نشده: " + JSON.stringify(s));
+    if (!rk.j.daily || typeof rk.j.daily !== "object") fail("بلوکِ وضعیتِ روزانه (daily) در /api/risk نیست");
+    else {
+      for (const k of ["realized_pct", "limit_pct", "remaining_pct", "open_risk_pct", "open_count"])
+        if (rk.j.daily[k] === undefined) fail(`کلیدِ «${k}» در بلوکِ روزانه‌ی ریسک نیست`);
+    }
+    if (!rk.bal || !rk.rp) fail("کادرهای سرمایه/درصدِ ریسک با اندپوینت پر نشدند");
+    if (!rk.st || rk.st.includes("در حالِ خواندن"))
+      fail("خطِ وضعیتِ ریسک با اندپوینت پر نشد (متن: " + JSON.stringify(rk.st) + ")");
+    if (!rk.st.includes("ریسکِ باز")) fail("خطِ وضعیتِ ریسک، ریسکِ باز را نشان نمی‌دهد");
+    // نوشتن با همان مقادیرِ فعلی — فقط سالم بودنِ مسیر را ثابت می‌کند
+    const wr = await page.evaluate(async (cur) => {
+      const r = await fetch("/api/risk", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(cur),
+      });
+      return await r.json();
+    }, { balance: s.balance, risk_pct: s.risk_pct,
+         daily_loss_limit_pct: s.daily_loss_limit_pct, max_open_risk_pct: s.max_open_risk_pct });
+    if (wr.error) fail("ذخیره‌ی تنظیماتِ ریسک خطا داد: " + wr.error);
+    else if (!(Number((wr.settings || {}).balance) > 0))
+      fail("پاسخِ ذخیره‌ی ریسک تنظیماتِ معتبر برنگرداند: " + JSON.stringify(wr));
+    else if (!wr.settings_file) fail("مسیرِ فایلِ تنظیماتِ ریسک در پاسخِ ذخیره نیست");
+    else notes.push(`ریسک: سرمایه ${s.balance} · ریسکِ هر معامله ${s.risk_pct}٪ · `
+      + `سقفِ روزانه ${s.daily_loss_limit_pct}٪ · ریسکِ باز ${rk.j.daily.open_risk_pct}٪ (${rk.j.daily.open_count} پوزیشن)`);
+  } catch (e) {
+    fail("بررسیِ پنلِ ریسک ممکن نشد: " + e.message);
   }
 
   /* ۷) رفتارِ واقعی: انتخاب از داخلِ پنل باید کادر را پُر کند، دکمه را آماده کند و
