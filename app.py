@@ -1182,10 +1182,6 @@ h1{font-size:22px;margin:0;font-weight:700;letter-spacing:.2px;
   border:1px solid var(--line);border-radius:8px;padding:4px 9px;white-space:nowrap}
 .chiphint{color:var(--muted);font-size:11px;opacity:.85;margin-top:-2px}
 .symwrap{position:relative;flex:1;min-width:200px;display:flex}
-/* اشاره‌ی ملایم به کادرِ نماد وقتی دکمه‌ی بروزرسانی چیزی برای کارکردن ندارد
-   (دو تپشِ نرم، نه تکان — همان زبانِ آرامِ حالت‌های دیگر) */
-@keyframes symnudge{0%,100%{box-shadow:0 0 0 0 rgba(77,163,255,0)}35%{box-shadow:0 0 0 6px rgba(77,163,255,.2)}}
-.inp.nudge{border-color:var(--accent);animation:symnudge 1.15s ease-in-out 2}
 /* پنلِ تنظیماتِ بک‌تست */
 .btpanel{margin-top:14px;border-top:1px dashed var(--line);padding-top:14px;display:flex;
   flex-direction:column;gap:10px}
@@ -1369,7 +1365,6 @@ tr.on td{background:rgba(34,197,94,.05)}
   .rf-btn.loading .rf-spin svg,.rf-btn.loading .rf-arc{animation:none}
   .rf-btn.loading .rf-arc{stroke-dasharray:30 27}
   .spin,.rf-btn.loading .rf-spin{animation:rfsoft 1.6s ease-in-out infinite}
-  .inp.nudge{animation:none;border-color:var(--accent)}
 }
 @keyframes rfsoft{0%,100%{opacity:.45}50%{opacity:1}}
 /* مودالِ عمومی (پنجره‌ی آرشیو و …) */
@@ -1506,7 +1501,7 @@ tr.on td{background:rgba(34,197,94,.05)}
       <button id="sbBtn" class="sb-btn" title="استراتژیِ سیلوربولتِ نیویورک روی تایمِ ۱ دقیقه — فقط در پنجره‌ی ۰۹:۰۰ تا ۱۱:۰۰ به‌وقتِ نیویورک معتبر است (اوجِ فعالیتِ روز). با کلیک، سبک روی این استراتژی می‌رود، تحلیلِ ۱m اجرا می‌شود و تایمرِ ساعتِ ۹ نمایش داده می‌شود.">🎯 سیلوربولت نیویورک</button>
       <button id="setupsBtn" class="setups-btn" title="سه ستاپِ پیشنهادیِ اسکلپ با وضعیتِ زنده: 🟢 تأییدِ قوی · 🟡 منتظرِ شرایط · 🔴 شرایط نیست. چراغ‌ها از آخرین تحلیل به‌روز می‌شوند؛ با کلیک روی هر ردیف مسیرِ ستاپ باز می‌شود.">📚 ستاپ‌ها</button>
       <button id="fundBtn" class="fund-btn" title="اخبارِ اقتصادیِ پرتأثیر (GDP، تورم، اشتغال، نرخِ بهره) یک روز پیش از اعلام — ساعتِ دقیقِ اعلام به‌وقتِ نیویورک و تهران، به‌همراهِ تحلیلِ اثرِ هر خبر روی جفت‌ارزهای مهم و طلا/نقره. با کلیک، صفحه‌ی جداگانه‌ی فاندمنتال در تبِ نو باز می‌شود.">📰 فاندمنتال</button>
-      <button id="refreshBtn" class="rf-btn" title="همان نمادِ آخرین تحلیل را دوباره با دیتای زنده می‌گیرد — بدونِ رفرشِ کلِ صفحه. از همان بارگذاری فعال است: اگر نمادی تحلیل یا انتخاب شده باشد همان را بازتازه می‌کند، وگرنه اول تو را به انتخابِ نماد راهنمایی می‌کند.">
+      <button id="refreshBtn" class="rf-btn" title="همان نمادِ آخرین تحلیل را دوباره با دیتای زنده می‌گیرد — بدونِ رفرشِ کلِ صفحه. از همان بارگذاری فعال است: اگر در این صفحه تحلیلی باشد همان را با دیتای زنده بازتازه می‌کند، وگرنه آخرین تحلیلِ ثبت‌شده را می‌گیرد؛ اگر چیزی نباشد فقط پیام می‌دهد — پنجره‌ای باز نمی‌کند.">
         <span class="rf-slot" aria-hidden="true">
           <span class="rf-ico"><svg viewBox="0 0 24 24"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></span>
           <span class="rf-spin"><svg viewBox="0 0 24 24"><circle class="rf-track" cx="12" cy="12" r="9"/><circle class="rf-arc" cx="12" cy="12" r="9"/></svg></span>
@@ -1724,26 +1719,42 @@ if(refreshBtn){
   const rfSay=s=>{ if(rfLive) rfLive.textContent=s||""; };
   // دکمه از همان بارگذاری فعال می‌ماند: کلیکِ بی‌نماد باید پاسخِ روشن بدهد، نه سکوت.
   // (قبلاً دکمه disabled بود و کلیک هیچ واکنشی نداشت — به‌نظرِ «دکمهٔ خراب» می‌آمد.)
-  const rfNudge=()=>{
-    symIn.focus();
-    // فهرستِ نمادها را در نوبتِ بعد باز می‌کنیم: شنونده‌ی document روی همین کلیک
-    // پنل را می‌بندد (کلیک بیرونِ کادر)، پس بازکردنِ فوری بی‌اثر می‌شد.
-    setTimeout(openPick, 0);
-    symIn.classList.remove("nudge"); void symIn.offsetWidth;   // ری‌استارتِ انیمیشن
-    symIn.classList.add("nudge");
-    setTimeout(()=>symIn.classList.remove("nudge"), 2500);
+  // هیچ پنجره/فوکوسی را نمی‌قاپد: فقط پیام می‌دهد. (بازکردنِ فهرستِ نمادها روی کلیکِ
+  // «بروزرسانی» خودِ تجربه را خراب می‌کرد — خواستهٔ کاربر: دکمه باید خودش کار کند.)
+  const rfTell=()=>{
+    if(res && !res.innerHTML.trim())
+      res.innerHTML='<div class="status">چیزی برای بروزرسانی نیست: در این صفحه هنوز تحلیلی ثبت نشده و کادرِ نماد هم خالی است. یک نماد را در کادرِ بالا بنویس (یا از فهرست انتخاب کن) و بعد همین دکمه را بزن.</div>';
+    rfSay("چیزی برای بروزرسانی نیست — اول یک نماد را انتخاب یا تحلیل کن.");
+    refreshBtn.title="هنوز چیزی برای بروزرسانی نیست؛ اول یک نماد را تحلیل کن.";
+  };
+  // اگر این صفحه تحلیلی ندارد، از حافظه‌ی سرور استفاده کن: آخرین تحلیلِ ثبت‌شده (حتی
+  // از نشستِ قبلی) — پس «بروزرسانی» روی اپِ تازه‌باز هم کاری برای انجام دارد.
+  const rfRemembered=async ()=>{
+    let a=window._lastSeen||null;
+    if(!a){
+      try{ const r=await fetch("/api/data_status",{cache:"no-store"});
+           a=((await r.json())||{}).analyzed||null; }catch(e){ a=null; }
+    }
+    return (a&&a.symbol)?a:null;
+  };
+  const rfSetStyle=k=>{
+    if(!k) return;
+    style=k;
+    const b=document.querySelector('#styles button[data-k="'+k+'"]');
+    if(b){
+      document.querySelectorAll("#styles button").forEach(x=>x.classList.remove("active"));
+      const sb=document.getElementById("sbBtn"); if(sb) sb.classList.remove("active");
+      b.classList.add("active");
+    }
   };
   refreshBtn.onclick=async ()=>{
     if(refreshBtn.classList.contains("loading")) return;       // یک درخواست در هر لحظه
-    const sym=(window._last&&window._last.symbol)||symIn.value.trim();
+    let sym=(window._last&&window._last.symbol)||symIn.value.trim();
     if(!sym){
-      rfNudge();
-      if(res && !res.innerHTML.trim())
-        res.innerHTML='<div class="status">برای «بروزرسانی» اول یک نماد لازم است: نامش را در کادرِ بالا بنویس یا از فهرست یکی را انتخاب کن؛ بعد همین دکمه همان نماد را با دیتای زنده دوباره تحلیل می‌کند.</div>';
-      rfSay("برای بروزرسانی اول یک نماد انتخاب کن — کادرِ نماد فعال شد.");
-      refreshBtn.title="اول یک نماد را انتخاب یا تحلیل کن؛ بعد این دکمه همان نماد را با دیتای تازه دوباره تحلیل می‌کند.";
-      return;
+      const a=await rfRemembered();
+      if(a){ sym=a.symbol; rfSetStyle(a.style||a.style_key); }
     }
+    if(!sym){ rfTell(); return; }
     symIn.value=sym;
     refreshBtn.disabled=true;
     refreshBtn.classList.remove("ok");
@@ -2528,6 +2539,7 @@ async function loadData(){
     const r=await fetch("/api/data_status",{cache:"no-store"});
     const j=await r.json();
     const f=j.fresh||{}, a=j.analyzed||{};
+    window._lastSeen=(a&&a.symbol)?a:null;   // حافظهٔ آخرین تحلیل (برای دکمه‌ی بروزرسانی)
     const st=f.state||a.state;
     const icon = st==="open"?"🟢" : st==="closed"?"🔴" : st?"🟡":"⚪";
     const label = st==="open"?"داده زنده" : st==="closed"?"بازار بسته" : st==="thin"?"سشنِ نازک" : st==="delayed"?"داده عقب" : "داده؟";
@@ -3371,11 +3383,21 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", type=int, default=8787)
-    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PIPFOUND_PORT", "8787")))
+    ap.add_argument("--host", default=os.environ.get("PIPFOUND_HOST", "127.0.0.1"),
+                    help="127.0.0.1 = فقط همین دستگاه · 0.0.0.0 = باز برای LAN (برای نصب روی موبایل/دستگاه‌های دیگر)")
     ap.add_argument("--no-autorestart", action="store_true",
                     help="ری‌استارتِ خودکارِ «کدِ کهنه» را خاموش کن (پیش‌فرض: روشن)")
+    ap.add_argument("--lan", action="store_true",
+                    help="میان‌برِ میزبانیِ شبکه‌ی خانگی: host=0.0.0.0 + HTTPSِ خودگواهی‌شده + توکنِ دسترسی (اگر PIPFOUND_TOKEN ست نباشد یکی می‌سازد)")
+    ap.add_argument("--token", default=os.environ.get("PIPFOUND_TOKEN", ""),
+                    help="توکنِ دسترسی برای میزبانیِ LAN (بدونِ توکن، هر دستگاهِ داخلِ شبکه می‌تواند همه‌چیز را ببیند و ژورنال را بنویسد)")
     a = ap.parse_args()
+    if a.lan:
+        a.host = "0.0.0.0"
+        if not a.token:
+            import secrets
+            a.token = secrets.token_urlsafe(12)
     if a.no_autorestart:
         _REV_WATCH["enabled"] = False
     # بدونِ -u خروجیِ ریدایرکتشده به فایل بافر می‌شود و لاگ‌ها (از جمله خطِ
