@@ -327,6 +327,121 @@ function loadPuppeteer() {
     fail("بررسیِ پنلِ ریسک ممکن نشد: " + e.message);
   }
 
+  /* ۶.۸) دکمه‌ی «بروزرسانی»: حالتِ «در حالِ کار» باید با نشانگرِ ساخته‌شده و
+     انیمیشنِ نرم نشان داده شود، نه با گلیفِ متنیِ چرخان (خواسته‌ی کاربر: نمایشِ
+     باکلاس، نه چرخشِ بچه‌گانه). در حالتِ عادی هم نشانگر باید پنهان باشد و اندازه‌ی
+     دکمه تغییر نکند — وگرنه نوارِ ابزار می‌پرد. */
+  try {
+    /* قراردادِ سخت‌گیرانه: چرخشِ *خطی* (easing در هر دور تند-و-کند می‌شود و آماتوری
+       به‌نظر می‌رسد)، دُمِ نفس‌کش، نبودِ افکت‌های تصویریِ اضافه (نورِ گذری/نوارِ خزنده)،
+       روشن‌بودنِ دکمه در حینِ کار (نه محوِ disabled) و اندازه‌ی ثابت.
+       عمداً بعد از هر تغییرِ کلاس کمی صبر می‌کنیم تا از پلِ ترنزیشن رد شویم؛ وگرنه
+       getComputedStyle مقدارِ *قبل از تغییر* را برمی‌گرداند و تست بی‌دلیل رد می‌شود. */
+    const rf = await page.evaluate(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const b = document.getElementById("refreshBtn");
+      if (!b) return { missing: "دکمه" };
+      const spin = b.querySelector(".rf-spin"), ico = b.querySelector(".rf-ico"),
+            arc = b.querySelector(".rf-arc"), chk = b.querySelector(".rf-check");
+      if (!spin || !ico || !arc || !chk) return { missing: "اسلاتِ نشانگر/گلیف/تیک" };
+      const was = b.disabled;
+      const idle = { spin: +getComputedStyle(spin).opacity, ico: +getComputedStyle(ico).opacity,
+                     width: Math.round(b.getBoundingClientRect().width),
+                     border: getComputedStyle(b).borderTopColor };
+      // دکمه در حینِ کار واقعاً disabled است؛ همان مسیر را می‌سنجیم.
+      b.disabled = true;
+      b.classList.add("loading");
+      await wait(340);
+      const svg = getComputedStyle(spin.querySelector("svg"));
+      const loading = {
+        spin: +getComputedStyle(spin).opacity, ico: +getComputedStyle(ico).opacity,
+        opacity: +getComputedStyle(b).opacity, cursor: getComputedStyle(b).cursor,
+        spinAnim: svg.animationName, spinEase: svg.animationTimingFunction,
+        arcAnim: getComputedStyle(arc).animationName,
+        bar: getComputedStyle(b, "::before").content,
+        sheen: getComputedStyle(b, "::after").content,
+        border: getComputedStyle(b).borderTopColor, shadow: getComputedStyle(b).boxShadow,
+        width: Math.round(b.getBoundingClientRect().width),
+      };
+      b.classList.remove("loading");
+      b.classList.add("ok");
+      await wait(320);
+      const ok = { spin: +getComputedStyle(spin).opacity, check: +getComputedStyle(chk).opacity,
+                   draw: getComputedStyle(chk.querySelector("path")).animationName };
+      b.classList.remove("ok");
+      b.disabled = was;
+      return { idle, loading, ok };
+    });
+    if (rf.missing) fail("ساختارِ دکمه‌ی بروزرسانی ناقص است: " + rf.missing + " پیدا نشد");
+    else {
+      if (rf.idle.spin > 0.05) fail("نشانگرِ دکمه‌ی بروزرسانی در حالتِ عادی دیده می‌شود");
+      if (rf.idle.ico < 0.9) fail("گلیفِ دکمه‌ی بروزرسانی در حالتِ عادی دیده نمی‌شود");
+      if (rf.loading.spin < 0.9) fail("در حالتِ کار، نشانگرِ دکمه‌ی بروزرسانی دیده نمی‌شود");
+      if (rf.loading.ico > 0.05)
+        fail("در حالتِ کار، گلیفِ دکمه کنار نمی‌رود (یعنی چرخشِ گلیفِ متنی برگشته)");
+      if (!/rfrot/.test(rf.loading.spinAnim))
+        fail("حلقه‌ی نشانگرِ دکمه نمی‌چرخد (animationName=" + rf.loading.spinAnim + ")");
+      if (!/linear/.test(rf.loading.spinEase))
+        fail("چرخشِ حلقه easing دارد و در هر دور تند-و-کند می‌گردد (timingFunction="
+          + rf.loading.spinEase + ") — باید linear باشد");
+      if (!/rfdash/.test(rf.loading.arcAnim))
+        fail("کمانِ نشانگرِ دکمه انیمیشنِ دُمِ نفس‌کش ندارد (animationName=" + rf.loading.arcAnim + ")");
+      if (rf.loading.bar && rf.loading.bar !== "none")
+        fail("افکتِ نوارِ خزنده به دکمه برگشته — قراردادِ «حالت، نه افکت» شکست");
+      if (rf.loading.sheen && rf.loading.sheen !== "none")
+        fail("افکتِ عبورِ نور به دکمه برگشته — قراردادِ «حالت، نه افکت» شکست");
+      if (rf.loading.opacity < 0.99)
+        fail("در حینِ کار دکمه محو می‌شود (opacity=" + rf.loading.opacity
+          + ") — وضعیتِ کار باید روشن دیده شود");
+      if (rf.loading.border === rf.idle.border)
+        fail("در حینِ کار حاشیه‌ی دکمه تغییر نمی‌کند (حالتِ کار از حالتِ عادی جدا نیست)");
+      if (!rf.loading.shadow || rf.loading.shadow === "none")
+        fail("حالتِ کار هاله/سایه‌ی ملایم ندارد");
+      if (rf.loading.width !== rf.idle.width)
+        fail(`اندازه‌ی دکمه‌ی بروزرسانی در حالتِ کار عوض می‌شود (${rf.idle.width} → ${rf.loading.width})`);
+      if (rf.ok.check < 0.9) fail("در حالتِ تأیید، تیکِ پایانِ دکمه دیده نمی‌شود");
+      if (rf.ok.spin > 0.05) fail("در حالتِ تأیید، حلقه‌ی نشانگر کنار نمی‌رود");
+      if (!/rfdraw/.test(rf.ok.draw))
+        fail("تیکِ تأیید «کشیده» نمی‌شود (animationName=" + rf.ok.draw + ")");
+      notes.push(`دکمه‌ی بروزرسانی: حلقه‌ی ${rf.loading.spinAnim} (${rf.loading.spinEase}) + دُمِ `
+        + `${rf.loading.arcAnim} · ${rf.loading.cursor} · بدونِ افکتِ اضافه · اندازه ثابت (${rf.loading.width}px)`);
+    }
+
+    /* ۶.۸.۱) دسترسی‌پذیری: با «کاهشِ حرکت»، چرخش باید خاموش شود ولی نشانگر *بماند*
+       (تپشِ نرم) — نه اینکه کلِ بازخوردِ کار ناپدید شود. */
+    if (typeof page.emulateMediaFeatures === "function") {
+      await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }]);
+      const rm = await page.evaluate(async () => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        const b = document.getElementById("refreshBtn");
+        b.classList.add("loading");
+        await wait(140);
+        const spin = b.querySelector(".rf-spin"), st = document.querySelector(".spin");
+        const out = {
+          svgAnim: getComputedStyle(spin.querySelector("svg")).animationName,
+          spinAnim: getComputedStyle(spin).animationName,
+          spinOpacity: +getComputedStyle(spin).opacity,
+          statusAnim: st ? getComputedStyle(st).animationName : "n/a",
+          statusOpacity: st ? +getComputedStyle(st).opacity : 1,
+        };
+        b.classList.remove("loading");
+        return out;
+      });
+      await page.emulateMediaFeatures([]);
+      if (rm.svgAnim !== "none")
+        fail("با «کاهشِ حرکت»، حلقه‌ی دکمه هنوز می‌چرخد (animationName=" + rm.svgAnim + ")");
+      if (!/rfsoft/.test(rm.spinAnim))
+        fail("با «کاهشِ حرکت»، نشانگرِ دکمه به تپشِ نرم برنمی‌گردد (animationName=" + rm.spinAnim + ")");
+      if (rm.spinOpacity < 0.2)
+        fail("با «کاهشِ حرکت»، نشانگرِ دکمه کاملاً ناپدید می‌شود (opacity=" + rm.spinOpacity + ")");
+      if (rm.statusAnim !== "n/a" && !/rfsoft/.test(rm.statusAnim))
+        fail("با «کاهشِ حرکت»، نشانگرِ خطِ وضعیت نمی‌چرخد ولی به تپشِ نرم هم نمی‌رود");
+      notes.push(`کاهشِ حرکت: چرخش خاموش · نشانگرها تپشِ نرم (${rm.svgAnim}/${rm.statusAnim}) ✓`);
+    }
+  } catch (e) {
+    fail("بررسیِ حالتِ کارِ دکمه‌ی بروزرسانی ممکن نشد: " + e.message);
+  }
+
   /* ۷) رفتارِ واقعی: انتخاب از داخلِ پنل باید کادر را پُر کند، دکمه را آماده کند و
      پنل را ببندد. عمداً روی نمادِ «اندیکس» می‌چسبیم (نه اولین نماد) تا ثابت شود
      دسته‌های تازه هم واقعاً سیم‌کشی شده‌اند، نه فقط پنل را پر کرده‌اند. */
