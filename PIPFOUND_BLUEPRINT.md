@@ -302,7 +302,7 @@ Commits are on `main`, remote `origin`. Farsi commit messages (summarized here i
 - **D9 — ⏳ OPEN. تایم‌فریمِ میانیِ استک‌ها بی‌نقش است:** `score()` فقط `tfs[0]`، `tfs[1]`، `tfs[-1]` را می‌بیند (۱۵m در اسکالپ، ۱h در روزانه).
 - **D10 — ⏳ OPEN. سطوحِ HTF ناقص:** PWH/PWL، PMH/PML، IPDA ۲۰/۴۰/۶۰ روزه، NDOG/NWOG، و اوپنِ ۰۰:۰۰ ET نیستند؛ SMT/جوتاس/کلاسترهای همبستگی فقط **متنِ آموزشی**اند (`macro_context.py`) و محاسبه نمی‌شوند. سطوحِ روزانه برای اندیکس/استاک هم روی تعریفِ سشنِ تقویمی حساب می‌شود (سشنِ آتی ۱۸:۰۰ ET باز می‌شود).
 - **D11 — ⏳ OPEN. تستِ عددیِ موتور نیست:** ۵۶ بررسیِ نگهبان فقط «کلید/مسیر» را می‌سنجد، نه سوینگ/FVG/ساختار/PD را. (تستِ تازه‌ی `data_freshness_test.py` فقط لایهٔ کندلِ بسته/بازار/فعالیت را پوشش می‌دهد.)
-- **D12 — ⏳ OPEN. نصب روی «هر دستگاه» دو دیوارِ سخت دارد:** سرور پیش‌فرض `127.0.0.1` است (`app.py:2798`) و **هیچ پشتیبانیِ TLS ندارد** → سرویس‌ورکر/نصبِ PWA روی مبدأِ ناامن کار نمی‌کند؛ احرازِ هویت هم صفر است. راه‌حل‌ها در `PIPFOUND_AUDIT.md` §۴.
+- **D12 — ✅ CLOSED (PR #20، `main = d249d17`). نصب روی «هر دستگاه» برپا شد:** `--lan` = host 0.0.0.0 + **HTTPSِ خودگواهی‌شده** (openssl؛ سرویس‌ورکر/نصب فقط روی https) + **توکنِ تصادفی** با ورودِ کوکییِ HttpOnly (POST/DELETE بی‌توکن → 401) + پورتِ بوت‌استرپِ HTTP برای ورودِ آسان؛ پنلِ «📲 نصب روی دستگاه» با `beforeinstallprompt` (نصبِ مستقیم کروم/اج)، آدرسِ LAN از `/api/install`، راهنمای هر پلتفرم؛ بنرِ «نسخهٔ تازه» روی `controllerchange`. تستِ ۳۹بررسی‌ایِ `pwa_test.py` لایهٔ ۴.۷ در CI. مانده: QR، Docker، برون‌بری/درون‌بریِ داده.
 
 This is the most valuable section for the next agent. A professional ICT/SMC critique (Huddleston / Priceaction Vinny lens) of the engine. Ordered by impact on output reliability. **Items are candidates to fix properly — resist metric-gaming.**
 
