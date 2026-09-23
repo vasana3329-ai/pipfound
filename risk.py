@@ -586,8 +586,22 @@ def correlation(symbol, sign, open_positions):
             for k, v in exposures(psy, ps).items():
                 net[k] = net.get(k, 0) + v
     stacked = {k: v for k, v in net.items() if abs(v) >= 2}
+    # هم‌جمعی (|خالص| ≥ ۲) = ریسکِ تکراری؛ اما وقتی معامله‌ی جدید روی یک فاکتور
+    # **خلافِ** پوزیشن‌های بازِ موجود جمع شود (مثلِ خریدِ USDJPY در حالی که
+    # EURUSDِ خریدِ باز داری: USD −۱+۱ = ۰، یا فروشِ XAUUSD در حالی که طلا خریدی)،
+    # هشدارِ «تمرکز» معنا ندارد — چیزی که واقعاً باید گفته شود این است که دو
+    # ستاپِ هم‌زمانِ تو خواسته‌ی متضاد از بازار دارند (جنگِ داخلیِ ریسک). خواسته‌ی
+    # کاربر: «برای جفت‌های همبسته تریدِ خلافِ جهتِ هم هشدار بده».
+    # شرطِ درست: سهمِ **بقیه‌ی** پوزیشن‌ها (خالص منفیِ سهمِ خودمان) باید خلافِ
+    # سهمِ خودمان و غیرصفر باشد.
+    stacked_against = {}
+    for k, cv in cand.items():
+        rest = net.get(k, 0) - cv
+        if rest and (cv > 0) != (rest > 0):
+            stacked_against[k] = net.get(k, 0)
     ordered = sorted(stacked.items(), key=lambda kv: -abs(kv[1]))
-    mine, pre = [], []
+    against = sorted(stacked_against.items(), key=lambda kv: -abs(kv[1]))
+    mine, pre, opp = [], [], []
     for k, v in ordered:
         lbl = _factor_label(k)
         # جهت را از سهمِ **خودِ این معامله** روی همان فاکتور می‌سنجیم، نه از جهتِ
@@ -600,6 +614,8 @@ def correlation(symbol, sign, open_positions):
             # این معامله به این فاکتور دست نمی‌زند؛ تمرکز از خودِ پوزیشن‌های باز است.
             # جدا گزارش می‌شود تا به‌اشتباه به این ستاپ نسبت داده نشود.
             pre.append((lbl, v))
+    for k, _v in against:
+        opp.append(_factor_label(k))
     # یک معاملهٔ تکراری (مثلِ طلا) هم روی «فلزات» و هم روی «دلار» جمع می‌شود؛
     # دو موردِ نخست را می‌گوییم و بقیه را در یک سطر جمع می‌کنیم تا بنر خوانا بماند.
     trade_msgs = []
@@ -612,16 +628,41 @@ def correlation(symbol, sign, open_positions):
         extra = "، ".join(f"{lbl} {v:+d}" for lbl, v, _ in mine[2:])
         trade_msgs.append(
             f"و در {len(mine) - 2} فاکتورِ دیگر هم همین تمرکز تکرار می‌شود ({extra})")
+    # هشدارِ «خلافِ جهت روی جفتِ همبسته» — اولویتش بالاتر از تمرکز است چون خطای
+    # منطقی است نه فقط تکرارِ ریسک: دو ستاپِ تو خواسته‌ی متضاد از بازار دارند.
+    # صداقت: اگر خالصِ فاکتور صفر شده باشد می‌گوییم «خنثی می‌کند»؛ اگر فقط کم
+    # شده باشد می‌گوییم «ریسکِ هم را کم می‌کند» (هج ناخواسته).
+    opp_msgs = []
+    # فقط یکی از فاکتورهای متضاد را می‌گوییم: برای هجِ همان نماد (مثلِ فروشِ طلا
+    # در حالی که طلا خریدی) هم «فلزات» و هم «دلار» متضاد می‌شوند و هر دو یک
+    # واقعیت را توصیف می‌کنند — دو سطرِ تکراریِ هشدار، شلوغیِ بی‌دلیل است.
+    if against:
+        k = against[0][0]
+        lbl = _factor_label(k)
+        own_v = cand.get(k, 0)
+        rest_v = net.get(k, 0) - own_v
+        if rest_v == 0 or (own_v > 0) != (rest_v > 0):
+            opp_msgs.append(
+                f"تریدِ خلافِ جهت: این معامله روی فاکتورِ «{lbl}» دقیقاً خلافِ "
+                f"پوزیشن(های) بازِ توست و آن‌ها را خنثی می‌کند — دو ستاپِ هم‌زمانِ "
+                f"تو دو سناریوی متضاد را معامله می‌کنند؛ یکی را انتخاب کن")
+        else:
+            opp_msgs.append(
+                f"تریدِ خلافِ جهت: این معامله روی فاکتورِ «{lbl}» خلافِ پوزیشن(های) "
+                f"بازِ توست — اگر عمداً هج نیست، یک سناریوی متضاد را بیهوده هم‌زمان معامله می‌کنی")
+
     conc = [f"توجه: پوزیشن‌های بازِ تو خودشان روی «{lbl}» تمرکز دارند "
             f"(خالصِ فاکتور {v:+d}) — پیش از ورودِ بعدی این تمرکز را در نظر بگیر"
             for lbl, v in pre[:2]]
     return {
-        # `warnings` همان چیزی است که رابط نشان می‌دهد: اول هشدارِ همین معامله،
-        # بعد تمرکزِ موجود در پوزیشن‌های باز.
-        "warnings": trade_msgs + conc,
+        # `warnings` همان چیزی که رابط نشان می‌دهد — ترتیب: هشدارِ خلافِ جهتِ
+        # هم (خطایِ منطقی، مهم‌تر)، بعد تکرارِ ریسکِ هم‌راستا، بعد تمرکزِ موجود.
+        "warnings": opp_msgs + trade_msgs + conc,
         "trade_warnings": trade_msgs,
+        "opposite_warnings": opp_msgs,
         "open_concentration": conc,
         "stacked": {k: v for k, v in stacked.items()},
+        "stacked_opposite": {k: v for k, v in stacked_against.items()},
         "net": {k: v for k, v in net.items() if v},
         "candidate_exposures": cand,
         "open_count": len([p for p in (open_positions or []) if isinstance(p, dict)]),

@@ -43,6 +43,7 @@ except Exception:
     FUND = None
 try:
     import risk as RK          # مدلِ ریسک: سایزِ پوزیشن، سقفِ روزانه، هم‌بستگی
+    import smt as SMT          # SMT دایورجنس: شکستِ همبستگیِ دو نمادِ همبسته
 except Exception:
     RK = None
 
@@ -290,6 +291,23 @@ def _setup_statuses(r):
                     "why": "شکستِ ساختار انجام شد — منتظرِ پولبک به مبدأِ حرکت (اردربلاک/FVG)"})
     else:
         out.append({"state": "red", "why": "BOS دیسپلیسمنت‌دارِ تازه‌ای در جهتِ روند نیست"})
+
+    # ستاپ ۴ — سوئیپ + SMT دایورجنس (ویدیوی Smart Risk 2026): از بلوکِ SMTِ
+    # همان تحلیل می‌خواند؛ اگر جفتِ همبسته یا داده‌ای نبود، صادقانه زرد/قرمز.
+    smt = (r.get("smt") or {}).get("checked") or {}
+    if smt.get("diverged"):
+        if smt.get("sweep"):
+            out.append({"state": "green",
+                        "why": smt.get("reason", "SMT تأیید شد") + " — سوئیپ هم روی همان نماد انجام شده"})
+        else:
+            out.append({"state": "yellow",
+                        "why": (smt.get("reason", "SMT") ) + " — اما سوئیپِ سمتِ این نماد تازه نیست؛ ورود را روی نمادِ سوئیپ‌کننده بگیر"})
+    elif smt.get("available") is False:
+        out.append({"state": "red",
+                    "why": "این نماد جفتِ همبسته‌ی شناخته‌شده ندارد (جدولِ SMT) — ستاپ قابلِ ارزیابی نیست"})
+    else:
+        out.append({"state": "red",
+                    "why": smt.get("reason") or "SMT دایورجنس بین دو جفتِ همبسته دیده نشد"})
     return out
 
 
@@ -405,7 +423,26 @@ def analyze(symbol, style):
         except Exception:
             macro = None
     r["macro"] = macro
-    # چراغِ زنده‌ی سه ستاپِ اسکلپ (سبز/زرد/قرمز) — از روی چک‌لیستِ همان تحلیل
+    # SMT دایورجنس (ستاپِ چهارم): جفتِ همبستهٔ نماد را روی تایم‌فریمِ ورودِ سبک
+    # می‌سنجد. عمداً همین‌جاست نه در confluence: به دانلودِ نمادِ دوم نیاز دارد
+    # (شبکه) و بک‌تست نباید به‌خاطرِ SMT عوض شود. هر خطایی = بدونِ SMT، نه شکست.
+    smt_block = None
+    try:
+        _dir = 1 if (r.get("bias_by_tf") or {}).get(tfs[0]) == "صعودی" else (
+            -1 if (r.get("bias_by_tf") or {}).get(tfs[0]) == "نزولی" else 0)
+        if _dir:
+            def _smt_fetch(sym):
+                _src, _sym, _disp, _bars = E.fetch(sym, tfs[-1], 200)
+                return _bars
+            smt_block = SMT.check_for(symbol.strip().upper(), _dir, fetch_fn=_smt_fetch)
+        else:
+            smt_block = {"available": bool(SMT.partners(symbol.strip().upper())),
+                         "partners": SMT.partners(symbol.strip().upper()), "checked": None}
+    except Exception as _e:
+        smt_block = {"available": False, "partners": [], "checked": None,
+                     "error": str(_e)}
+    r["smt"] = smt_block
+    # چراغِ زنده‌ی چهار ستاپِ اسکلپ (سبز/زرد/قرمز) — از روی چک‌لیستِ همان تحلیل
     try:
         r["setup_statuses"] = _setup_statuses(r)
     except Exception:
@@ -1520,7 +1557,7 @@ tr.on td{background:rgba(34,197,94,.05)}
       <button id="go" class="go" title="تحلیلِ زنده‌ی همین لحظه: امتیاز، تایم‌فریمِ ورود، پلنِ عددی و درجه را می‌دهد.">تحلیل کن</button>
       <button id="bt" class="go" style="background:#334155" title="بک‌تستِ walk-forward روی داده‌ی تاریخی؛ پنلِ تنظیماتِ بازه/تایم‌فریم/جهت را باز می‌کند.">بک‌تست</button>
       <button id="sbBtn" class="sb-btn" title="استراتژیِ سیلوربولتِ نیویورک روی تایمِ ۱ دقیقه — فقط در پنجره‌ی ۰۹:۰۰ تا ۱۱:۰۰ به‌وقتِ نیویورک معتبر است (اوجِ فعالیتِ روز). با کلیک، سبک روی این استراتژی می‌رود، تحلیلِ ۱m اجرا می‌شود و تایمرِ ساعتِ ۹ نمایش داده می‌شود.">🎯 سیلوربولت نیویورک</button>
-      <button id="setupsBtn" class="setups-btn" title="سه ستاپِ پیشنهادیِ اسکلپ با وضعیتِ زنده: 🟢 تأییدِ قوی · 🟡 منتظرِ شرایط · 🔴 شرایط نیست. چراغ‌ها از آخرین تحلیل به‌روز می‌شوند؛ با کلیک روی هر ردیف مسیرِ ستاپ باز می‌شود.">📚 ستاپ‌ها</button>
+      <button id="setupsBtn" class="setups-btn" title="چهار ستاپِ پیشنهادیِ اسکلپ با وضعیتِ زنده: 🟢 تأییدِ قوی · 🟡 منتظرِ شرایط · 🔴 شرایط نیست. چراغ‌ها از آخرین تحلیل به‌روز می‌شوند؛ با کلیک روی هر ردیف مسیرِ ستاپ باز می‌شود.">📚 ستاپ‌ها</button>
       <button id="fundBtn" class="fund-btn" title="اخبارِ اقتصادیِ پرتأثیر (GDP، تورم، اشتغال، نرخِ بهره) یک روز پیش از اعلام — ساعتِ دقیقِ اعلام به‌وقتِ نیویورک و تهران، به‌همراهِ تحلیلِ اثرِ هر خبر روی جفت‌ارزهای مهم و طلا/نقره. با کلیک، صفحه‌ی جداگانه‌ی فاندمنتال در تبِ نو باز می‌شود.">📰 فاندمنتال</button>
       <button id="refreshBtn" class="rf-btn" title="همان نمادِ آخرین تحلیل را دوباره با دیتای زنده می‌گیرد — بدونِ رفرشِ کلِ صفحه. از همان بارگذاری فعال است: اگر در این صفحه تحلیلی باشد همان را با دیتای زنده بازتازه می‌کند، وگرنه آخرین تحلیلِ ثبت‌شده را می‌گیرد؛ اگر چیزی نباشد فقط پیام می‌دهد — پنجره‌ای باز نمی‌کند.">
         <span class="rf-slot" aria-hidden="true">
@@ -1535,7 +1572,7 @@ tr.on td{background:rgba(34,197,94,.05)}
       <button id="installBtn" class="ab-btn" title="همین اپ را به‌شکلِ آیکونِ مستقل روی گوشی/تبلت/کامپیوتر نصب کن — آدرسِ قابل‌اشتراک و راهنمای هر دستگاه.">📲 نصب روی دستگاه</button>
     </div>
     <div id="setupsPanel" class="setups-panel">
-      <div class="sp-head">📚 سه ستاپِ پیشنهادی <span class="jmsg" id="spState">— اول یک تحلیل بگیر تا چراغ‌ها روشن شوند</span></div>
+      <div class="sp-head">📚 ستاپ‌های پیشنهادی <span class="jmsg" id="spState">— اول یک تحلیل بگیر تا چراغ‌ها روشن شوند</span></div>
       <div id="spList"></div>
     </div>
     <div id="btPanel" class="btpanel">
@@ -2008,6 +2045,21 @@ function render(d){
     </div>`;
   }
 
+  // بلوکِ SMT دایورجنس — بالای بلوکِ ریسک، چون زمینه‌ی حرفه‌ایِ جفت‌های همبسته است
+  const smtBlk = d.smt || null;
+  let smtHtml = "";
+  if (smtBlk && smtBlk.checked) {
+    const c = smtBlk.checked;
+    const cls = c.diverged ? (c.sweep ? "data-ok" : "data-warn") : "data-closed";
+    const ico = c.diverged ? (c.sweep ? "🟢" : "🟡") : "⚪";
+    smtHtml = `<div class="datanote ${cls}">
+      <b>${ico} SMT دایورجنس (${c.symbol} ↔ ${c.partner})</b> — ${c.reason}
+      ${c.diverged && !c.sweep ? `<div class="datanote-why">سوئیپِ لیکوئیدیتی روی این نماد تازه نیست — طبقِ مدل، ورود را روی نمادِ سوئیپ‌کننده (${c.symbol === c.symbol ? c.partner : c.symbol}) بگیر.</div>` : ""}
+    </div>`;
+  } else if (smtBlk && smtBlk.available === false) {
+    smtHtml = `<div class="datanote data-closed"><b>⚪ SMT</b> — این نماد در جدولِ جفت‌های همبسته نیست؛ ستاپِ SMT برایش ارزیابی نمی‌شود.</div>`;
+  }
+
   // بلوکِ ریسک: سقفِ ضررِ روزانه + هشدارِ تمرکز/هم‌بستگی — پیش از پلن خوانده
   // می‌شود تا پلنی که با سقفِ روزانه مسدود شده اشتباه به‌شکلِ سیگنالِ ورود دیده نشود.
   const rk = d.risk || null;
@@ -2164,6 +2216,7 @@ function render(d){
       ${biasStrip?`<span>بایاس: <b>${biasStrip}</b></span>`:""}
     </div>
     ${dataHtml}
+    ${smtHtml}
     ${riskHtml}
     <div class="scorebar"><div class="scorefill" style="width:${pct}%;background:${gradeColor(d.grade)}"></div></div>
     <div class="scoretxt">امتیاز: <b style="color:var(--txt)">${d.score}</b> از ${d.max_score} (${pct}٪)</div>
@@ -2198,7 +2251,9 @@ function render(d){
 }
 
 // ── پنلِ ستاپ‌ها: همیشه بالای صفحه، مستقل از کارتِ نتیجه ──────────────
-// سه ستاپِ بک‌تست‌شده (walk=1200–1500، جمعِ ۲۴ معامله: WR~۶۶٪، totalR +6.49)
+// چهار ستاپ: سه ستاپِ بک‌تست‌شده (walk=1200–1500، جمعِ ۲۴ معامله: WR~۶۶٪، totalR +6.49)
+// + ستاپِ چهارم از ویدیوی Smart Risk 2026 (سوئیپِ سشن + SMT دایورجنس + IFVG/Breaker).
+// آمارِ ستاپ ۴ هنوز ادعایی ندارد (سورسِ عددیِ مستقل نداریم) — صادقانه «—» است.
 const scalpSetups=[
   {t:"۱) پولبک به OTE در امتداد روند (ستاپِ اصلی)",
    wr:"۶۲–۷۰٪", r:"+4.5R (ETH · ۱۰ معامله)",
@@ -2226,13 +2281,22 @@ const scalpSetups=[
          "FVGِ داخلِ حرکتِ شکست پر نشده باشد = هدف و ورودِ هم‌زمان",
          "ورود: لیمیت در اردربلاک/FVG · استاپ زیرِ مبدأِ حرکت (پشتِ ساختار، نه درصدِ ثابت)",
          "هدف: اولین لیکوئیدیتیِ مقابل با کفِ RR ۱:۲"],
-   note:"وین‌ریتِ بالا اما سیگنالِ کمتر — صبورانه، فقط BOSهای دیسپلیسمنت‌دار."}
+   note:"وین‌ریتِ بالا اما سیگنالِ کمتر — صبورانه، فقط BOSهای دیسپلیسمنت‌دار."},
+  {t:"۴) سوئیپ + SMT دایورجنس بین جفت‌های همبسته (مدلِ Smart Risk 2026)",
+   wr:"—", r:"— (آمارِ مستقل هنوز)",
+   path:["در ساعتِ درستِ سشن (اوپنِ لندن/نیویورک — نه وسطِ رِنجِ آرام)، یکی از دو جفتِ همبسته به زونِ HTF (FVGِ پرنشده یا زونِ عرضه/تقاضای سشنِ قبل) می‌رسد یا لیکوئیدیتیِ سشنِ قبلی را سوئیپ می‌کند",
+         "SMT را بین دو جفتِ درست ببین (EURUSD↔GBPUSD · SPX500↔NAS100 · XAUUSD↔XAGUSD · AUDUSD↔NZDUSD): یکی سقفِ بالاتر/کفِ پایین‌تر می‌زند و لیکوئیدیتی را می‌گیرد، دیگری رهایش می‌کند",
+         "برو روی 1m؛ ورود: IFVG — فیرولیوگپی که خلافِ جهتِ سوئیپ نقض و معکوس شده، به‌عنوانِ مقاومت/حمایتِ جدید. روی 5m: بریکر یا میدیگشن بلاکِ بعد از حرکتِ دستکاری",
+         "تأییدِ MSS هم‌جهت، در همان تایم‌فریمِ ورود، بعد از سوئیپ",
+         "ورود: کلوزِ کندلِ بعد از IFVG، یا لیمیت روی مرزِ دورِ IFVG / پایینِ بریکر · استاپ پشتِ فتیله‌ی سوئیپ",
+         "هدف: نزدیک‌ترین لیکوئیدیتیِ مقابل روی تایم‌فریمِ ورود، یا میدرِنج/کفِ سشنِ آسیا؛ یا RR ثابتِ ۲.۵–۳R. ورود را روی نمادِ **سوئیپ‌کننده** بگیر، نه هر دو"],
+   note:"چراغِ سبز یعنی دایورجنس + سوئیپ با هم؛ اگر فقط دایورجنس باشد زرد است (ورود روی نمادِ سوئیپ‌کننده). ستاپِ مکملِ سه ستاپِ قبل — نه جایگزینشان."}
 ];
 function renderSetups(statuses){
   const list=document.getElementById("spList");
   const state=document.getElementById("spState");
   if(!list) return;
-  const st = statuses || [null,null,null];
+  const st = statuses || [null,null,null,null];
   if(state){
     if(statuses){
       state.textContent=`— آخرین تحلیل: ${(window._last&&window._last.symbol)||""} · ${new Date().toLocaleTimeString("fa-IR")}`;
