@@ -9,11 +9,14 @@
      استاتیکِ دامنه هم می‌زند: هر تابعی که در صفحه **صدا زده شده ولی هیچ‌جا
      تعریف نشده** را می‌گیرد (همان کلاسی از خرابی که node --check نمی‌بیند و
      فقط سرِ اجرا به ReferenceError می‌رسد — مثلاً حذفِ تعریفِ closePick).
-  ۳) چکِ «هیچ کلیدی گم نشود»: هر کنترلی که در نسخه‌ی سالمِ قبلی وجود داشت و
+  ۳) چکِ اتصالِ HTML و JS (استاتیک): idِ تکراری در یک سند، ارجاعِ JS به idی که
+     ساخته نمی‌شود، هندلرِ inline، و انتسابِ هندلر/تایمر به نامی که تعریف
+     نشده (`x.onclick = foo` پرانتز ندارد، پس چکِ بندِ ۲ نمی‌بیندش). کلاس/idِ
+     استفاده‌نشده هم شمرده می‌شود، ولی فقط به‌شکلِ «هشدار».
+  ۴) چکِ «هیچ کلیدی گم نشود»: هر کنترلی که در نسخه‌ی سالمِ قبلی وجود داشت و
      جاوااسکریپت به آن وصل بود، باید سرِ جایش باشد. همچنین مسیرها (routeها).
-  ۴) اسنپ‌شاتِ نسخه‌ی سالم را در ~/pipfound/good نگه می‌دارد و با فلگ --guard
+  ۵) اسنپ‌شاتِ نسخه‌ی سالم را در ~/pipfound/good نگه می‌دارد و با فلگ --guard
      اگر کد خراب بود، خودکار همان نسخه‌ی سالم را برمی‌گرداند.
-
 کاربرد:
     python3 selfcheck.py                     # گزارشِ سلامت (exit 0 سالم / 1 خراب)
     python3 selfcheck.py --guard             # اگر خراب بود، نسخه‌ی سالم را برگردان
@@ -394,6 +397,163 @@ def undefined_calls(pages):
     return probs, stats
 
 
+# ─────────── چکِ استاتیکِ اتصالِ HTML و JS: شناسه‌ها و هندلرها ───────────
+# چرا لازم است: چکِ «تعریف‌نشده» فقط کدِ داخلِ <script> را می‌بیند. چند کلاسِ
+# خرابی بیرونِ آن می‌مانند و تا سرِ اجرا بی‌صدا می‌مانند:
+#   ۱) idِ تکراری در یک سند → getElementById فقط اولی را برمی‌گرداند و بقیه
+#      دست‌نیافتنی می‌شوند.
+#   ۲) JS به idی وصل می‌شود که هیچ‌جا ساخته نمی‌شود → آن دکمه هرگز کاری نمی‌کند.
+#   ۳) هندلرِ inline در HTML (onclick="...") که تابعش در آن صفحه نیست.
+#   ۴) انتسابِ هندلر/تایمر به «نامِ خالی» — x.onclick = foo — که **پرانتز ندارد**،
+#      پس چکِ «صدا زده شده» نمی‌بیندش؛ اگر تعریفِ foo پاک شود، دکمه بی‌صدا می‌میرد.
+#      (همین الگو در این اپ رایج است: `jb.onclick = saveJournal`.)
+# ۵) استفاده‌نشده‌ها (کلاس/idِ مرده) شمرده می‌شوند ولی فقط «هشدار»اند: کدِ مرده
+#    خرابی نیست، و اگر خطا شمرده شود نگهبانِ بازگردان، نیم‌کاره‌ی در حالِ ساخت
+#    را بی‌دلیل برمی‌گرداند.
+# هر دو سند جدا سنجیده می‌شوند (HTML و FUND_PAGE دو دامنه و دو مارک‌آپِ جدا).
+_ID_TOKEN = r"[A-Za-z0-9_\-]+"
+_ID_DECL_RE = re.compile(r'\bid\s*=\s*["\'](' + _ID_TOKEN + r')["\']')
+# ارجاعِ JS به یک id: هم getElementById("x")، هم هر فراخوانی با آرگومانِ "#x"
+# (querySelector("#x") و کمکیِ خانگیِ $("#x") که در این اپ همه‌جا هست).
+# نکته‌ی مهم: خودِ رشته‌ها با فاصله پوشانده می‌شوند تا نامِ داخلِ رشته «کد»
+# شمرده نشود؛ پس «محلِّ فراخوانی» را از متنِ پوشانده‌شده می‌گیریم و «نامِ
+# رشته‌ای» را از متنِ خام در همان آفست (این دو متن هم‌طول‌اند).
+_GETID_HEAD_RE = re.compile(r"getElementById\s*\(")
+_RAW_ID_ARG_RE = re.compile(r'\s*["\'](' + _ID_TOKEN + r')["\']')
+# lambda "#x" فقط وقتی ارجاعِ id شمرده می‌شود که آرگومانِ یک انتخاب‌گر باشد
+# (querySelector/querySelectorAll یا کمکیِ $) — وگرنه رشته‌ی "#04121f" یک رنگ
+# است نه شناسه. نامِ شناسه هم با حرف/خط‌زیر شروع می‌شود (رنگِ شش‌رقمی نه).
+_RAW_HASH_ID_RE = re.compile(r'["\']#([A-Za-z_][A-Za-z0-9_\-]*)["\']')
+_SELECTOR_CALL_RE = re.compile(
+    r"(?:^|[^.\w$])((?:[\w$]+\.)?(?:querySelector|querySelectorAll)|\$\$?)\s*\(\s*$")
+# idی که خودِ JS سرِ ساختِ عنصر می‌دهد (قالبِ رشته‌ای یا انتسابِ مستقیم)
+_JS_ID_DYN_RES = (
+    re.compile(r'\.id\s*=\s*["\'](' + _ID_TOKEN + r')["\']'),
+    re.compile(r'setAttribute\(\s*["\']id["\']\s*,\s*["\'](' + _ID_TOKEN + r')["\']'),
+)
+_HANDLER_ATTR_RE = re.compile(r"""\bon([a-z]+)\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.I)
+# x.onclick = foo   (فقط «نامِ خالی»؛ نه فانکشنِ فلش، نه x.y و نه x.y() )
+_HANDLER_ASSIGN_RE = re.compile(
+    r"\.\s*(on[a-z]+)\s*=\s*(?:async\s+)?([A-Za-z_$][\w$]*)\s*(?=[;,)\n}]|$)")
+# آرگومانِ نامِ خالی در تایمرها و در addEventListener (اینجا روی متنِ خام)
+_TIMER_BARE_RE = re.compile(
+    r"(setTimeout|setInterval|requestAnimationFrame|queueMicrotask)\s*\(\s*"
+    r"(?:async\s+)?([A-Za-z_$][\w$]*)\s*[,)]")
+_LISTENER_HEAD_RE = re.compile(r"addEventListener\s*\(")
+_LISTENER_ARG_RE = re.compile(
+    r'\s*["\'][^"\']*["\']\s*,\s*([A-Za-z_$][\w$]*)\s*[,)]')
+_CLASS_ATTR_RE = re.compile(r'\bclass\s*=\s*(?:"([^"]*)"|\'([^\']*)\')')
+
+
+def markup_of(html):
+    """فقط «سمتِ مارک‌آپ» را می‌ماند: بلوک‌های <script> و کامنت‌های HTML خالی
+    می‌شوند. چرا: مارک‌آپی که داخلِ رشتهٔ JS ساخته می‌شود (innerHTML) HTML نیست،
+    و عنصری که کامنت شده هم وجود ندارد — شمردنِ آن‌ها مثبتِ کاذب می‌سازد."""
+    out = re.sub(r"<script\b[^>]*>.*?</script>", " ", html, flags=re.S | re.I)
+    return re.sub(r"<!--.*?-->", " ", out, flags=re.S)
+
+
+def _token_re(name):
+    """تطبیقِ کل‌واژه‌ی یک نام در مارک‌آپ/CSS/JS (خط تیره هم مرز است)."""
+    return re.compile(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])")
+
+
+def _class_tokens(page):
+    """شمارِ هر کلاس در مقدارِ همهٔ class="..."های یک صفحه."""
+    counts = {}
+    for m in _CLASS_ATTR_RE.finditer(page):
+        for t in (m.group(1) or m.group(2) or "").split():
+            counts[t] = counts.get(t, 0) + 1
+    return counts
+
+
+def wiring_problems(pages):
+    """اتصالِ HTML و JS را استاتیک می‌سنجد → (خطاها, هشدارها, آمار)."""
+    probs, warns = [], []
+    stats = {"pages": 0, "ids": 0, "classes": 0, "refs": 0, "handlers": 0,
+             "dups": [], "missing_ids": [], "bad_handlers": [],
+             "unused_ids": [], "unused_classes": []}
+    for pname in sorted(pages):
+        html = pages[pname]
+        if not html.strip():
+            continue
+        stats["pages"] += 1
+        markup = markup_of(html)
+        js_raw = "\n;\n".join(extract_scripts(html))
+        js = strip_js_literals(js_raw) if js_raw.strip() else ""
+        defined, _ = js_static_names(js) if js.strip() else (set(), {})
+
+        # ۱) idِ تکراری در همین سند
+        decl = _ID_DECL_RE.findall(markup)
+        stats["ids"] += len(set(decl))
+        for i in sorted({n for n in decl if decl.count(n) > 1}):
+            stats["dups"].append(f"{pname}:{i}")
+            probs.append(f"{pname} · idِ «{i}» {decl.count(i)} بار در همین صفحه اعلام "
+                         "شده — getElementById فقط یکی را برمی‌گرداند")
+
+        # ۲) JS به idی وصل می‌شود که در همین صفحه ساخته نمی‌شود
+        known = set(decl) | set(_ID_DECL_RE.findall(js_raw))
+        for rx in _JS_ID_DYN_RES:
+            known |= set(rx.findall(js_raw))
+        refs = set()
+        for m in _GETID_HEAD_RE.finditer(js):
+            am = _RAW_ID_ARG_RE.match(js_raw[m.end():m.end() + 120])
+            if am:
+                refs.add(am.group(1))
+        for m in _RAW_HASH_ID_RE.finditer(js_raw):
+            head = js[max(0, m.start() - 28):m.start()]
+            if _SELECTOR_CALL_RE.search(head):
+                refs.add(m.group(1))
+        stats["refs"] += len(refs)
+        for i in sorted(refs - known):
+            stats["missing_ids"].append(f"{pname}:{i}")
+            probs.append(f"{pname} · JS به idِ «{i}» وصل می‌شود ولی عنصری با این id "
+                         "در این صفحه ساخته نمی‌شود")
+
+        # ۳) هندلرِ inline در مارک‌آپ (تابع باید در همین صفحه تعریف شده باشد)
+        for m in _HANDLER_ATTR_RE.finditer(markup):
+            body = m.group(2) or m.group(3) or ""
+            if not body.strip():
+                continue
+            stats["handlers"] += 1
+            for fn in sorted(set(re.findall(r"([A-Za-z_$][\w$]*)\s*\(", body))):
+                if fn not in defined and fn not in JS_GLOBALS:
+                    stats["bad_handlers"].append(f"{pname}:on{m.group(1)}:{fn}")
+                    probs.append(f"{pname} · هندلرِ «on{m.group(1)}» تابعِ «{fn}» را صدا "
+                                 "می‌زند که در این صفحه وجود ندارد")
+
+        # ۴) انتسابِ هندلر/تایمر به نامِ خالیِ تعریف‌نشده (بدونِ پرانتز)
+        bare = [(m.group(1), m.group(2)) for m in _HANDLER_ASSIGN_RE.finditer(js)]
+        bare += [(m.group(1), m.group(2)) for m in _TIMER_BARE_RE.finditer(js)]
+        # addEventListener(event, foo) — نام داخلِ رشته نیست، پس از متنِ خام
+        # خوانده می‌شود؛ محّلِ فراخوانی از متنِ پوشانده‌شده می‌آید تا رشته/کامنت
+        # به‌عنوانِ کد شمرده نشود (طولِ دو متن یکی است).
+        for m in _LISTENER_HEAD_RE.finditer(js):
+            am = _LISTENER_ARG_RE.match(js_raw[m.end():m.end() + 160])
+            if am:
+                bare.append(("addEventListener", am.group(1)))
+        for kind, nm in bare:
+            if nm not in defined and nm not in JS_GLOBALS:
+                stats["bad_handlers"].append(f"{pname}:{kind}:{nm}")
+                probs.append(f"{pname} · «{kind}» به نامِ «{nm}» وصل شده که در این "
+                             "صفحه وجود ندارد")
+
+        # ۵) استفاده‌نشده‌ها — هشدار، نه خطا (کدِ مرده است، نه خرابی)
+        for i in sorted(set(decl)):
+            own = len(re.findall(r'\bid\s*=\s*["\']' + re.escape(i) + r'["\']', html))
+            if len(_token_re(i).findall(html)) <= own:
+                stats["unused_ids"].append(f"{pname}:{i}")
+                warns.append(f"{pname} · idِ «{i}» جایی استفاده نشده (نه CSS، نه JS)")
+        in_html = _class_tokens(markup)
+        everywhere = _class_tokens(html)
+        stats["classes"] += len(in_html)
+        for c in sorted(in_html):
+            if len(_token_re(c).findall(html)) <= everywhere.get(c, 0):
+                stats["unused_classes"].append(f"{pname}:{c}")
+                warns.append(f"{pname} · کلاسِ «{c}» جایی استایل/استفاده نشده")
+    return probs, warns, stats
+
+
 def inventory(pages):
     """شناسه‌ی کنترل‌های HTML + کنترل‌هایی که JS به آن‌ها وصل است + مسیرها."""
     ids, js_text = set(), []
@@ -497,6 +657,13 @@ def run_checks(root, live=False, enforce_contract=True, accept_removals=False):
     uc, ustats = undefined_calls(pages) if pages else ([], {})
     rep["static"] = ustats
     rep["problems"] += [f"جاوااسکریپت → {p}" for p in uc]
+
+    # ── چکِ استاتیکِ اتصالِ HTML و JS (شناسه‌ها، هندلرها، استفاده‌نشده‌ها) ──
+    # خطاها گیت را قرمز می‌کنند؛ «استفاده‌نشده»‌ها فقط هشدارند (کدِ مرده).
+    wp, ww, wstats = wiring_problems(pages) if pages else ([], [], {})
+    rep["wiring"] = wstats
+    rep["problems"] += [f"اتصالِ HTML/JS → {p}" for p in wp]
+    rep["warnings"] += [f"اتصالِ HTML/JS → {w}" for w in ww]
 
     inv = inventory(pages)
     inv["routes"] = routes_of(root)
@@ -615,6 +782,15 @@ def _human(rep):
     if st:
         lines.append(f"   توابعِ صفحه: {st.get('defined', 0)} تعریف · {st.get('called', 0)} صدا"
                      f" · تعریف‌نشده: {len(st.get('undefined') or [])}")
+    wg = rep.get("wiring") or {}
+    if wg:
+        lines.append(f"   اتصالِ HTML/JS: {wg.get('ids', 0)} id · {wg.get('refs', 0)} ارجاع"
+                     f" · {wg.get('classes', 0)} کلاس · {wg.get('handlers', 0)} هندلرِ inline"
+                     f" · تکراری: {len(wg.get('dups') or [])}"
+                     f" · ارجاعِ بی‌عنصر: {len(wg.get('missing_ids') or [])}"
+                     f" · هندلرِ بد: {len(wg.get('bad_handlers') or [])}"
+                     f" · استفاده‌نشده: {len(wg.get('unused_ids') or [])} id"
+                     f" / {len(wg.get('unused_classes') or [])} کلاس")
     for p in rep.get("problems") or []:
         lines.append(f"   ✗ {p}")
     for w in rep.get("warnings") or []:
