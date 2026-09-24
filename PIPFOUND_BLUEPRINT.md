@@ -322,7 +322,7 @@ This is the most valuable section for the next agent. A professional ICT/SMC cri
 - **C11 — ✅ RESOLVED (`6de2c94`/`f818f63`).** ورودِ گلدن‌پاکتِ ۰.۷۰۵/پروگزیمال؛ market فقط داخلِ OTE.
 
 ### Tier 3 — missing for "professional" (features, not bugs)
-- **C12 — ⏳ OPEN. No SMT divergence.** Addable with correlated pairs (BTC↔ETH, EURUSD↔GBPUSD, XAU↔XAG) and especially **DXY** for FX bias.
+- **C12 — ✅ RESOLVED (`7834f02`, PR #22).** ماژولِ `smt.py`: دایورجنسِ SMT روی سوئینگ‌های فرکتالیِ موتور بین جفت‌های همبستهٔ جدولِ ساختاری (EURUSD↔GBPUSD، AUDUSD↔NZDUSD، USDCAD↔USDCHF، SPX500↔NAS100، US30↔SPX500، XAUUSD↔XAGUSD، WTI↔BRENT) + هشدارِ «تریدِ خلافِ جهت» در `risk.correlation` (معاملهٔ خلافِ پوزیشنِ باز روی فاکتورِ مشترک) + ستاپِ چهارمِ چراغ‌دار (سبز = دایورجنس + سوئیپ، زرد = بدونِ سوئیپِ تازه، قرمزِ صادقانه). هم‌فازیِ سوئینگ‌ها (تازگی نسبت به انتهای دادهٔ خودِ نماد) جای timestampِ مطلق. تستِ ۴۱ بررسیِ آفلاین + لایهٔ CI. باقی‌مانده: DXY به‌عنوانِ مرجعِ بایاسِ FX در امتیاز (زمینه است، نیمِ جفت نیست).
 - **C13 — ⏳ OPEN. No Power of 3 / Judas swing / Silver Bullet** in scoring.
 - **C14 — ✅ RESOLVED (`f818f63`).** FVG اکنون کندلِ میانیِ دیسپلیسمنت (بدنه‌به‌بدنه ≥۱.۳×) می‌خواهد.
 - **C15 — ✅ RESOLVED (`f818f63`).** `by_grade` وین‌ریت را per-grade تفکیک می‌کند.
