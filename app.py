@@ -1719,10 +1719,14 @@ function _pfAvoidControls(){
   const wr = symWrap.getBoundingClientRect();
   // فضای آزاد زیر/بالای کادر = کمترینِ فاصله تا دکمه‌های ردیف و لبه‌ی ویوپورت
   let below = innerHeight - wr.bottom, above = wr.top, rowBottom = wr.bottom;
+  // فقط دکمه‌هایی که در *ستونِ افقیِ* کادر هستند می‌توانند زیرِ پنل بیفتند؛
+  // دکمه‌های ستون‌های دیگر (ردیف‌های دیگرِ همان ردیفِ شکسته) مانعِ باز شدن نیستند.
+  const _pfSameCol = (r) => !(r.right <= wr.left || r.left >= wr.right);
   for(const el of _pfRowBtns){
     const r = el.getBoundingClientRect();
     if(!r.width || !r.height) continue;
     rowBottom = Math.max(rowBottom, r.bottom);
+    if(!_pfSameCol(r)) continue;
     if(r.top >= wr.bottom - 4) below = Math.min(below, r.top - wr.bottom);
     if(r.bottom <= wr.top + 4) above = Math.min(above, wr.top - r.bottom);
   }
