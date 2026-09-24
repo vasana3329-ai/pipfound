@@ -519,6 +519,104 @@ function loadPuppeteer() {
     fail("بررسیِ حالتِ کارِ دکمه‌ی بروزرسانی ممکن نشد: " + e.message);
   }
 
+  /* ۶.۷) قراردادِ نشانگر روی کرکره‌ی نمادها — سه چیزی که یک‌بار با هم شکستند و
+     تجربه‌ی کاربر را خراب کردند:
+       (۱) رفتنِ نشانگر روی خودِ کرکره پنل را نبندد (کاربر باید فرصتِ انتخاب داشته باشد؛
+           قبلاً عبور از همان ۶px فاصله یا هر حرکتِ نشانگر روی مختصاتِ دکمه‌ها پنل را
+           فوری می‌بست)؛
+       (۲) پنلِ باز روی هیچ کنترلِ ردیفِ جستجو ننشیند — وگرنه کلیکِ «تحلیل کن» بی‌صدا
+           به چیپِ نماد می‌خورد، نماد عوض می‌شود و هیچ تحلیلی اجرا نمی‌شود؛
+       (۳) انتخاب (یا دورشدنِ واقعی) پنل را ببندد تا نمای اصلی تمیز بماند. */
+  try {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const chipText = "GBPUSD";                 // گروهِ دیگر (نه NAS100 که در بندِ ۷ می‌آید)
+    const HOLD = 800;                          // بیش از مهلتِ بستنِ پنل (۴۲۰ms)
+    await page.mouse.move(10, 10);             // نشانگر را از ناحیه بیرون ببر تا mouseenter دوباره رخ دهد
+    await page.evaluate(() => {
+      document.getElementById("chips").classList.remove("open");
+      document.getElementById("sym").blur();
+    });
+    await page.hover("#sym");
+    await page.waitForSelector("#chips.open", { timeout: 5000 });
+
+    // (۲) هندسه: پنلِ باز نباید روی هیچ کنترلِ ردیفِ جستجو (و نه بیرونِ ویوپورت) باشد.
+    const geo = await page.evaluate(() => {
+      const chips = document.getElementById("chips");
+      const r = chips.getBoundingClientRect();
+      const hit = (a, b) => !(a.right <= b.left || a.left >= b.right || a.bottom <= b.top || a.top >= b.bottom);
+      const overlap = [...document.querySelectorAll(".searchrow button, .searchrow input")]
+        .filter((el) => !chips.contains(el))
+        .map((el) => ({ el, b: el.getBoundingClientRect() }))
+        .filter((x) => x.b.width && x.b.height)
+        .filter((x) => hit(x.b, r))
+        .map((x) => (x.el.id || "«" + x.el.textContent.trim().slice(0, 16) + "»"));
+      return { top: Math.round(r.top), bottom: Math.round(r.bottom), height: Math.round(r.height),
+               overlap, vh: innerHeight };
+    });
+    if (geo.overlap.length)
+      fail("پنلِ نمادها روی کنترل‌های ردیفِ جستجو افتاده است (کلیکِ کاربر دزدیده می‌شود): " + geo.overlap.join(" · "));
+    if (geo.height < 120)
+      fail(`پنلِ نمادها بی‌دلیل چلاق است (ارتفاع=${geo.height}px) — فضای واقعیِ ویوپورت استفاده نشده`);
+    if (geo.top < 0 || geo.bottom > geo.vh)
+      fail(`پنلِ نمادها از ویوپورت بیرون زده است (top=${geo.top} bottom=${geo.bottom} vh=${geo.vh})`);
+    if (!geo.overlap.length)
+      notes.push(`پنلِ نمادها هیچ کنترلی را نپوشاند · ارتفاع ${geo.height}px · داخلِ ویوپورت ✓`);
+
+    // (۱) رفتنِ نشانگر روی وسطِ کرکره (نه روی چیپ) و ماندنِ بیش از مهلتِ بستن.
+    const mid = await page.evaluate(() => {
+      const r = document.getElementById("chips").getBoundingClientRect();
+      return { x: (r.left + r.right) / 2, y: r.top + 6 };
+    });
+    await page.mouse.move(mid.x, mid.y);
+    await wait(HOLD);
+    if (!(await page.$eval("#chips", (el) => el.classList.contains("open"))))
+      fail("با رفتنِ نشانگر روی خودِ کرکره، پنل بسته شد — کاربر فرصتِ انتخابِ نماد را از دست می‌دهد");
+
+    // و روی خودِ چیپ هم باید باز بماند و همان چیپ زیرِ نشانگر باشد.
+    const chipPos = await page.evaluate((t) => {
+      const c = document.querySelector(`#chips .chip[data-sym="${t}"]`);
+      if (!c) return null;
+      const r = c.getBoundingClientRect();
+      return { x: (r.left + r.right) / 2, y: (r.top + r.bottom) / 2 };
+    }, chipText);
+    if (!chipPos) fail(`چیپِ «${chipText}» در پنل پیدا نشد`);
+    else {
+      await page.mouse.move(chipPos.x, chipPos.y);
+      await wait(HOLD);
+      const onChip = await page.evaluate((t) => {
+        const c = document.querySelector(`#chips .chip[data-sym="${t}"]`);
+        const r = c.getBoundingClientRect();
+        const under = document.elementFromPoint((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+        return { open: document.getElementById("chips").classList.contains("open"),
+                 under: under ? (under.className || under.tagName) : "null" };
+      }, chipText);
+      if (!onChip.open) fail("با ماندنِ نشانگر روی چیپِ نماد، پنل بسته شد");
+      if (!/chip/.test(onChip.under))
+        fail(`روی چیپِ نماد، عنصرِ زیرِ نشانگر «${onChip.under}» است — کلیک به چیپ نمی‌رسد`);
+
+      // (۳) انتخابِ واقعی با کلیک: کادر پُر، دکمه آماده، پنل بسته.
+      await page.click(`#chips .chip[data-sym="${chipText}"]`);
+      await page.waitForFunction(
+        (t) => document.querySelector("#sym").value === t, { timeout: 5000 }, chipText);
+      const after = await page.evaluate(() => ({
+        pulse: document.getElementById("go").classList.contains("pulse"),
+        open: document.getElementById("chips").classList.contains("open"),
+        display: getComputedStyle(document.getElementById("chips")).display,
+      }));
+      if (!after.pulse) fail("پس از انتخابِ نماد از کرکره، دکمه‌ی «تحلیل کن» آماده (pulse) نشد");
+      if (after.open || after.display !== "none") fail("پس از انتخابِ نماد، کرکره بسته نشد");
+    }
+
+    // دورشدنِ واقعی: پنل نباید خودسر باز بماند یا باز شود.
+    await page.mouse.move(10, 10);
+    await wait(HOLD);
+    if ((await page.$eval("#chips", (el) => getComputedStyle(el).display)) !== "none")
+      fail("با دورشدنِ نشانگر از ناحیه، کرکره بسته نشد");
+    notes.push(`کرکره: با رفتنِ نشانگر بسته نشد · روی هیچ کنترلی ننشست · انتخابِ «${chipText}» آن را بست ✓`);
+  } catch (e) {
+    fail("قراردادِ نشانگر روی کرکره‌ی نمادها رعایت نشد: " + e.message);
+  }
+
   /* ۷) رفتارِ واقعی: انتخاب از داخلِ پنل باید کادر را پُر کند، دکمه را آماده کند و
      پنل را ببندد. عمداً روی نمادِ «اندیکس» می‌چسبیم (نه اولین نماد) تا ثابت شود
      دسته‌های تازه هم واقعاً سیم‌کشی شده‌اند، نه فقط پنل را پر کرده‌اند. */
