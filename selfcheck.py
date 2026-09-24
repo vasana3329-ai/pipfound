@@ -5,7 +5,10 @@
 چه کار می‌کند:
   ۱) سینتکسِ پایتونِ همه‌ی ماژول‌ها را چک می‌کند (ast.parse — بدونِ اجرای کد).
   ۲) متنِ صفحه‌های HTML/FUND_PAGE را از app.py بیرون می‌کشد، هر بلوکِ <script> را
-     با موتورِ JS (node --check) از نظرِ سینتکس اعتبارسنجی می‌کند.
+     با موتورِ JS (node --check) از نظرِ سینتکس اعتبارسنجی می‌کند، و یک چکِ
+     استاتیکِ دامنه هم می‌زند: هر تابعی که در صفحه **صدا زده شده ولی هیچ‌جا
+     تعریف نشده** را می‌گیرد (همان کلاسی از خرابی که node --check نمی‌بیند و
+     فقط سرِ اجرا به ReferenceError می‌رسد — مثلاً حذفِ تعریفِ closePick).
   ۳) چکِ «هیچ کلیدی گم نشود»: هر کنترلی که در نسخه‌ی سالمِ قبلی وجود داشت و
      جاوااسکریپت به آن وصل بود، باید سرِ جایش باشد. همچنین مسیرها (routeها).
   ۴) اسنپ‌شاتِ نسخه‌ی سالم را در ~/pipfound/good نگه می‌دارد و با فلگ --guard
@@ -173,6 +176,224 @@ def js_syntax_problems(pages):
     return probs, True
 
 
+# ────────────── چکِ استاتیکِ دامنه: «صدا زده شده ولی تعریف نشده» ──────────────
+# چرا لازم است: node --check فقط سینتکس را می‌بیند. اگر تعریفِ یک تابع پاک شود
+# ولی فراخوانی‌هایش بمانند، گیتِ سینتکس سبز می‌مانَد و بدنه‌ی صفحه سرِ اجرا با
+# ReferenceError بی‌صدا می‌میرد (همان چیزی که یک‌بار مسیرهای بستنِ کرکره را
+# بی‌اثر کرد). این چک همان شکاف را می‌بندد، بدونِ اجرای کد.
+JS_KEYWORDS = {
+    "if", "for", "while", "switch", "catch", "function", "return", "typeof", "new",
+    "delete", "void", "instanceof", "in", "of", "do", "else", "case", "throw", "try",
+    "finally", "with", "class", "extends", "super", "this", "yield", "await", "async",
+    "import", "export", "from", "default", "break", "continue", "var", "let", "const",
+    "static", "get", "set", "true", "false", "null", "undefined", "NaN", "Infinity",
+    "debugger", "enum", "as",
+}
+
+# نام‌هایی که مرورگر/زبان خودش می‌دهد؛ اگر تابعی از اپ نبود، اسمش را همین‌جا
+# اضافه کن (اگر جایی مثبتِ کاذب دادی، این تنها جای درست برای اصلاح است).
+JS_GLOBALS = {
+    "fetch", "setTimeout", "setInterval", "clearTimeout", "clearInterval",
+    "requestAnimationFrame", "cancelAnimationFrame", "requestIdleCallback",
+    "queueMicrotask", "structuredClone", "postMessage", "open", "close", "focus",
+    "print", "scrollTo", "scrollBy", "scroll", "matchMedia", "getComputedStyle",
+    "addEventListener", "removeEventListener", "dispatchEvent", "alert", "confirm",
+    "prompt", "parseInt", "parseFloat", "isFinite", "isNaN", "encodeURI",
+    "encodeURIComponent", "decodeURI", "decodeURIComponent", "escape", "unescape",
+    "atob", "btoa", "getSelection", "Intl", "Number", "String", "Boolean", "Array",
+    "Object", "Math", "JSON", "Date", "RegExp", "Error", "TypeError", "RangeError",
+    "SyntaxError", "EvalError", "URIError", "AggregateError", "Map", "Set", "WeakMap",
+    "WeakSet", "Promise", "Symbol", "BigInt", "Proxy", "Reflect", "Function",
+    "ArrayBuffer", "SharedArrayBuffer", "DataView", "Int8Array", "Uint8Array",
+    "Uint8ClampedArray", "Int16Array", "Uint16Array", "Int32Array", "Uint32Array",
+    "Float32Array", "Float64Array", "BigInt64Array", "BigUint64Array", "TextEncoder",
+    "TextDecoder", "URL", "URLSearchParams", "Blob", "File", "FileReader",
+    "FormData", "Headers", "Request", "Response", "AbortController", "AbortSignal",
+    "XMLHttpRequest", "WebSocket", "EventSource", "BroadcastChannel", "Worker",
+    "SharedWorker", "MessageChannel", "Notification", "Image", "Audio", "Option",
+    "CustomEvent", "Event", "EventTarget", "IntersectionObserver", "ResizeObserver",
+    "MutationObserver", "PerformanceObserver", "document", "window", "self",
+    "globalThis", "navigator", "location", "history", "localStorage", "sessionStorage",
+    "indexedDB", "caches", "crypto", "performance", "console", "screen", "frames",
+    "parent", "top", "isSecureContext", "eval",
+}
+
+# قالبِ `` ` `` اینجا نیست: خودش شاخه‌ی جداگانه دارد (متنش فاصله می‌شود ولی ${...} کد می‌ماند)
+_JS_STRING_OPENERS = {"'", '"'}
+_JS_REGEX_BEFORE = set("=(,:[!&|?{};+-*%<>~^")
+
+
+def strip_js_literals(code):
+    """رشته/کامنت/regexِ ادبی را با فاصله جایگزین می‌کند (طول و شمارِ خط حفظ می‌شود)
+    تا نام‌های داخلِ متنِ آن‌ها به‌اشتباه «فراخوانی» شمرده نشوند."""
+    out = list(code)
+    n = len(code)
+    frames = [{"kind": "code", "depth": 0}]     # قالبِ `` ` `` هم پشته دارد
+    prev, i = "", 0
+
+    def blank(a, b):
+        for k in range(a, min(b, n)):
+            if out[k] != "\n":
+                out[k] = " "
+
+    while i < n:
+        f = frames[-1]
+        c = code[i]
+        nxt = code[i + 1] if i + 1 < n else ""
+
+        if f["kind"] == "tpl":                  # داخلِ متنِ template
+            if c == "\\":
+                blank(i, i + 2)
+                i += 2
+                continue
+            if c == "`":
+                out[i] = " "
+                frames.pop()
+                prev = "`"
+                i += 1
+                continue
+            if c == "$" and nxt == "{":        # ${...} کد است، نه متن
+                blank(i, i + 2)
+                frames.append({"kind": "expr", "depth": 1})
+                i += 2
+                continue
+            blank(i, i + 1)
+            i += 1
+            continue
+
+        # حالتِ code/expr
+        if c in _JS_STRING_OPENERS:
+            j = i + 1
+            while j < n:
+                if code[j] == "\\":
+                    j += 2
+                    continue
+                if code[j] == c or code[j] == "\n":
+                    break
+                j += 1
+            blank(i, j + 1)
+            prev, i = c, min(j + 1, n)
+            continue
+        if c == "`":
+            out[i] = " "
+            frames.append({"kind": "tpl", "depth": 0})
+            i += 1
+            continue
+        if c == "/" and nxt == "/":
+            j = code.find("\n", i)
+            j = n if j == -1 else j
+            blank(i, j)
+            i = j
+            continue
+        if c == "/" and nxt == "*":
+            j = code.find("*/", i + 2)
+            j = n if j == -1 else j
+            blank(i, j + 2)
+            i = min(j + 2, n)
+            continue
+        if c == "/" and (prev == "" or prev in _JS_REGEX_BEFORE):
+            j, in_class = i + 1, False
+            while j < n:
+                if code[j] == "\\":
+                    j += 2
+                    continue
+                if code[j] == "[":
+                    in_class = True
+                elif code[j] == "]":
+                    in_class = False
+                elif code[j] == "\n" or (code[j] == "/" and not in_class):
+                    break
+                j += 1
+            blank(i, j + 1)
+            prev, i = "/", min(j + 1, n)
+            continue
+        if f["kind"] == "expr":
+            if c == "{":
+                f["depth"] += 1
+            elif c == "}":
+                f["depth"] -= 1
+                if f["depth"] == 0:
+                    out[i] = " "
+                    frames.pop()
+                    prev, i = "}", i + 1
+                    continue
+        if not c.isspace():
+            prev = c
+        i += 1
+    return "".join(out)
+
+
+# تعریف‌ها: اعلانِ تابع/کلاس/متغیر، انتسابِ تابع، متدها و کلیدهای شیء، برچسب‌ها
+_JS_DEF_RES = (
+    r"function\s*\*?\s*([A-Za-z_$][\w$]*)",
+    r"class\s+([A-Za-z_$][\w$]*)",
+    r"\b(?:var|let|const)\s+([A-Za-z_$][\w$]*)",
+    r"\b(?:var|let|const)\s*[\[{]([^\]}]*)[\]}]",
+    r"([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?function",
+    r"([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?(?:\([^()]*\)|[A-Za-z_$][\w$]*)\s*=>",
+    r"(?:window|globalThis|self)\s*\.\s*([A-Za-z_$][\w$]*)\s*=",
+)
+_JS_PARAM_RES = (
+    r"function\s*\*?\s*[A-Za-z_$\w$]*\s*\(([^)]*)\)",
+    r"\(([^()]*)\)\s*=>",
+    r"([A-Za-z_$][\w$]*)\s*=>",
+    r"catch\s*\(([^)]*)\)",
+)
+_JS_MEMBER_DEF_RE = re.compile(
+    r"(?:^|[{,;(\n])\s*(?:async\s+)?(?:static\s+)?(?:get\s+|set\s+)?"
+    r"([A-Za-z_$][\w$]*)\s*\([^;{}]*\)\s*\{")
+_JS_KEY_RE = re.compile(r"(?:^|[{,]\s*)([A-Za-z_$][\w$]*)\s*:")
+_JS_LABEL_RE = re.compile(r"(?:^|[\n;{,])\s*([A-Za-z_$][\w$]*)\s*:\s*(?:for|while|do|\{)")
+_JS_CALL_RE = re.compile(r"(?<![\w$.])([A-Za-z_$][\w$]*)\s*\(")
+_JS_WORD_BEFORE_RE = re.compile(r"([A-Za-z_$][\w$]*)\s*$")
+_IDENT_RE = re.compile(r"[A-Za-z_$][\w$]*")
+
+
+def js_static_names(stripped):
+    """نام‌های تعریف‌شده و نام‌هایی که در جای «فراخوانی» آمده‌اند."""
+    defined, called = set(), {}
+    for rx in _JS_DEF_RES + _JS_PARAM_RES:
+        for g in re.findall(rx, stripped):
+            defined.update(_IDENT_RE.findall(g))
+    defined.update(_JS_MEMBER_DEF_RE.findall(stripped))
+    defined.update(_JS_KEY_RE.findall(stripped))
+    defined.update(_JS_LABEL_RE.findall(stripped))
+    for m in _JS_CALL_RE.finditer(stripped):
+        name = m.group(1)
+        if name in JS_KEYWORDS:
+            continue
+        before = stripped[max(0, m.start() - 40):m.start()]
+        w = _JS_WORD_BEFORE_RE.search(before)
+        if w and w.group(1) in JS_KEYWORDS:      # function foo( · new Foo( · get x(
+            continue
+        called[name] = called.get(name, 0) + 1
+    return defined, called
+
+
+def undefined_calls(pages):
+    """تابع‌های صدا‌زده‌شده‌ای که در همان صفحه تعریف نشده‌اند.
+    بلوک‌های <script> یک سند دامنه‌ی سراسریِ مشترک دارند، پس هر **صفحه** جدا
+    شمرده می‌شود (تعریفِ هم‌نام در HTML نباید فراخوانیِ نداشته‌ی FUND_PAGE را
+    ماست کند). → (خطاها, آمار)"""
+    probs = []
+    stats = {"defined": 0, "called": 0, "undefined": []}
+    for pname in sorted(pages):
+        code = "\n;\n".join(c for c in extract_scripts(pages[pname]) if c.strip())
+        if not code.strip():
+            continue
+        defined, called = js_static_names(strip_js_literals(code))
+        stats["defined"] += len(defined)
+        stats["called"] += len(called)
+        unknown = sorted((n for n in called
+                          if n not in defined and n not in JS_GLOBALS),
+                         key=lambda n: (-called[n], n))
+        for n in unknown:
+            stats["undefined"].append(n)
+            probs.append(f"{pname} · تابعِ «{n}» صدا زده شده ولی هیچ‌جا تعریف نشده"
+                         f" (×{called[n]})")
+    return probs, stats
+
+
 def inventory(pages):
     """شناسه‌ی کنترل‌های HTML + کنترل‌هایی که JS به آن‌ها وصل است + مسیرها."""
     ids, js_text = set(), []
@@ -269,6 +490,13 @@ def run_checks(root, live=False, enforce_contract=True, accept_removals=False):
         rep["warnings"] += js
     else:
         rep["problems"] += [f"جاوااسکریپت → {p}" for p in js]
+
+    # ── چکِ استاتیکِ دامنه: «صدا زده شده ولی تعریف نشده» ──
+    # همان شکافی که node --check (فقط سینتکس) نمی‌بیند و سرِ اجرا به
+    # ReferenceError ختم می‌شود. اگر جایی مثبتِ کاذب دیدی، نام را به JS_GLOBALS اضافه کن.
+    uc, ustats = undefined_calls(pages) if pages else ([], {})
+    rep["static"] = ustats
+    rep["problems"] += [f"جاوااسکریپت → {p}" for p in uc]
 
     inv = inventory(pages)
     inv["routes"] = routes_of(root)
@@ -383,6 +611,10 @@ def _human(rep):
     inv = rep.get("inventory") or {}
     lines.append(f"   کلیدها: {len(inv.get('ids') or [])} · کلیدهای سیم‌کشی‌شده: {len(inv.get('wired') or [])}"
                  f" · مسیرها: {len(inv.get('routes') or [])} · مبنا: {rep.get('baseline') or '—'}")
+    st = rep.get("static") or {}
+    if st:
+        lines.append(f"   توابعِ صفحه: {st.get('defined', 0)} تعریف · {st.get('called', 0)} صدا"
+                     f" · تعریف‌نشده: {len(st.get('undefined') or [])}")
     for p in rep.get("problems") or []:
         lines.append(f"   ✗ {p}")
     for w in rep.get("warnings") or []:
