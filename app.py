@@ -1701,6 +1701,34 @@ let pickTimer=null;
 function openPick(){ clearTimeout(pickTimer); chips.classList.add("open"); }
 function closePick(){ clearTimeout(pickTimer); chips.classList.remove("open"); }
 function closePickSoon(){ clearTimeout(pickTimer); pickTimer=setTimeout(closePick, 200); }
+
+// ── گاردِ هم‌پوشانیِ پنل با کنترل‌های زیرِ آن (رفعِ «کلیدِ تحلیل کن کار نمی‌کند») ──
+// در پنجره‌های باریک ردیفِ جستجو می‌شکند و دکمه‌ها (تحلیل کن/بک‌تست/بروزرسانی/…)
+// دقیقاً زیرِ پنلِ کشویی می‌افتند؛ پنل روی‌شان سایه می‌اندازد و کلیکِ کاربر بی‌صدا
+// به چیپِ نماد می‌رفت: نماد عوض می‌شد و هیچ تحلیلی اجرا نمی‌شد. گارد: تا وقتی
+// پنل باز است، اگر نشانگر به ناحیه‌ی هر کنترلِ بیرونِ پنل برود، پنل فوراً کنار
+// می‌رود تا کلیک به مقصدِ واقعی‌اش برسد. (برای چیپ‌های هم‌سایتِ آن ناحیه، تایپ
+// یا ردیف‌های دیگرِ فهرست همیشه جایگزین هست.)
+const _pfUnderEls = Array.from(document.querySelectorAll(
+  ".searchrow button, .searchrow input, .btpanel button, .btpanel input, " +
+  ".riskpanel button, .riskpanel input"
+)).filter(el => !symWrap.contains(el));
+function _pfUnderPointer(x, y){
+  for(const el of _pfUnderEls){
+    const r = el.getBoundingClientRect();
+    if(r.width && r.height && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return true;
+  }
+  return false;
+}
+document.addEventListener("pointermove", (e)=>{
+  if(chips.classList.contains("open") && _pfUnderPointer(e.clientX, e.clientY)) closePick();
+}, {passive:true});
+document.addEventListener("click", (e)=>{
+  // لمس/کلیکِ اول روی ناحیه‌ی هم‌پوشان (موبایل): فقط پنل بسته شود،
+  // نه اینکه یک چیپِ ناخواسته انتخاب شود. کلیکِ سالم روی چیپ‌ها دست‌نخورده است.
+  if(!chips.classList.contains("open") || !chips.contains(e.target)) return;
+  if(_pfUnderPointer(e.clientX, e.clientY)){ e.preventDefault(); e.stopPropagation(); closePick(); }
+}, true);
 symIn.addEventListener("focus", openPick);
 symIn.addEventListener("click", openPick);
 symWrap.addEventListener("mouseenter", openPick);
