@@ -1214,6 +1214,11 @@ h1{font-size:22px;margin:0;font-weight:700;letter-spacing:.2px;
   border-radius:14px;padding:12px;box-shadow:0 18px 40px rgba(0,0,0,.55);
   max-height:min(430px,64vh);overflow:auto}
 .chips.open{display:flex}
+/* وقتی زیرِ کادر جا نیست (پنجره‌ی باریک)، پنل به بالای کادر برمی‌گردد */
+.chips.above{top:auto;bottom:calc(100% + 6px)}
+/* و اگر ردیفِ دکمه‌ها همان‌جا را گرفته باشد، پنل از زیرِ کلِ ردیفِ جستجو باز
+   می‌شود (موقعیتش با JS ست می‌شود) تا هیچ کنترلی را نپوشاند. */
+.chips.docked{position:fixed;inset:auto;z-index:70}
 .chipgroup{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
 .chiplbl{color:var(--accent);font-size:11px;font-weight:700;background:var(--panel2);
   border:1px solid var(--line);border-radius:8px;padding:4px 9px;white-space:nowrap}
@@ -1698,43 +1703,107 @@ chips.appendChild(hint);
 
 // باز/بسته شدنِ پنل: با ورودِ نشانگر یا فوکوس؛ بستن با خروجِ نشانگر، کلیکِ بیرون، Esc یا انتخاب
 let pickTimer=null;
-function openPick(){ clearTimeout(pickTimer); chips.classList.add("open"); }
-function closePick(){ clearTimeout(pickTimer); chips.classList.remove("open"); }
-function closePickSoon(){ clearTimeout(pickTimer); pickTimer=setTimeout(closePick, 200); }
-
-// ── گاردِ هم‌پوشانیِ پنل با کنترل‌های زیرِ آن (رفعِ «کلیدِ تحلیل کن کار نمی‌کند») ──
+// ── پنلِ نمادها هرگز نباید روی کنترل‌های دیگر بنشیند (رفعِ «کلیدِ تحلیل کن کار نمی‌کند») ──
 // در پنجره‌های باریک ردیفِ جستجو می‌شکند و دکمه‌ها (تحلیل کن/بک‌تست/بروزرسانی/…)
-// دقیقاً زیرِ پنلِ کشویی می‌افتند؛ پنل روی‌شان سایه می‌اندازد و کلیکِ کاربر بی‌صدا
-// به چیپِ نماد می‌رفت: نماد عوض می‌شد و هیچ تحلیلی اجرا نمی‌شد. گارد: تا وقتی
-// پنل باز است، اگر نشانگر به ناحیه‌ی هر کنترلِ بیرونِ پنل برود، پنل فوراً کنار
-// می‌رود تا کلیک به مقصدِ واقعی‌اش برسد. (برای چیپ‌های هم‌سایتِ آن ناحیه، تایپ
-// یا ردیف‌های دیگرِ فهرست همیشه جایگزین هست.)
-const _pfUnderEls = Array.from(document.querySelectorAll(
-  ".searchrow button, .searchrow input, .btpanel button, .btpanel input, " +
-  ".riskpanel button, .riskpanel input"
-)).filter(el => !symWrap.contains(el));
-function _pfUnderPointer(x, y){
-  for(const el of _pfUnderEls){
+// زیرِ پنلِ کشویی می‌افتند؛ کلیکِ کاربر بی‌صدا به چیپِ نماد می‌رفت: نماد عوض
+// می‌شد و هیچ تحلیلی اجرا نمی‌شد. راه‌حلِ ریشه‌ای: هنگامِ بازشدن، پنل خودش را
+// با فضای خالیِ اطرافِ کادر اندازه می‌گیرد — زیرِ کادر جا بود همان‌جا با
+// ارتفاعِ محدود؛ نبود، به بالای کادر برمی‌گردد — تا هیچ‌وقت چیزی را نپوشاند
+// و هر کلیک به مقصدِ واقعی‌اش برسد.
+const _pfRowBtns = Array.from(document.querySelectorAll(".searchrow button"))
+  .filter(el => !chips.contains(el));   // خودِ چیپ‌ها هم «button»اند؛ نباید در سنجش بیایند
+function _pfAvoidControls(){
+  chips.style.maxHeight = "";
+  chips.style.top = chips.style.left = chips.style.width = "";
+  chips.classList.remove("above", "docked");
+  const wr = symWrap.getBoundingClientRect();
+  // فضای آزاد زیر/بالای کادر = کمترینِ فاصله تا دکمه‌های ردیف و لبه‌ی ویوپورت
+  let below = innerHeight - wr.bottom, above = wr.top, rowBottom = wr.bottom;
+  for(const el of _pfRowBtns){
     const r = el.getBoundingClientRect();
-    if(r.width && r.height && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) return true;
+    if(!r.width || !r.height) continue;
+    rowBottom = Math.max(rowBottom, r.bottom);
+    if(r.top >= wr.bottom - 4) below = Math.min(below, r.top - wr.bottom);
+    if(r.bottom <= wr.top + 4) above = Math.min(above, wr.top - r.bottom);
   }
-  return false;
+  const gap = 14;                              // 6px فاصله‌ی پنل + 8px حاشیه‌ی امن
+  const belowRoom = below - gap;
+  // حالتِ ۱: زیرِ کادر جای کافی هست → همان کشوییِ همیشگی زیرِ کادر.
+  if(belowRoom >= 200) return;
+  // حالتِ ۲: دکمه‌های ردیف همان زیرِ کادر نشسته‌اند، پس نشستنِ پنل روی آن‌ها
+  // کلیک را می‌دزدد. به‌جای پوشاندنِ دکمه‌ها (و به‌جای پریدنِ ناگهانی به بالای
+  // صفحه)، پنل از *زیرِ کلِ ردیفِ جستجو* باز می‌شود: نه روی دکمه‌ها می‌نشیند،
+  // نه از ویوپورت بیرون می‌زند، و ارتفاعش هم به فضای واقعیِ موجود قفل می‌شود.
+  const room = innerHeight - (rowBottom + 10) - 12;
+  if(room >= 150){
+    const width = Math.min(Math.max(wr.width, 280), innerWidth - 16);
+    // هم‌تراز با لبه‌ی راستِ کادرِ نماد (چیدمانِ RTL) و در هر حال داخلِ ویوپورت
+    const left = Math.min(Math.max(wr.right - width, 8), Math.max(8, innerWidth - width - 8));
+    chips.classList.add("docked");
+    chips.style.top = Math.round(rowBottom + 10) + "px";
+    chips.style.left = Math.round(left) + "px";
+    chips.style.width = Math.round(width) + "px";
+    chips.style.maxHeight = Math.min(430, Math.floor(room)) + "px";
+    return;
+  }
+  // حالتِ ۳ (پنجره‌ی بسیار کم‌ارتفاع): ناچار بالای کادر، با ارتفاعِ قفل‌شده
+  // به همان فضای کم — پنلِ اسکرول‌شونده بهتر از پنلی است که از صفحه بیرون بزند.
+  const aboveRoom = above - gap;
+  if(aboveRoom > belowRoom) chips.classList.add("above");
+  const avail = chips.classList.contains("above") ? aboveRoom : belowRoom;
+  if(isFinite(avail)) chips.style.maxHeight = Math.max(60, Math.floor(avail)) + "px";
 }
-document.addEventListener("pointermove", (e)=>{
-  if(chips.classList.contains("open") && _pfUnderPointer(e.clientX, e.clientY)) closePick();
-}, {passive:true});
-document.addEventListener("click", (e)=>{
-  // لمس/کلیکِ اول روی ناحیه‌ی هم‌پوشان (موبایل): فقط پنل بسته شود،
-  // نه اینکه یک چیپِ ناخواسته انتخاب شود. کلیکِ سالم روی چیپ‌ها دست‌نخورده است.
-  if(!chips.classList.contains("open") || !chips.contains(e.target)) return;
-  if(_pfUnderPointer(e.clientX, e.clientY)){ e.preventDefault(); e.stopPropagation(); closePick(); }
-}, true);
+function openPick(){ clearTimeout(pickTimer); chips.classList.add("open"); _pfAvoidControls(); }
+function closePick(){ clearTimeout(pickTimer); chips.classList.remove("open"); }
+// ── بستنِ نرم: پنل فقط وقتی بسته می‌شود که نشانگر واقعاً از «ناحیه‌ی امنِ» کادر
+// بیرون رفته باشد (و کادر هم فوکوس نداشته باشد). رفعِ باگِ «با پایین‌آمدن روی
+// کرکره، سریع بسته می‌شود و فرصتِ انتخابِ نماد نمی‌دهد»: پیش‌تر خروجِ لحظه‌ای
+// نشانگر از کادرِ نماد — حتی برای عبور از همان ۶ پیکسلِ فاصله‌ی بین کادر و پنل —
+// پنل را ۲۰۰ میلی‌ثانیه بعد می‌بست. حالا ناحیه‌ی امن = کادر + راهرو + خودِ پنل،
+// با حاشیه‌ی ۲۴ پیکسل، و مهلتِ بستن هم بلندتر است تا انتخابِ آسوده ممکن شود. ──
+let _pfX=-1, _pfY=-1;
+function _pfInZone(){
+  const wr = symWrap.getBoundingClientRect();
+  let top=wr.top, bottom=wr.bottom, left=wr.left, right=wr.right;
+  if(chips.classList.contains("open")){
+    const pr = chips.getBoundingClientRect();
+    if(pr.width && pr.height){
+      top=Math.min(top,pr.top); bottom=Math.max(bottom,pr.bottom);
+      left=Math.min(left,pr.left); right=Math.max(right,pr.right);
+    }
+  }
+  const pad=24;   // فرصتِ عبورِ آزاد از راهرو/لبه‌ها، بدونِ بسته‌شدنِ ناخواسته
+  return _pfX >= left-pad && _pfX <= right+pad && _pfY >= top-pad && _pfY <= bottom+pad;
+}
+function closePickSoon(){
+  clearTimeout(pickTimer);
+  pickTimer=setTimeout(()=>{
+    if(_pfInZone()) return;                        // نشانگر برگشت/همان‌جاست
+    if(document.activeElement===symIn) return;      // کاربر داخلِ کادر مشغول است
+    closePick();
+  }, 420);
+}
+function _pfIntent(e){
+  _pfX=e.clientX; _pfY=e.clientY;
+  if(!chips.classList.contains("open")) return;
+  if(_pfInZone()) clearTimeout(pickTimer);          // هر حرکتِ داخلِ ناحیه = تمدیدِ مهلت
+  else closePickSoon();
+}
+document.addEventListener("mousemove", _pfIntent, {passive:true});
+chips.addEventListener("mouseenter", ()=>clearTimeout(pickTimer));
+chips.addEventListener("mouseleave", closePickSoon);
 symIn.addEventListener("focus", openPick);
 symIn.addEventListener("click", openPick);
 symWrap.addEventListener("mouseenter", openPick);
 symWrap.addEventListener("mouseleave", closePickSoon);
+symWrap.addEventListener("focusout", (e)=>{ if(!symWrap.contains(e.relatedTarget)) closePick(); });
 symIn.addEventListener("keydown", (e)=>{ if(e.key==="Escape") closePick(); });
 document.addEventListener("click", (e)=>{ if(!symWrap.contains(e.target)) closePick(); });
+// پنلِ «زیرِ ردیف» با position:fixed ست می‌شود؛ پس با اسکرولِ صفحه (نه اسکرولِ
+// داخلِ خودِ پنل) بسته می‌شود تا از کادرِ نماد جدا نیفتد.
+window.addEventListener("scroll", (e)=>{
+  if(e.target===document || e.target===document.documentElement) closePick();
+}, {passive:true});
 
 // وقتی نمادی انتخاب/تایپ شد، کاربر را به انتخابِ سبک/بازه هدایت کن (بدونِ اجرای خودکار)
 function markReady(){
