@@ -1016,6 +1016,110 @@ function loadPuppeteer() {
         try { await ctx.close(); } catch (e) { /* زمینهٔ موقت */ }
       }
     }
+
+    /* ۹.۳) شکافِ S10 — نسخهٔ تازه‌ای که **خودِ همین بارگذاری** راهش می‌اندازد هم
+       باید بنر بدهد. ریشه: بعد از `register("/sw.js")` سرِ بارگذاری، شنوندهٔ
+       `updatefound` بعد از دو `await` وصل می‌شد؛ اگر نصب پیش از آن تمام می‌شد،
+       هم `reg.waiting` در چکِ قبلش `null` بود و هم رویداد از دست می‌رفت → کاربر
+       بی‌خبر روی کدِ کهنه می‌مانْد.
+
+       وسوسهٔ یک تستِ «امیدوار» این‌جاست: این مسابقه چند میلی‌ثانیه است، پس در
+       یک اجرا سبز و در اجرای بعدی قرمز می‌شد. برای همین پنجره را **قطعی** پهن
+       می‌کنیم (نه شانسی): پاسخِ `PF_WHO` عمداً ۱.۵ ثانیه دیر می‌رسد، پس با کدِ
+       باگ‌دار شنونده دیر وصل می‌شود و نصب پیش از آن تمام شده — و با کدِ سالم
+       «دیده‌بان» پیش از هر await وصل است و نصب را از دست نمی‌دهد. */
+    if (!mkCtx) {
+      notes.push("هشدار: بدونِ زمینهٔ جدای مرورگر، نسخهٔ تازهٔ «سرِ بارگذاری» سنجیده نشد");
+    } else {
+      const ctx3 = await mkCtx.call(browser);
+      try {
+        const p3 = await ctx3.newPage();
+        await p3.setViewport({ width: 900, height: 1000 });
+        await p3.goto(URL, { waitUntil: "load", timeout: 30000 });
+        const boot = await p3.evaluate(async () => {
+          let active = false, ctrl = false;
+          for (let i = 0; i < 80; i++) {          // تا ۲۰ ثانیه
+            const regs = await navigator.serviceWorker.getRegistrations();
+            active = regs.some((r) => !!r.active);
+            ctrl = !!navigator.serviceWorker.controller;
+            if (active && ctrl) break;
+            await new Promise((r) => setTimeout(r, 250));
+          }
+          return { active, ctrl };
+        });
+        if (!boot.active || !boot.ctrl)
+          fail("بندِ ۹.۳: نصبِ اول کامل نشد (بدونِ کنترل‌کننده سنجش بی‌معنا است)");
+        else {
+          // پهن‌کردنِ عمدیِ پنجرهٔ مسابقه: پاسخِ وضعیتِ سرویس‌ورکر دیر می‌رسد.
+          await p3.evaluateOnNewDocument(() => {
+            try {
+              const post = ServiceWorker.prototype.postMessage;
+              ServiceWorker.prototype.postMessage = function (msg, ...rest) {
+                const m = msg || {};
+                if (m.type === "PF_WHO") {
+                  return setTimeout(() => post.apply(this, [m, ...rest]), 1500);
+                }
+                return post.apply(this, [m, ...rest]);
+              };
+            } catch (e) { /* بی‌اثر */ }
+          });
+          // آماده‌سازی: یک نسخهٔ تازهٔ *کلیک‌کردنی* تا نسخهٔ فعالِ الان
+          // با `/sw.js`ِ سرِ بارگذاری **فرق** داشته باشد.
+          const seed = await p3.evaluate(async () => {
+            try { await navigator.serviceWorker.register("/sw.js?pfprobe=9"); }
+            catch (e) { return { err: "ثبتِ نسخهٔ آماده‌سازی ممکن نشد: " + e }; }
+            const shown = () => {
+              const b = document.getElementById("pfSwBanner");
+              return !!(b && b.classList.contains("show") && b.offsetHeight > 0);
+            };
+            for (let i = 0; i < 120; i++) {
+              const regs = await navigator.serviceWorker.getRegistrations();
+              if (regs.some((r) => !!r.waiting) && shown()) return { waiting: true, shown: true };
+              await new Promise((r) => setTimeout(r, 250));
+            }
+            return { waiting: false, shown: false };
+          });
+          if (seed.err) fail(seed.err);
+          else if (!seed.waiting || !seed.shown)
+            fail("آماده‌سازیِ بندِ ۹.۳ ممکن نشد (نسخهٔ تازه در انتظار نماند یا بنر نیامد)");
+          else {
+            const nav = p3.waitForNavigation({ timeout: 25000 }).catch(() => null);
+            await p3.click("#pfSwBtn");       // فعال‌سازیِ «?pfprobe=9»
+            await nav;
+            await new Promise((r) => setTimeout(r, 1500));
+            const after = await p3.evaluate(async () => {
+              const b = document.getElementById("pfSwBanner");
+              const seen = () => !!(b && b.classList.contains("show") && b.offsetHeight > 0);
+              const c = navigator.serviceWorker.controller;
+              let waiting = false, shown = seen();
+              for (let i = 0; i < 80; i++) {           // تا ۲۰ ثانیه
+                const regs = await navigator.serviceWorker.getRegistrations();
+                waiting = regs.some((r) => !!r.waiting);
+                shown = seen();
+                if (waiting && shown) break;
+                await new Promise((r) => setTimeout(r, 250));
+              }
+              return { ctrl: c ? c.scriptURL : null, waiting, shown };
+            });
+            if (!String(after.ctrl || "").includes("pfprobe=9"))
+              fail("بندِ ۹.۳: نسخهٔ آماده‌سازی فعال نشد (کنترل‌کننده عوض نشد) — سنجش انجام نشد");
+            else if (!after.waiting)
+              fail("بندِ ۹.۳: بعد از فعال‌سازی، نسخهٔ تازه‌ای که ثبتِ سرِ بارگذاری راه "
+                + "انداخته در صف نماند — سنجش بی‌معنا می‌شد");
+            else if (!after.shown)
+              fail("نسخهٔ تازه‌ای که خودِ همین بارگذاری راهش انداخته، بنر نداد "
+                + "— کاربر بی‌خبر روی کدِ کهنه می‌مانَد (S10)");
+            else
+              notes.push("نسخهٔ تازهٔ «سرِ بارگذاری» هم بنر می‌دهد: با پاسخِ دیرهنگامِ "
+                + "PF_WHO، شنوندهٔ دیرهنگام هم نسخهٔ در صف را از دست نمی‌دهد");
+          }
+        }
+      } catch (e) {
+        fail("سنجشِ نسخهٔ تازهٔ «سرِ بارگذاری» ممکن نشد: " + e.message);
+      } finally {
+        try { await ctx3.close(); } catch (e) { /* زمینهٔ موقت */ }
+      }
+    }
   } catch (e) {
     fail("بررسیِ سرویس‌ورکر/آفلاین ممکن نشد: " + e.message);
   }

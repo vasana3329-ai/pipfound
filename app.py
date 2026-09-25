@@ -2604,7 +2604,9 @@ if(fundBtn){ fundBtn.onclick=()=>window.open("/fundamental","_blank","noopener")
 
 // ── به‌روزرسانیِ اپ: نامِ کشِ سرویس‌ورکر به بازنگریِ کد گره خورده (سرور جایش
 // می‌گذارد)، و جانشینیِ نسخهٔ تازه **با تأییدِ کاربر** انجام می‌شود. اگر تازه
-// در حالتِ انتظار بماند، بنرِ #pfSwBanner دیده می‌شود؛ دکمهٔ «به‌روزرسانی»
+// در حالتِ انتظار بماند، بنرِ #pfSwBanner دیده می‌شود (`pfWatchInstall` می‌گوید
+// هر نسخهٔ در صفی — حتی یکی که خودِ همین بارگذاری راهش انداخته — دیده شود)؛
+// دکمهٔ «به‌روزرسانی»
 // پیامِ SKIP_WAITING را می‌فرستد و با controllerchange صفحه یک‌بار رفرش
 // می‌شود. مهم: در نصبِ اول یا جانشینیِ خودسر هیچ بنری نشان داده نمی‌شود و هیچ
 // رفرشی رخ نمی‌دهد (بنرِ اشتباهی = بی‌اعتبارشدنِ بنر).
@@ -2661,6 +2663,30 @@ function pfHideUpdate(){
   const b=document.getElementById("pfSwBanner");
   if(b) b.classList.remove("show");
 }
+// دیده‌بانیِ «نسخهٔ تازهٔ در صف» — و رفعِ شکافِ واقعیِ S10: ثبتِ خودِ همین صفحه
+// (`register("/sw.js")` سرِ بارگذاری) هم می‌تواند یک نسخهٔ تازه راه بیندازد. قبلاً
+// شنوندهٔ `updatefound` بعد از دو `await` وصل می‌شد؛ اگر نصب در همان فاصله تمام
+// می‌شد، هم `reg.waiting` در چکِ قبلش `null` بود و هم رویداد پیش از وصل‌شدنِ
+// شنونده رخ داده بود → کاربر روی کدِ کهنه می‌ماند **بدونِ این‌که بداند نسخهٔ تازه
+// در صف است** (این حالت در ساختِ بندِ ۹.۲ زنده دیده شد). پس دو کار می‌کنیم:
+// (۱) شنونده **پیش از هر awaitِ بعدی** وصل می‌شود، و (۲) وضعیتِ *کنونیِ* ثبت هم
+// یک‌بار خوانده می‌شود (نه فقط انتظارِ رویداد) — با هر دو، هر دو حالتِ مسابقه
+// پوشش داده می‌شود. بنرِ نصبِ اول نباید بیاید: تنها وقتی نشان می‌دهیم که نسخهٔ
+// دیگری کنترلِ صفحه را داشته باشد.
+function pfWatchInstall(reg){
+  const pfNotice=(w)=>{
+    if(!navigator.serviceWorker.controller) return;   // نصبِ اول: بی‌بنر
+    if(reg.waiting || (w && w.state==="installed")) pfShowUpdate();
+  };
+  const pfTrack=(w)=>{
+    if(!w) return false;
+    w.addEventListener("statechange", ()=>pfNotice(w));   // مسیرِ عادیِ رویداد
+    pfNotice(w);        // شاید همین حالا به installed رسیده باشد
+    return true;
+  };
+  reg.addEventListener("updatefound", ()=>{ if(!pfTrack(reg.installing)) pfNotice(null); });
+  if(!pfTrack(reg.installing)) pfNotice(null);   // رویداد از قبل رخ داده بود
+}
 function pfSwSetup(){
   if(!("serviceWorker" in navigator)) return;
   if(!(location.protocol==="http:" || location.protocol==="https:")) return;
@@ -2689,6 +2715,7 @@ function pfSwSetup(){
     try{
       const reg=await navigator.serviceWorker.register("/sw.js");
       pfReg=reg;
+      pfWatchInstall(reg);   // پیش از هر awaitِ بعدی — وگرنه نصبِ سریع بی‌بنر می‌مانَد
       if(reg.waiting) pfShowUpdate();      // نسخهٔ تازه از قبل در صف بود
       else {
         // هیچ نسخهٔ در انتظاری نیست؛ تنها حالتِ دیگری که کاربر باید بداند،
@@ -2696,14 +2723,6 @@ function pfSwSetup(){
         const st=await pfAskWho();
         if(st && (st.shell_ok===false || (st.kept|0)>0)) pfShowRollback();
       }
-      reg.addEventListener("updatefound", ()=>{
-        const nw=reg.installing;
-        if(!nw) return;
-        nw.addEventListener("statechange", ()=>{
-          // «installed» + کنترل‌کنندهٔ قبلی = نسخهٔ تازه در انتظار است
-          if(nw.state==="installed" && navigator.serviceWorker.controller) pfShowUpdate();
-        });
-      });
     }catch(e){ /* PWA اختیاری است؛ نبودش اپ را نمی‌شکند */ }
   });
 }
