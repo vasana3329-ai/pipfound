@@ -659,7 +659,159 @@ function loadPuppeteer() {
     fail("کلیکِ دکمه‌ی سبک اثر نکرد: " + e.message);
   }
 
-  /* ۹) اسکرین‌شات برای بازبینیِ انسانی. */
+  /* ۹) PWA در عمل: سرویس‌ورکر فعال شود، پوستهٔ کشِ خودش پر شود، و با **قطعِ
+     واقعیِ شبکه** اپ از همان کش بالا بیاید. لایهٔ ۱ (`selfcheck.py`) این قرارداد را
+     استاتیک می‌سنجد؛ این‌جا در مرورگر اجرا می‌شود — چون «سرویس‌ورکرِ فعال ولی
+     خالی» یا «آفلاینِ خراب» دقیقاً همان خرابیِ بی‌صدایی است که هیچ چکِ متنی
+     نمی‌بیند. فهرستِ وعده‌های پوسته از **خودِ sw.js** خوانده می‌شود، نه از یک
+     فهرستِ دستیِ کنارِ تست — پس اگر کسی پوسته را عوض کند، همین‌جا گرفته می‌شود. */
+  try {
+    // یادداشتِ پایانی فقط وقتی نوشته می‌شود که همین بند ایرادی نگرفته باشد —
+    // وگرنه «آفلاین درست کار می‌کند» کنارِ پیام‌های قرمز می‌نشیند و گزارش را
+    // گمراه می‌کند (همین گمراهی در جهش‌آزماییِ همین بند دیده شد).
+    const pBefore = problems.length;
+    // `page.target().createCDPSession()` روی همهٔ نسخه‌های puppeteer/core هست
+    // (`page.createCDPSession` در نسخه‌های تازه deprecate شده).
+    const cdp = await page.target().createCDPSession();
+    await cdp.send("Network.enable");
+
+    /* چرا روی هدفِ سرویس‌ورکر هم offline اعمال می‌شود: سرویس‌ورکر یک **هدفِ جدای
+       CDP** است، پس `Network.emulateNetworkConditions` روی صفحه، شبکهٔ خودِ
+       سرویس‌ورکر را نمی‌بندد؛ وگرنه «آفلاین» فقط ظاهری می‌شود: `fetch`ِ داخلِ
+       سرویس‌ورکر به اینترنت می‌رسد و تست سبز می‌شود بدونِ اینکه چیزی از کش
+       آمده باشد (همین تله در جهش‌آزماییِ همین بند لو رفت). */
+    const swSeen = new Set(), swSessions = [];
+    const swSessionsSync = async () => {
+      for (const t of browser.targets()) {
+        if (t.type() !== "service_worker" || swSeen.has(t)) continue;
+        swSeen.add(t);
+        try {
+          const s = await t.createCDPSession();
+          await s.send("Network.enable");
+          swSessions.push(s);
+        } catch (e) { /* هدفِ در حالِ خاموش‌شدن — مهم نیست */ }
+      }
+    };
+    const netOff = async (off) => {
+      const args = { offline: off, latency: 0, downloadThroughput: -1, uploadThroughput: -1 };
+      await cdp.send("Network.emulateNetworkConditions", args);
+      await swSessionsSync();
+      for (const s of swSessions) {
+        try { await s.send("Network.emulateNetworkConditions", args); } catch (e) { /* هدفِ رفته */ }
+      }
+    };
+
+    const swText = await page.evaluate(() =>
+      fetch("/sw.js", { cache: "no-store" }).then((r) => r.text()));
+    const shellMatch = swText.match(/const\s+SHELL\s*=\s*\[([\s\S]*?)\]/);
+    if (!shellMatch) fail("آرایهٔ SHELL در sw.js پیدا نشد — پوستهٔ کش قابلِ بازبینی نیست");
+    const shell = shellMatch
+      ? [...shellMatch[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]) : [];
+    if (shell.length < 5) fail(`پوستهٔ کشِ sw.js تنها ${shell.length} مسیر دارد`);
+
+    const swInfo = await page.evaluate(async () => {
+      if (!("serviceWorker" in navigator)) return { unsupported: true };
+      const reg = await Promise.race([
+        navigator.serviceWorker.ready,
+        new Promise((r) => setTimeout(() => r(null), 15000)),
+      ]);
+      if (!reg || !reg.active) return { active: false };
+      return { active: true, scope: reg.scope };
+    });
+    if (swInfo.unsupported) fail("این مرورگر سرویس‌ورکر ندارد — قراردادِ آفلاین سنجیده نشد");
+    else if (!swInfo.active) fail("سرویس‌ورکر فعال نشد (ثبت/نصبِ sw.js ناموفق بود)");
+
+    // پوسته باید واقعاً در کشِ مرورگر بنشیند (addAll رد شود = کشِ خالی).
+    let cached = [];
+    for (let i = 0; i < 30; i++) {
+      cached = await page.evaluate(async () => {
+        const out = [];
+        for (const k of await caches.keys()) {
+          const c = await caches.open(k);
+          out.push(...(await c.keys()).map((r) => new URL(r.url).pathname));
+        }
+        return [...new Set(out)];
+      });
+      if (shell.every((p) => cached.includes(p))) break;
+      await wait(500);
+    }
+    const missingShell = shell.filter((p) => !cached.includes(p));
+    if (missingShell.length)
+      fail("پوستهٔ کش کامل پیش‌کش نشده (آفلاین ناقص می‌مانَد): " + missingShell.join("، "));
+
+    await netOff(true);
+    if (!swSessions.length)
+      notes.push("هشدار: هدفِ سرویس‌ورکر برای مهارِ شبکه پیدا نشد — «آفلاین» فقط روی صفحه "
+        + "اعمال شد؛ ادعای «از کش» را محتوای کش و کنترلِ سرویس‌ورکر تأیید می‌کند");
+
+    /* آیکون با شبکهٔ قطع باید از **کشِ سرویس‌ورکر** بیاید. `cache: "reload"`
+       عمدی است: وگرنه کشِ HTTPِ خودِ مرورگر جواب می‌دهد و تست می‌تواند سبز
+       شود درحالی‌که شاخهٔ کش‌اولِ سرویس‌ورکر شکسته است (همین تله در
+       جهش‌آزماییِ همین بند لو رفت). */
+    const iconOff = await page.evaluate(async () => {
+      try {
+        const r = await fetch("/icon-192.png", { cache: "reload" });
+        return { ok: r.ok, status: r.status, bytes: (await r.blob()).size };
+      } catch (e) { return { err: String(e) }; }
+    });
+    if (iconOff.err) fail("با قطعِ شبکه، آیکونِ /icon-192.png از کش نیامد: " + iconOff.err);
+    else if (!iconOff.ok) fail(`آیکون با شبکهٔ قطع وضعیتِ ${iconOff.status} داد`);
+    else if (!(iconOff.bytes > 100)) fail("آیکونِ کش‌شده خالی است (bytes=" + iconOff.bytes + ")");
+
+    /* دادهٔ زنده هرگز از کش سرو نشود: queryِ یکتا تا کشِ HTTPِ مرورگر هم در میان
+       نباشد — وگرنه تست می‌تواند سبز شود درحالی‌که سرویس‌ورکر /api/ را کش کرده. */
+    const apiOff = await page.evaluate(async () => {
+      try {
+        const r = await fetch("/api/health?offline_probe=" + Date.now(), { cache: "reload" });
+        return { ok: r.ok, status: r.status };
+      } catch (e) { return { err: String(e) }; }
+    });
+    if (!apiOff.err)
+      fail("با قطعِ شبکه، /api/ جواب داد — دادهٔ زنده نباید از کش سرو شود");
+
+    // ناوبریِ آفلاین: همان صفحه باید از پوستهٔ کش بیاید و اسکریپتش اجرا شود.
+    const errsBefore = pageErrors.length;
+    await page.reload({ waitUntil: "load", timeout: 30000 });
+    const off = await page.evaluate(() => {
+      const el = document.getElementById("bootWarn");
+      const st = el ? getComputedStyle(el) : null;
+      return {
+        sym: !!document.getElementById("sym"),
+        go: typeof ((document.getElementById("go") || {}).onclick) === "function",
+        chips: document.querySelectorAll("#chips .chip").length,
+        bootWarn: !!(el && st.display !== "none" && st.visibility !== "hidden" && el.offsetHeight > 0),
+        controlled: !!(navigator.serviceWorker && navigator.serviceWorker.controller),
+      };
+    });
+    if (!off.sym || !off.go) fail("صفحهٔ آفلاین بالا آمد ولی کلیدها/سیم‌کشی‌اش زنده نیست");
+    if (off.chips < 8)
+      fail(`صفحهٔ آفلاین چیپ‌های JS-ساخته را ندارد (${off.chips}) — یعنی از کش نیامده`);
+    if (off.bootWarn) fail("در حالتِ آفلاین نوارِ «نگهبانِ بوت» دیده می‌شود");
+    if (!off.controlled) fail("صفحهٔ آفلاین زیرِ کنترلِ سرویس‌ورکر نیست (از کش سرو نشده)");
+    for (const e of pageErrors.slice(errsBefore))
+      fail("خطای زمانِ اجرا در حالتِ آفلاین: " + e);
+    if (problems.length === pBefore)
+      notes.push(`آفلاین درست کار می‌کند: صفحه از پوستهٔ کش آمد · زیرِ کنترلِ سرویس‌ورکر ✓ · `
+        + `آیکون از کش (${iconOff.bytes} بایت) · /api/ عمداً وصل نشد ✓ · `
+        + `${shell.length}/${shell.length} مسیرِ پوسته پیش‌کش ✓`);
+    else
+      notes.push(`آفلاین ایراد گرفت (${problems.length - pBefore} مورد) — جزئیات در پیام‌های خطا`);
+
+    // برگشتِ شبکه: اپ باید بی‌مشکل دوباره از شبکه بالا بیاید.
+    await netOff(false);
+    await page.reload({ waitUntil: "load", timeout: 30000 });
+    const back = await page.evaluate(() => ({
+      sym: !!document.getElementById("sym"),
+      chips: document.querySelectorAll("#chips .chip").length,
+    }));
+    if (!back.sym || back.chips < 8)
+      fail("بعد از برگشتِ شبکه، اپ دوباره سالم بالا نیامد");
+    else notes.push("بعد از برگشتِ شبکه، اپ سالم بالا آمد");
+  } catch (e) {
+    fail("بررسیِ سرویس‌ورکر/آفلاین ممکن نشد: " + e.message);
+  }
+
+  /* ۱۰) اسکرین‌شات برای بازبینیِ انسانی. */
   try {
     await page.screenshot({ path: SHOT });
     notes.push("اسکرین‌شات: " + SHOT);
