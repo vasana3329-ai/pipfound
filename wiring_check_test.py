@@ -22,6 +22,9 @@
 هندلرِ فلش/متد به‌جای نامِ خالی، کلاسی که فقط JS یا CSS استفاده‌اش می‌کند، و
 idِ همنام در سندِ دیگر (HTML و FUND_PAGE دو دامنه‌ی جدا هستند).
 
+روی مخزنِ واقعی هم دو چیز قفل شده: لنگرهایی که هارنسِ بصری لازمشان دارد «مرده»
+نام نمی‌گیرند، و هیچ کدِ مردهٔ شناسه‌ای باقی نمانده (بندهای ۱ و ۴).
+
 کاملاً آفلاین و قطعی: هر جهش روی کپیِ موقتِ `app.py` اجرا می‌شود و به سرورِ 8787
 دست نمی‌زند.
 
@@ -94,6 +97,15 @@ def mutate(**subs):
     return out
 
 
+# دارایی‌های وبِ واقعیِ همین پوشه (هارنسِ بصری + سرویس‌ورکر). روی مخزنِ سالم
+# باید همراهش باشند تا سنجه‌ی «استفاده‌نشده» مثلِ واقعیت رفتار کند؛ وگرنه
+# لنگرهایی که هارنس پین کرده در محیطِ تستِ برهنه «مرده» به‌نظر می‌رسند و
+# عددِ هشدار کاذب می‌شود.
+HARNESS_ASSETS = {nm: open(os.path.join(HERE, nm), encoding="utf-8").read()
+                  for nm in ("ui_visual_check.cjs", "sw.js")
+                  if os.path.exists(os.path.join(HERE, nm))}
+
+
 def wiring_needles(r):
     w = r["w"] or {}
     return sorted((w.get("dups") or []) + (w.get("missing_ids") or [])
@@ -112,8 +124,10 @@ for k, v in ANCHORS.items():
 
 # ═══════════════════════════════════════════════════════════════════
 print("═══ ۱) مخزنِ سالم: گیت سبز، ولی با شمارشِ واقعی (ضدِ ناوَکوم) ═══")
-base = run_mutation(SOURCE)
+base = run_mutation(SOURCE, extra=HARNESS_ASSETS)
 w = base["w"]
+check("سنجه‌ی مخزنِ سالم با دارایی‌های وبِ واقعیِ همان‌جا اجرا می‌شود (ضدِ ناوَکوم)",
+      {"ui_visual_check.cjs", "sw.js"} <= set(w.get("assets") or []), str(w.get("assets")))
 check("گیتِ لایه‌ی ۱ روی کدِ سالم سبز است", base["ok"], str(base["problems"][:3]))
 check("هیچ خطای اتصالی گزارش نمی‌شود", wiring_needles(base) == [],
       str(wiring_needles(base)))
@@ -122,11 +136,20 @@ check("شناسه‌ها واقعاً شمرده شده‌اند (ضدِ ناو�
 check("ارجاع‌های JS واقعاً شمرده شده‌اند (ضدِ ناوَکوم)", w.get("refs", 0) >= 40, str(w.get("refs")))
 check("کلاس‌ها واقعاً شمرده شده‌اند (ضدِ ناوَکوم)", w.get("classes", 0) >= 30, str(w.get("classes")))
 # «استفاده‌نشده»ها هشدارند: نباید گیت را قرمز کنند (وگرنه بازگردانیِ بی‌دلیل).
-if unused_needles(base):
-    check("استفاده‌نشده‌ها فقط هشدارند (گیت سبز می‌مانَد)", base["ok"] is True,
-          str(base["problems"][:2]))
-    check("هشدارِ استفاده‌نشده در فهرستِ هشدارها می‌آید",
-          any("استفاده نشده" in x for x in base["warnings"]), str(base["warnings"][:2]))
+check("مخزنِ سالم: صفر کلاس/idِ استفاده‌نشده (کدِ مرده‌ای نمانده)",
+      unused_needles(base) == [], str(unused_needles(base)))
+# این خاصیت را با یک جهشِ عمدی می‌سنجیم، نه با خودِ مخزنِ سالم: حالا که آخرین
+# موردِ استفاده‌نشده پاک شده، شرطِ «اگر موجود بود» دیگر هیچ‌وقت اجرا نمی‌شد و
+# پوششِ «هشدار ≠ خطا» بی‌صدا از دست می‌رفت.
+UNUSED_MUT = mutate(h_sp_head='<div class="sp-head"><i id="ghostUnused"></i>')
+unused_r = run_mutation(UNUSED_MUT)
+check("idِ استفاده‌نشده گیت را قرمز نمی‌کند (فقط هشدار است)", unused_r["ok"] is True,
+      str(unused_r["problems"][:2]))
+check("...و در فهرستِ هشدارها با نامِ خودش می‌آید",
+      any("ghostUnused" in x and "استفاده نشده" in x for x in unused_r["warnings"]),
+      str(unused_r["warnings"][:2]))
+check("...و در آمارِ استفاده‌نشده‌ها می‌آید (ضدِ ناوَکوم)",
+      "HTML:ghostUnused" in unused_needles(unused_r), str(unused_needles(unused_r)))
 
 # ═══════════════════════════════════════════════════════════════════
 print("═══ ۲) جهش‌های واقعی: گیت باید قرمز شود و همان مورد را نام ببرد ═══")
@@ -254,6 +277,12 @@ check("مخزنِ واقعی: لنگرهای هارنس (btPanel/riskPanel/alarm
            & set(real_st.get("unused_ids") or [])), str(real_st.get("unused_ids")))
 check("مخزنِ واقعی: گیتِ قائل به دارایی هنوز خطایی گزارش نمی‌کند",
       wiring_needles({"w": real_st}) == [], str(real_st))
+# قفلِ پاکیزگی: مخزن نباید کدِ مردهٔ شناسه‌ای داشته باشد. خطِ گیت برای
+# «استفاده‌نشده» همچنان هشدار است (کدِ مرده سرور را برنمی‌گرداند)، ولی در
+# لایهٔ جهش‌آزمایی بلند می‌شکند تا دوباره هشدارِ بی‌صاحب روی هم تلنبار نشود.
+check("مخزنِ واقعی: هیچ id/کلاسِ استفاده‌نشده‌ای نمانده (کدِ مرده صفر)",
+      not (real_st.get("unused_ids") or real_st.get("unused_classes")),
+      str(list(real_st.get("unused_ids") or []) + list(real_st.get("unused_classes") or [])))
 
 # ═══════════════════════════════════════════════════════════════════
 print("═══ ۵) خودِ چک مستقل از مبنای کلیدها و بی‌نتیجه نیست ═══")

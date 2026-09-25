@@ -3,7 +3,6 @@
     "alarmBtn",
     "alarmMsg",
     "alarmsDock",
-    "alarmsHint",
     "alarmsList",
     "archiveBtn",
     "bootWarn",
@@ -95,7 +94,7 @@
     "/manifest.webmanifest",
     "/sw.js"
   ],
-  "saved_at": "2026-09-21T00:07:57+03:30",
+  "saved_at": "2026-09-25T11:57:50+03:30",
   "wired": [
     "alarmBtn",
     "alarmMsg",
