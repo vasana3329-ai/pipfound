@@ -58,7 +58,9 @@ MAN = open(os.path.join(HERE, "manifest.webmanifest"), encoding="utf-8").read()
 # لنگرهای جهش — اگر روزی ساختارِ sw.js/مانیفست/app.py عوض شود، تست باید
 # **بلند** بشکند نه بی‌صدا سبز شود.
 SW_ANCHORS = {
-    "cache_const": 'const CACHE = "pipfound-v1";',
+    "cache_const": 'const CACHE = "pipfound-__CACHE_REV__";',
+    "skip_handler": 'if (d.type === "SKIP_WAITING") { self.skipWaiting(); return; }',
+    "msg_listener": 'self.addEventListener("message", (e) => {',
     "shell_head": '  "/", "/manifest.webmanifest",',
     "shell_icons": '  "/icon-180.png", "/icon-192.png", "/icon-512.png",',
     "addall": ".then((c) => c.addAll(SHELL))",
@@ -88,6 +90,13 @@ APP_ANCHORS = {
     "static_tuple": 'if u.path in ("/manifest.webmanifest", "/sw.js", "/icon-180.png",',
     "sw_register": 'navigator.serviceWorker.register("/sw.js")',
     "manifest_link": '<link rel="manifest" href="/manifest.webmanifest">',
+    "token_decl": 'CACHE_REV_TOKEN = "__CACHE_REV__"',
+    "sw_swap": 'body = f.read().replace(CACHE_REV_TOKEN,',
+    "banner_markup": '<div class="updbar" id="pfSwBanner" role="status" aria-live="polite">',
+    "skip_msg": 'pfReg.waiting.postMessage({type:"SKIP_WAITING"});',
+    "asked_flag": 'pfAsked=true;',
+    "cb_gate": 'if(!pfAsked || pfReloading) return;',
+    "cb_reload": 'pfReloading=true;\n    location.reload();',
 }
 
 
@@ -173,7 +182,10 @@ check("پوستهٔ کش واقعاً خوانده شده (ضدِ ناوَکوم
       str(st.get("shell")))
 check("آیکون‌های مانیفست شمرده شده‌اند (ضدِ ناوَکوم)", st.get("icons", 0) >= 3,
       str(st.get("icons")))
-check("نامِ کش خوانده شده", st.get("cache") == "pipfound-v1", str(st.get("cache")))
+check("نامِ کش خوانده شده و جای‌گذارِ بازنگری در آن است",
+      st.get("cache") == "pipfound-__CACHE_REV__", str(st.get("cache")))
+check("نسخه‌بندیِ خودکارِ کش سنجیده و تأیید شد", st.get("cache_rev") is True, str(st))
+check("بنرِ «نسخهٔ تازه» در صفحه پیدا شد", st.get("update_banner") is True, str(st))
 check("مسیرهای سرو‌شده‌ی app.py خوانده شده‌اند (ضدِ ناوَکوم)", st.get("served", 0) >= 8,
       str(st.get("served")))
 check("«/api/» مستثنا است", st.get("api_bypass") is True, str(st))
@@ -299,6 +311,54 @@ expect_red("start_url به مسیری که سرو نمی‌شود",
            "در app.py سرو نمی‌شود",
            man=manifest(start_url="/app"))
 
+expect_red("نامِ کش دستی/ثابت شده (دیگر به بازنگریِ کد گره نخورده)",
+           "دستی و ثابت است",
+           sw=mutate_sw("cache_const", 'const CACHE = "pipfound-v1";'))
+
+expect_red("جای‌گذار در app.py اعلام نشده (سرور نمی‌داند چه را جانشین کند)",
+           "در app.py اعلام نشده",
+           app=mutate_app("token_decl", 'CACHE_REV_TOKEN_OLD = "__CACHE_REV__"'))
+
+expect_red("جای‌گذارِ app.py با جای‌گذارِ sw.js نمی‌خواند",
+           "نمی‌خواند",
+           app=mutate_app("token_decl", 'CACHE_REV_TOKEN = "__CACHE_REV_X__"'))
+
+expect_red("پاسخِ /sw.js بدونِ جانشینیِ نامِ کش سرو می‌شود",
+           "بدونِ جانشینیِ",
+           app=mutate_app("sw_swap", "body = f.read()"))
+
+expect_red("skipWaiting بی‌قید سرِ نصب (بنر بی‌معنا می‌شود)",
+           "سرِ نصب `skipWaiting` می‌زند",
+           sw=mutate_sw("addall", ".then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())"))
+
+expect_red("هندلرِ message پیامِ SKIP_WAITING را نمی‌شناسد",
+           "به هندلرِ message سرویس‌ورکر نمی‌رسد",
+           sw=mutate_sw("skip_handler", 'if (d.type === "SKIP_GO") { self.skipWaiting(); return; }'))
+
+expect_red("هندلرِ message سرویس‌ورکر برداشته شده",
+           "به هندلرِ message سرویس‌ورکر نمی‌رسد",
+           sw=mutate_sw("msg_listener", 'self.addEventListener("msging", (e) => {'))
+
+expect_red("بنرِ «نسخهٔ تازه» از صفحه برداشته شده",
+           "عنصرِ بنرِ «pfSwBanner» را نمی‌سازد",
+           app=mutate_app("banner_markup", '<div class="updbar" id="pfSwBannerGhost" role="status">'))
+
+expect_red("صفحه پیامِ SKIP_WAITING را نمی‌فرستد (دکمهٔ بنر بی‌اثر)",
+           "پیامِ SKIP_WAITING نمی‌فرستد",
+           app=mutate_app("skip_msg", 'pfReg.waiting.postMessage({type:"SKIP_LATER"});'))
+
+expect_red("رفرشِ صفحه پس از جانشینی برداشته شده",
+           "خودش را تازه نمی‌کند",
+           app=mutate_app("cb_reload", "pfReloading=true;"))
+
+expect_red("قیدِ «تأییدِ کاربر» از رفرشِ جانشینی برداشته شده",
+           "هیچ قیدِ «تأییدِ کاربر» ندارد",
+           app=mutate_app("cb_gate", "// بی‌قید شد"))
+
+expect_red("نشانِ «کاربر خواسته» هیچ‌وقت ست نمی‌شود (رفرشِ بی‌اجازه)",
+           "به نشانِ «کاربر خواسته» گره نخورده",
+           app=mutate_app("asked_flag", ""))
+
 expect_red("خطای سینتکس در sw.js",
            "خطای سینتکس دارد",
            sw=SW.replace(SW_ANCHORS["cache_const"],
@@ -365,6 +425,17 @@ expect_green("تغییرِ نامِ متغیرهای محلی (res → resp)", s
 
 expect_green("دکمهٔ «نصب» و بقیهٔ صفحه دست‌نخورده (فقط یک ویرایشِ بی‌ربط در app.py)",
              app=APP.replace('<h2>📊 چارتِ زنده', '<h2>📈 چارتِ زنده'))
+
+# نامِ متغیرهای محلیِ صفحه و نامِ تابعِ بازنگری در app.py جزوِ قرارداد نیستند؛
+# جهشِ تغییرِ نام باید سبز بماند وگرنه نگهبان به «سبکِ کد» گیر می‌دهد.
+_ren = (APP.replace("pfReg", "pfReg2").replace("pfReloading", "pfBusy")
+           .replace("pfAsked", "pfAskedUser").replace("cache_rev", "sw_cache_rev"))
+check("جهشِ «تغییرِ نامِ متغیر» واقعاً اعمال شد", _ren != APP)
+expect_green("تغییرِ نامِ متغیرهای محلیِ بنر و تابعِ بازنگری", app=_ren)
+
+expect_green("کامنتِ حاویِ «skipWaiting» در sw.js (کامنت قرارداد نیست)",
+             sw=mutate_sw("msg_listener", "// skipWaiting فقط با پیامِ کاربر\n"
+                           + SW_ANCHORS["msg_listener"]))
 
 # ═══════════════════════════════════════════════════════════════════
 print("═══ ۴) چک بی‌نتیجه (ناوَکوم) نیست و پوشهٔ بی‌PWA را نمی‌ترساند ═══")

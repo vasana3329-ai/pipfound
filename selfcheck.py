@@ -19,7 +19,9 @@
      activate/fetch، نامِ کش، آرایهٔ پوستهٔ کش و addAll آن، معافیتِ «/api/» از کش،
      فالبکِ آفلاین، گاردِ «res.ok» قبل از هر cache.put، کش‌اول بودنِ آیکون‌ها، و
      تطابقِ هر وعده (مسیرهای پوستهٔ کش، آیکون‌های مانیفست و آیکون‌های خودِ صفحه،
-     start_url) با فایلِ واقعی و مسیرهای سروشده‌ی app.py.
+     start_url) با فایلِ واقعی و مسیرهای سروشده‌ی app.py، به‌علاوهٔ نسخه‌بندیِ
+     خودکارِ کش (جای‌گذار ↔ جانشینیِ سرور) و بنرِ «نسخهٔ تازه» با هماهنگیِ
+     skipWaiting (پیام ↔ controllerchange ↔ رفرشِ قیدشده به تأییدِ کاربر).
   ۵) چکِ «هیچ کلیدی گم نشود»: هر کنترلی که در نسخه‌ی سالمِ قبلی وجود داشت و
      جاوااسکریپت به آن وصل بود، باید سرِ جایش باشد. همچنین مسیرها (routeها).
   ۶) اسنپ‌شاتِ نسخه‌ی سالم را در ~/pipfound/good نگه می‌دارد و با فلگ --guard
@@ -656,6 +658,61 @@ _PWA_HREF_RE = re.compile(r"\bhref\s*=\s*[\"']([^\"']+)[\"']", re.I)
 _PWA_PATHNAME_TEST_RE = re.compile(r"/((?:\\.|[^/\\\n])+)/\s*\.test\(\s*url\.pathname")
 
 
+def _gated_route_paths(src):
+    """مسیرهایی که فقط با `u.path == "…"` شناخته می‌شوند ولی **زیرِ گاردی**
+    هستند که آنها را نمی‌پذیرد — یعنی عملاً سرو نمی‌شوند.
+
+    چرا لازم است: یک شرطِ داخلیِ `u.path == "/sw.js"` کافی است تا استخراجِ مسطح
+    «سرو‌شده» به‌شمارش بیاید، حتی اگر خودِ دیسپچِ بیرونی `/sw.js` را از فهرستش
+    برداشته باشد — و آن‌وقت نگهبان سبز می‌مانَد درحالی‌که `/sw.js` فقط ۴۰۴
+    می‌دهد (همین تله در جهش‌آزماییِ همین چک لو رفت). تشخیص با تورفتگی است:
+    از خطِ شرط به عقب می‌رویم تا اولین `if`ِ کم‌تورفتگی‌تر که `u.path` دارد
+    (واسطه‌هایی مثلِ `if os.path.isfile(fp):` رد می‌شوند).
+    """
+    lines = src.splitlines()
+    gated = set()
+    for i, line in enumerate(lines):
+        m = _PWA_ROUTE_EQ_RE.search(line)
+        if not m:
+            continue
+        path, indent = m.group(1), len(line) - len(line.lstrip())
+        for j in range(i - 1, -1, -1):
+            prev = lines[j]
+            if not prev.strip():
+                continue
+            if len(prev) - len(prev.lstrip()) >= indent:
+                continue
+            head = prev.strip()
+            if head.startswith(("def ", "class ")):
+                break              # از تابع/کلاس بیرون زدیم؛ گاردی نیست
+            if not (head.startswith("if ") and "u.path" in head):
+                continue           # واسطه‌ای دیگر مثلِ `if os.path.isfile(fp):`
+            window = "\n".join(lines[j:i + 1])
+            tm = _PWA_ROUTE_TUPLE_RE.search(window)
+            if tm:
+                # گاردِ `not in` برعکس عمل می‌کند (مثلِ گیتِ توکن که فقط
+                # `/api/health` و `/api/install` را آزاد می‌گذارد).
+                neg = bool(re.search(r"u\.path\s+not\s+in\s*\(", window))
+                inside = '"%s"' % path in tm.group(1)
+                # در گاردِ `in` ورود مشروط به عضویت است، در `not in` مشروط به
+                # نبودن؛ پس شاخهٔ داخلی دقیقاً وقتی دست‌نیافتنی است که
+                # «ورود» و «بودن در فهرست» یکی نشوند (بررسیِ جهتِ درست).
+                if inside == neg:
+                    gated.add(path)
+                break
+            em = _PWA_ROUTE_EQ_RE.search(window)
+            if em and em.group(1) != path:
+                gated.add(path)
+                break
+            sm = _PWA_STARTSWITH_RE.search(window)
+            if sm:
+                if not path.startswith(sm.group(1)):
+                    gated.add(path)
+                break
+            break
+    return gated
+
+
 def _blank_js_comments(text):
     """کامنت‌های JS را با فاصله می‌پوشاند (هم‌طول می‌ماند) تا خطِ کامنت‌شده
     «قرارداد» شمرده نشود. کامنتِ خطی فقط وقتی پاک می‌شود که قبلش فاصله یا
@@ -730,7 +787,8 @@ def pwa_contract_problems(root):
     وعده داده باشد (لینکِ مانیفست/ثبتِ سرویس‌ورکر)، چون آن‌وقت وعده‌ی بی‌فایل است."""
     probs, warns = [], []
     stats = {"promised": 0, "shell": 0, "icons": 0, "cache": None, "served": 0,
-             "api_bypass": False, "offline": False, "cache_first_icons": False}
+             "api_bypass": False, "offline": False, "cache_first_icons": False,
+             "cache_rev": False, "update_banner": False}
     src = read_text(os.path.join(root, "app.py"))
     sw = read_text(os.path.join(root, "sw.js"))
     man_raw = read_text(os.path.join(root, "manifest.webmanifest"))
@@ -742,7 +800,10 @@ def pwa_contract_problems(root):
     for body in _PWA_ROUTE_TUPLE_RE.findall(src):
         served |= set(_PWA_QUOTED_RE.findall(body))
     prefixes = _PWA_STARTSWITH_RE.findall(src)
+    gated = _gated_route_paths(src)
+    served -= gated          # شاخهٔ داخلیِ زیرِ گاردی که مسیر را نمی‌پذیرد
     stats["served"] = len(served)
+    stats["gated"] = sorted(gated)
 
     def is_served(path):
         return path in served or any(path.startswith(p) for p in prefixes)
@@ -955,6 +1016,95 @@ def pwa_contract_problems(root):
                     if not rx.search(ic):
                         probs.append(f"آیکونِ «{ic}» با قاعدهٔ کش‌اولِ آیکون در sw.js نمی‌خواند "
                                      "(از شاخهٔ شبکه رد می‌شود)")
+
+    # ۶) نسخه‌بندیِ خودکارِ کش + بنرِ «نسخهٔ تازه» با هماهنگیِ skipWaiting
+    # چرا: نامِ کشِ ثابت یعنی ارتقای کش به یادِ آدم وابسته می‌مانَد؛ و بدونِ بنر،
+    # کاربری که هفته‌ها از کش سرو می‌شود (به‌ویژه آفلاین) هیچ‌وقت نمی‌فهمد نسخهٔ
+    # تازه آمده. سه خرابیِ بی‌صدا این‌جا گرفته می‌شود: (۱) نامِ کشِ دستی/ثابت;
+    # (۲) جای‌گذار در sw.js هست ولی سرور جانشینش نمی‌کند → نامِ کش همان
+    # `pipfound-__CACHE_REV__` می‌مانَد (ثابتِ ابدی: نه ارتقایی، نه خطایی)؛
+    # (۳) `skipWaiting` بی‌قید یا بنرِ صفحهٔ بی‌پیام/بی‌رفرش — که یا کاربر را
+    # وسطِ کار از کدِ قدیم به تازه پرت می‌کند یا دکمه‌اش بی‌اثر می‌مانَد.
+    cache_literal = stats.get("cache") or ""
+    _tm = re.search(r"__[A-Z][A-Z0-9_]*__", cache_literal)
+    tok = _tm.group(0) if _tm else None
+    if sw and cache_literal and not tok:
+        probs.append(f"نامِ کش («{cache_literal}») دستی و ثابت است — با هر تغییرِ کد همان کش "
+                     "پوشش داده می‌شود و ارتقای کش فقط به یادِ آدم وابسته می‌مانَد")
+    if tok:
+        decl = re.search(r"CACHE_REV_TOKEN\s*=\s*\"([^\"\n]+)\"", src)
+        tok_srv = decl.group(1) if decl else None
+        if not tok_srv:
+            probs.append(f"جای‌گذارِ نامِ کش («{tok}») در app.py اعلام نشده (CACHE_REV_TOKEN) "
+                         "— سرور نمی‌داند چه چیزی را جانشین کند")
+        elif tok_srv != tok:
+            probs.append(f"جای‌گذارِ app.py («{tok_srv}») با جای‌گذارِ sw.js («{tok}») نمی‌خواند "
+                         "— جانشینی هرگز رخ نمی‌دهد و نامِ کش ثابت می‌مانَد")
+        else:
+            bm = re.search(r'u\.path\s*==\s*"/sw\.js"', src)
+            window = src[bm.start():bm.start() + 900] if bm else ""
+            if re.search(r"\.replace\(\s*(?:CACHE_REV_TOKEN|\"%s\")" % re.escape(tok), window):
+                stats["cache_rev"] = True
+            else:
+                probs.append(f"پاسخِ /sw.js بدونِ جانشینیِ «{tok}» سرو می‌شود — نامِ کش برای "
+                             "همیشه ثابت می‌مانَد (نه ارتقایی، نه بنری)")
+
+    if sw:
+        _swc = _blank_js_comments(sw)
+        _swm = strip_js_literals(_swc)
+        install_body = _js_listener_body(_swc, _swm, "install") or ""
+        msg_body = _js_listener_body(_swc, _swm, "message") or ""
+        if "skipWaiting(" in install_body:
+            probs.append("سرویس‌ورکر سرِ نصب `skipWaiting` می‌زند — کاربرِ وسطِ کار بی‌خبر از "
+                         "کدِ قدیم به تازه پرت می‌شود و بنرِ «نسخهٔ تازه» بی‌معنا می‌مانَد")
+        elif "skipWaiting(" in _swc and not msg_body:
+            probs.append("`skipWaiting` در سرویس‌ورکر هست ولی از مسیرِ پیامِ کاربر نیست "
+                         "— ارتقا زیرِ پای کاربر رخ می‌دهد")
+        # عمداً «ساخته شدنِ عنصر» سنجیده می‌شود، نه وجودِ نام در متن: ارجاعِ JS
+        # (`getElementById("pfSwBanner")`) هم نام را دارد و اگر پیدا کردنِ عنصر
+        # پاک شود، بنر هرگز دیده نمی‌شود ولی چک سبزِ دروغ می‌ماند.
+        banner_present = bool(re.search(
+            r"(?:\bid\s*=\s*[\"']pfSwBanner[\"']"
+            r"|setAttribute\(\s*[\"']id[\"']\s*,\s*[\"']pfSwBanner[\"'])",
+            page_html))
+        page_asks = bool(re.search(r"postMessage\(\s*\{[^}]*SKIP_WAITING", page_html))
+        if not banner_present:
+            probs.append("صفحه عنصرِ بنرِ «pfSwBanner» را نمی‌سازد — کاربر (به‌ویژه آفلاین) "
+                         "هیچ راهی ندارد بفهمد نسخهٔ تازه آمده")
+        else:
+            stats["update_banner"] = True
+        # بنر یعنی صفحه وعدهٔ «به‌روزرسانی با تأییدِ کاربر» داده؛ پس کلِ زنجیره
+        # (پیام → skipWaiting → controllerchange → رفرش) باید کامل باشد، وگرنه
+        # دکمهٔ بنر بی‌اثر است یا برعکس، صفحه بی‌اجازه از نو بالا می‌آید.
+        if banner_present or page_asks:
+            if not page_asks:
+                probs.append("بنرِ «نسخهٔ تازه» هست ولی صفحه پیامِ SKIP_WAITING نمی‌فرستد "
+                             "— دکمهٔ «به‌روزرسانی» هیچ‌وقت نسخه را جانشین نمی‌کند")
+            if "SKIP_WAITING" not in msg_body:
+                probs.append("پیامِ SKIP_WAITING صفحه به هندلرِ message سرویس‌ورکر نمی‌رسد "
+                             "— دکمهٔ «به‌روزرسانی» بی‌اثر می‌مانَد")
+            cb = ""
+            for ptext in pages.values():
+                _pc = _blank_js_comments(ptext)
+                cb = _js_listener_body(_pc, strip_js_literals(_pc), "controllerchange") or ""
+                if cb:
+                    break
+            if not cb:
+                probs.append("صفحه `controllerchange` را نمی‌شنود — بعد از جانشینیِ نسخهٔ تازه "
+                             "کاربر تا رفرشِ دستی روی کدِ کهنه می‌مانَد")
+            else:
+                if "location.reload(" not in cb:
+                    probs.append("پس از جانشینیِ نسخهٔ تازه صفحه خودش را تازه نمی‌کند "
+                                 "— کاربر روی کدِ کهنه می‌مانَد")
+                gate = [i for i in set(re.findall(r"[A-Za-z_$][\w$]*", cb))
+                        if re.search(r"(?:if\s*\(\s*!|&&\s*!)\s*%s\b" % re.escape(i), cb)]
+                if not gate:
+                    probs.append("جانشینیِ نسخهٔ تازه هیچ قیدِ «تأییدِ کاربر» ندارد — خودِ "
+                                 "نصبِ اول هم صفحه را وسطِ کار از نو بالا می‌آورد")
+                elif not any(re.search(r"\b%s\s*=\s*true" % re.escape(i), page_html)
+                             for i in gate):
+                    probs.append("قیدِ جانشینی به نشانِ «کاربر خواسته» گره نخورده "
+                                 "— رفرشِ بی‌قیدِ صفحه احتمالاً نصبِ اول را هم برمی‌گرداند")
     return probs, warns, stats
 
 
@@ -1194,7 +1344,9 @@ def _human(rep):
             f" · پوستهٔ کش: {pw.get('shell', 0)} مسیر · آیکون: {pw.get('icons', 0)}"
             f" · /api/ مستثنا: {_mark(pw.get('api_bypass'))}"
             f" · فالبکِ آفلاین: {_mark(pw.get('offline'))}"
-            f" · کش‌اولِ آیکون: {_mark(pw.get('cache_first_icons'))}")
+            f" · کش‌اولِ آیکون: {_mark(pw.get('cache_first_icons'))}"
+            f" · نسخه‌بندیِ خودکارِ کش: {_mark(pw.get('cache_rev'))}"
+            f" · بنرِ به‌روزرسانی: {_mark(pw.get('update_banner'))}")
     for p in rep.get("problems") or []:
         lines.append(f"   ✗ {p}")
     for w in rep.get("warnings") or []:

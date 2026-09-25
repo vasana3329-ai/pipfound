@@ -709,6 +709,30 @@ function loadPuppeteer() {
       ? [...shellMatch[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]) : [];
     if (shell.length < 5) fail(`پوستهٔ کشِ sw.js تنها ${shell.length} مسیر دارد`);
 
+    /* ۹.۰) نسخه‌بندیِ خودکارِ کش + بنرِ «نسخهٔ تازه»، از دیدِ **مرورگر**:
+       نامِ کشی که سرور سرو می‌کند نباید جای‌گذارِ خام داشته باشد (وگرنه نامِ کش
+       برای همیشه ثابت می‌مانَد و کشِ کهنه هیچ‌وقت ارتقا نمی‌یابد)، و بنر باید
+       ساخته شده باشد ولی بدونِ نسخهٔ در انتظار پنهان بماند (بنرِ الکی = بنرِ
+       بی‌اعتبار). رفتارِ واقعیِ بنر در بندِ ۹.۱ سنجیده می‌شود. */
+    const cacheName = (swText.match(/\bCACHE\s*=\s*"([^"\n]+)"/) || [])[1] || "";
+    if (swText.includes("__CACHE_REV__"))
+      fail("sw.js سرو‌شده هنوز جای‌گذارِ «__CACHE_REV__» دارد — نامِ کش جانشین نشده");
+    else if (!/^pipfound-\S{6,}/.test(cacheName))
+      fail(`نامِ کشِ سرو‌شده («${cacheName}») به بازنگریِ کد گره نخورده`);
+
+    const banner = await page.evaluate(() => {
+      const b = document.getElementById("pfSwBanner");
+      if (!b) return { exists: false };
+      return { exists: true, shown: b.classList.contains("show"),
+               display: getComputedStyle(b).display,
+               btn: !!document.getElementById("pfSwBtn") };
+    });
+    if (!banner.exists) fail("بنرِ «نسخهٔ تازه» (#pfSwBanner) در صفحه ساخته نشده");
+    else if (banner.shown || banner.display !== "none")
+      fail("بنرِ «نسخهٔ تازه» بدونِ نسخهٔ در انتظار دیده می‌شود (بنرِ الکی)");
+    else if (!banner.btn) fail("دکمهٔ «به‌روزرسانی» بنرِ نسخهٔ تازه وجود ندارد");
+    else notes.push(`نسخه‌بندیِ خودکارِ کش: ${cacheName} · بنرِ به‌روزرسانی آماده و پنهان`);
+
     const swInfo = await page.evaluate(async () => {
       if (!("serviceWorker" in navigator)) return { unsupported: true };
       const reg = await Promise.race([
@@ -738,6 +762,12 @@ function loadPuppeteer() {
     const missingShell = shell.filter((p) => !cached.includes(p));
     if (missingShell.length)
       fail("پوستهٔ کش کامل پیش‌کش نشده (آفلاین ناقص می‌مانَد): " + missingShell.join("، "));
+    // نامِ کشی که مرورگر در آن می‌نویسد باید همان نامِ سرو‌شدهٔ sw.js باشد:
+    // اگر سرور جای‌گذار را عوض کند، کشِ کهنه هیچ‌وقت پاک نمی‌شود.
+    const cacheKeys = await page.evaluate(async () => await caches.keys());
+    if (cacheName && !cacheKeys.includes(cacheName))
+      fail(`کشِ فعال («${(cacheKeys || []).join("، ")}») با نامِ سرو‌شدهٔ sw.js `
+        + `(«${cacheName}») نمی‌خواند`);
 
     await netOff(true);
     if (!swSessions.length)
@@ -807,6 +837,83 @@ function loadPuppeteer() {
     if (!back.sym || back.chips < 8)
       fail("بعد از برگشتِ شبکه، اپ دوباره سالم بالا نیامد");
     else notes.push("بعد از برگشتِ شبکه، اپ سالم بالا آمد");
+
+    /* ۹.۱) بنرِ «نسخهٔ تازه» در عمل — در یک زمینهٔ جدای مرورگر (استوریجِ جدا،
+       پس هیچ چیزی به پروفایل/کشِ اصلی دست نمی‌زند): نصبِ اول انجام می‌شود،
+       بعد همان sw.js با مسیرِ متفاوتی ثبت می‌شود تا یک **نسخهٔ تازه** بسازد که
+       چون `skipWaiting` بی‌قید نیست باید در حالتِ انتظار بمانَد. آن‌وقت بنر
+       باید دیده شود و کلیکِ کاربر روی «به‌روزرسانی» نسخهٔ تازه را فعال کند.
+       این تنها جایی است که خودِ حلقهٔ ارتقا (نه فقط وجودِ عناصر) اجرا می‌شود. */
+    const mkCtx = browser.createBrowserContext
+      ? () => browser.createBrowserContext()
+      : (browser.createIncognitoBrowserContext
+        ? () => browser.createIncognitoBrowserContext() : null);
+    if (!mkCtx) {
+      notes.push("هشدار: این نسخهٔ puppeteer زمینهٔ جدای مرورگر ندارد — "
+        + "بنرِ «نسخهٔ تازه» در عمل سنجیده نشد");
+    } else {
+      const ctx = await mkCtx.call(browser);
+      try {
+        const p2 = await ctx.newPage();
+        await p2.setViewport({ width: 900, height: 1000 });
+        await p2.goto(URL, { waitUntil: "load", timeout: 30000 });
+        const first = await p2.evaluate(async () => {
+          const b = document.getElementById("pfSwBanner");
+          await Promise.race([navigator.serviceWorker.ready,
+            new Promise((r) => setTimeout(r, 15000))]);
+          return { exists: !!b, shown: !!(b && b.classList.contains("show")) };
+        });
+        if (!first.exists) fail("بنرِ «نسخهٔ تازه» در نصبِ تازهٔ اپ ساخته نشد");
+        else if (first.shown) fail("در نصبِ اول (بدونِ نسخهٔ در انتظار) بنر دیده شد");
+
+        const probe = await p2.evaluate(async () => {
+          const out = { waiting: false, shown: false };
+          try { await navigator.serviceWorker.register("/sw.js?pfprobe=1"); }
+          catch (e) { out.err = "ثبتِ نسخهٔ تازه ممکن نشد: " + e; return out; }
+          const shown = () => {
+            const b = document.getElementById("pfSwBanner");
+            if (!b) return false;
+            return b.classList.contains("show") ||
+                   (getComputedStyle(b).display !== "none" && b.offsetHeight > 0);
+          };
+          for (let i = 0; i < 120; i++) {
+            const regs = await navigator.serviceWorker.getRegistrations();
+            out.waiting = regs.some((r) => !!r.waiting);
+            out.shown = shown();
+            if (out.waiting && out.shown) break;
+            await new Promise((r) => setTimeout(r, 250));
+          }
+          return out;
+        });
+        if (probe.err) fail(probe.err);
+        else {
+          if (!probe.waiting)
+            fail("نسخهٔ تازهٔ سرویس‌ورکر در حالتِ انتظار نماند — بی‌قید جانشین شد");
+          if (!probe.shown)
+            fail("با بودنِ نسخهٔ تازهٔ در انتظار، بنرِ «نسخهٔ تازه» دیده نشد");
+        }
+        if (!probe.err && probe.waiting && probe.shown) {
+          const nav = p2.waitForNavigation({ timeout: 20000 }).catch(() => null);
+          await p2.click("#pfSwBtn");
+          await nav;
+          const after = await p2.evaluate(async () => {
+            const c = navigator.serviceWorker.controller;
+            const regs = await navigator.serviceWorker.getRegistrations();
+            return { ctrl: c ? c.scriptURL : null,
+                     waiting: regs.some((r) => !!r.waiting) };
+          });
+          if (!String(after.ctrl || "").includes("pfprobe=1"))
+            fail("کلیکِ «به‌روزرسانی» نسخهٔ تازه را فعال نکرد (کنترل‌کنندهٔ صفحه هنوز کدِ کهنه است)");
+          else
+            notes.push("بنرِ «نسخهٔ تازه» در عمل کار می‌کند: با یک کلیک، نسخهٔ در انتظار "
+              + "فعال شد و صفحه با کدِ تازه بالا آمد");
+        }
+      } catch (e) {
+        fail("سنجشِ بنرِ «نسخهٔ تازه» ممکن نشد: " + e.message);
+      } finally {
+        try { await ctx.close(); } catch (e) { /* زمینهٔ موقت */ }
+      }
+    }
   } catch (e) {
     fail("بررسیِ سرویس‌ورکر/آفلاین ممکن نشد: " + e.message);
   }
