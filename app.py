@@ -1634,7 +1634,7 @@ tr.on td{background:rgba(34,197,94,.05)}
   <div id="btresult"></div>
 
   <div class="alarms-dock" id="alarmsDock">
-    <h2>🔔 آلارم‌های فعال <span class="jmsg" id="alarmsHint">(هر ۹۰ ثانیه بررسی می‌شوند)</span></h2>
+    <h2>🔔 آلارم‌های فعال <span class="jmsg">(هر ۹۰ ثانیه بررسی می‌شوند)</span></h2>
     <div id="alarmsList"><div class="aempty">هنوز آلارمی نگذاشته‌ای.</div></div>
   </div>
 
