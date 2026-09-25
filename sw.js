@@ -36,8 +36,12 @@ self.addEventListener("fetch", (e) => {
   if (isIcon) {                                          // آیکون‌ها: کش‌اول
     e.respondWith(
       caches.match(req).then((hit) => hit || fetch(req).then((res) => {
-        const copy = res.clone();
-        caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+        // فقط پاسخِ سالم کش می‌شود: یک ۴۰۴/۵۰۰ گذرا نباید تا ارتقای کش
+        // به‌عنوانِ «آیکون» بماند (کشِ کش‌اول ابدی است).
+        if (res && res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+        }
         return res;
       }))
     );

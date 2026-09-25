@@ -55,10 +55,22 @@ ANCHORS = {
 }
 
 
+# فایل‌های همراهی که اپِ واقعی در همین پوشه دارد (سرویس‌ورکر، مانیفست، آیکون‌ها).
+# محیطِ جهش باید مثلِ مخزن باشد: نگهبان حالا وعده‌های سرویس‌ورکر/مانیفست را با
+# فایل‌های واقعی مقابله می‌کند و در sandboxِ بره «وعدهی بی‌فایل» خطای کاذب می‌دهد.
+COMPANION_ASSETS = ("sw.js", "manifest.webmanifest",
+                    "icon-180.png", "icon-192.png", "icon-192-mask.png",
+                    "icon-512.png", "icon-512-mask.png")
+
+
 def run_mutation(text):
     """جهش را در پوشه‌ای موقت می‌گذارد و از خودِ گیتِ لایه‌ی ۱ می‌پرسد."""
     d = tempfile.mkdtemp(prefix="pf_undef_")
     try:
+        for nm in COMPANION_ASSETS:
+            src = os.path.join(HERE, nm)
+            if os.path.exists(src):
+                shutil.copy2(src, os.path.join(d, nm))
         with open(os.path.join(d, "app.py"), "w", encoding="utf-8") as f:
             f.write(text)
         pages = SC.page_sources(d)

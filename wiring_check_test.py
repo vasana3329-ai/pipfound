@@ -76,6 +76,10 @@ def run_mutation(text, extra=None):
     `extra` = دارایی‌های وبِ همراه (مثلِ هارنسِ بصری) که گیت باید بخواندشان."""
     d = tempfile.mkdtemp(prefix="pf_wiring_")
     try:
+        for nm in COMPANION_ASSETS:
+            src = os.path.join(HERE, nm)
+            if os.path.exists(src):
+                shutil.copy2(src, os.path.join(d, nm))
         with open(os.path.join(d, "app.py"), "w", encoding="utf-8") as f:
             f.write(text)
         for nm, body in (extra or {}).items():
@@ -97,13 +101,13 @@ def mutate(**subs):
     return out
 
 
-# دارایی‌های وبِ واقعیِ همین پوشه (هارنسِ بصری + سرویس‌ورکر). روی مخزنِ سالم
-# باید همراهش باشند تا سنجه‌ی «استفاده‌نشده» مثلِ واقعیت رفتار کند؛ وگرنه
-# لنگرهایی که هارنس پین کرده در محیطِ تستِ برهنه «مرده» به‌نظر می‌رسند و
-# عددِ هشدار کاذب می‌شود.
-HARNESS_ASSETS = {nm: open(os.path.join(HERE, nm), encoding="utf-8").read()
-                  for nm in ("ui_visual_check.cjs", "sw.js")
-                  if os.path.exists(os.path.join(HERE, nm))}
+# دارایی‌های وبِ واقعیِ همین پوشه. محیطِ جهش باید مثلِ مخزن باشد، وگرنه دو
+# خطای کاذب می‌سازد: (۱) لنگرهایی که هارنسِ بصری پین کرده «کدِ مرده» به‌نظر
+# می‌رسند؛ (۲) نگهبانِ تازه‌ی «قراردادِ PWA» فایلِ همراهِ app.py را نمی‌بیند و
+# «وعده‌ی بی‌فایل» گزارش می‌کند.
+COMPANION_ASSETS = ("ui_visual_check.cjs", "sw.js", "manifest.webmanifest",
+                    "icon-180.png", "icon-192.png", "icon-192-mask.png",
+                    "icon-512.png", "icon-512-mask.png")
 
 
 def wiring_needles(r):
@@ -124,7 +128,7 @@ for k, v in ANCHORS.items():
 
 # ═══════════════════════════════════════════════════════════════════
 print("═══ ۱) مخزنِ سالم: گیت سبز، ولی با شمارشِ واقعی (ضدِ ناوَکوم) ═══")
-base = run_mutation(SOURCE, extra=HARNESS_ASSETS)
+base = run_mutation(SOURCE)
 w = base["w"]
 check("سنجه‌ی مخزنِ سالم با دارایی‌های وبِ واقعیِ همان‌جا اجرا می‌شود (ضدِ ناوَکوم)",
       {"ui_visual_check.cjs", "sw.js"} <= set(w.get("assets") or []), str(w.get("assets")))

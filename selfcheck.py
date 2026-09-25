@@ -15,9 +15,14 @@
      استفاده‌نشده هم شمرده می‌شود، ولی فقط به‌شکلِ «هشدار» — آن هم با احتسابِ
      دارایی‌های وبِ بیرون (هارنسِ بصری، سرویس‌ورکر)، تا لنگرهای زنده «مرده»
      نام نگیرند.
-  ۴) چکِ «هیچ کلیدی گم نشود»: هر کنترلی که در نسخه‌ی سالمِ قبلی وجود داشت و
+  ۴) چکِ قراردادِ PWA (استاتیک، بدونِ اجرا): سینتکسِ sw.js، هندلرهای install/
+     activate/fetch، نامِ کش، آرایهٔ پوستهٔ کش و addAll آن، معافیتِ «/api/» از کش،
+     فالبکِ آفلاین، گاردِ «res.ok» قبل از هر cache.put، کش‌اول بودنِ آیکون‌ها، و
+     تطابقِ هر وعده (مسیرهای پوستهٔ کش، آیکون‌های مانیفست و آیکون‌های خودِ صفحه،
+     start_url) با فایلِ واقعی و مسیرهای سروشده‌ی app.py.
+  ۵) چکِ «هیچ کلیدی گم نشود»: هر کنترلی که در نسخه‌ی سالمِ قبلی وجود داشت و
      جاوااسکریپت به آن وصل بود، باید سرِ جایش باشد. همچنین مسیرها (routeها).
-  ۵) اسنپ‌شاتِ نسخه‌ی سالم را در ~/pipfound/good نگه می‌دارد و با فلگ --guard
+  ۶) اسنپ‌شاتِ نسخه‌ی سالم را در ~/pipfound/good نگه می‌دارد و با فلگ --guard
      اگر کد خراب بود، خودکار همان نسخه‌ی سالم را برمی‌گرداند.
 کاربرد:
     python3 selfcheck.py                     # گزارشِ سلامت (exit 0 سالم / 1 خراب)
@@ -69,6 +74,12 @@ PORT = 8787
 
 
 # ─────────────────────────── ابزارهای کمکی ───────────────────────────
+def _strip_block_comments(text):
+    """کامنت‌های بلوکیِ `/* … */` را با فاصله می‌پوشاند (هم‌طول). چرا: کامنتِ
+    داخلِ آرایهٔ پوستهٔ کش نباید آدرسِ «وعده‌داده‌شده» به‌حساب بیاید."""
+    return re.sub(r"/\*.*?\*/", lambda m: " " * len(m.group(0)), text, flags=re.S)
+
+
 def _log(line):
     try:
         os.makedirs(BASE, exist_ok=True)
@@ -616,6 +627,337 @@ def routes_of(root):
     return sorted(found)
 
 
+# ────────── چکِ استاتیکِ قراردادِ PWA (سرویس‌ورکر ↔ مانیفست ↔ خودِ اپ) ──────────
+# چرا لازم است: `node --check` فقط بلوک‌های <script> صفحه را می‌بیند (نه sw.js)، و
+# هیچ لایه‌ای وعده‌های سرویس‌ورکر/مانیفست را با واقعیتِ سرور مقابله نمی‌کرد. چهار
+# خرابیِ کاملاً بی‌صدا از همان شکاف می‌آید: (۱) آیکونی که مانیفست اعلام می‌کند ولی
+# روی دیسک نیست یا مسیرش سرو نمی‌شود (نصبِ اپ با آیکونِ شکسته، بدونِ هیچ خطا)؛
+# (۲) مسیری که در پوستهٔ کش precache می‌شود ولی روی سرور وجود ندارد (نصبِ
+# سرویس‌ورکر نیمه‌کاره می‌مانَد)؛ بلندتر از همه (۳) `addAll(نامِ غلط)` یا نامِ
+# ناهمخوانِ کش که با ReferenceError/پاک‌شدنِ کش، سرویس‌ورکر را بی‌اثر می‌کند و
+# در کنسولِ کاربر هم دیده نمی‌شود؛ و (۴) کش‌کردنِ پاسخِ ناموفق یا `/api/` که
+# بعد از یک خطای گذرا، دادهٔ زنده/صفحهٔ خطا را تا ارتقای کش گیر می‌اندازد.
+_PWA_ROUTE_TUPLE_RE = re.compile(r"u\.path\s+(?:not\s+)?in\s*\(([^)]*)\)")
+_PWA_ROUTE_EQ_RE = re.compile(r'u\.path\s*==\s*"([^"]+)"')
+_PWA_STARTSWITH_RE = re.compile(r"u\.path\.startswith\(\s*\"([^\"]+)\"\s*\)")
+_PWA_QUOTED_RE = re.compile(r'"([^"\n]*)"')
+_PWA_CACHE_CONST_RE = re.compile(
+    r"\b(?:const|let|var)\s+[A-Z_]*CACHE[A-Z_]*\s*=\s*\"([^\"\n]*)\"")
+_PWA_ARRAY_DECL_RE = re.compile(
+    r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\[([^\]]*)\]", re.S)
+_PWA_ADDALL_RE = re.compile(r"\.addAll\(\s*([A-Za-z_$][\w$]*)\s*\)")
+_PWA_OPEN_RE = re.compile(r"caches\.open\(\s*([^)]*?)\s*\)")
+_PWA_PUT_RE = re.compile(r"\.put\s*\(")
+_PWA_REGISTER_RE = re.compile(r"serviceWorker\.register\(\s*\"([^\"]+)\"\s*\)")
+_PWA_MANIFEST_LINK_RE = re.compile(r"<link\b[^>]*\brel\s*=\s*[\"']manifest[\"']", re.I)
+_PWA_LINK_TAG_RE = re.compile(r"<link\b[^>]*>", re.I)
+_PWA_REL_RE = re.compile(r"\brel\s*=\s*[\"']([^\"']*)[\"']", re.I)
+_PWA_HREF_RE = re.compile(r"\bhref\s*=\s*[\"']([^\"']+)[\"']", re.I)
+_PWA_PATHNAME_TEST_RE = re.compile(r"/((?:\\.|[^/\\\n])+)/\s*\.test\(\s*url\.pathname")
+
+
+def _blank_js_comments(text):
+    """کامنت‌های JS را با فاصله می‌پوشاند (هم‌طول می‌ماند) تا خطِ کامنت‌شده
+    «قرارداد» شمرده نشود. کامنتِ خطی فقط وقتی پاک می‌شود که قبلش فاصله یا
+    ابتدای خط باشد، وگرنه `https://...` داخلِ رشته هم کامنت گرفته می‌شد.
+
+    **ترتیب مهم است:** اول کامنتِ خطی، بعد بلوکی. وگرنه یک `/api/*` داخلِ
+    کامنتِ خطی (همین سرِ sw.js هست!) شروعِ کامنتِ بلوکیِ جعلی می‌شود و تا اولین
+    `*/` همه‌چیز وسط را می‌خورد — از جمله ثابتِ `CACHE` و آرایه‌ی پوسته."""
+    def _pad(m):
+        return " " * len(m.group(0))
+    out = re.sub(r"(?m)(^|[ \t])//[^\n]*", _pad, text)
+    return re.sub(r"/\*.*?\*/", _pad, out, flags=re.S)
+
+
+def _js_spans_ok_guards(text):
+    """بازهٔ بدنهٔ هر `if (… .ok …) { … }` در متن → [(شروع, پایان)]."""
+    spans = []
+    for gm in re.finditer(r"if\s*\(([^)]*)\)\s*\{", text):
+        if ".ok" not in gm.group(1):
+            continue
+        i = text.index("{", gm.start())
+        body = _js_block_at(text, i)
+        if body is not None:
+            spans.append((i, i + len(body) + 1))
+    return spans
+
+
+def _ok_guarded_puts(text):
+    """هر کش‌کردن باید **داخلِ** بلوکِ گاردِ پاسخِ سالم باشد (`if (res && res.ok)`).
+    پنجرهٔ ثابتِ نویسه‌ای اینجا کار نمی‌کند: کامنت/قالب‌بندی فاصله را جابه‌جا
+    می‌کند و منفیِ کاذب می‌سازد؛ پس عضویت در بلوک سنجیده می‌شود."""
+    spans = _js_spans_ok_guards(text)
+    return all(any(a < m.start() < b for a, b in spans)
+               for m in _PWA_PUT_RE.finditer(text))
+
+
+def _js_block_at(text, i):
+    """بدنهٔ بلوکِ آکولادی که از جایِ `{`ِ i شروع می‌شود → متنِ درون، وگرنه None."""
+    depth, j = 0, i
+    while j < len(text):
+        c = text[j]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[i + 1:j]
+        j += 1
+    return None
+
+
+def _js_listener_body(raw, masked, event):
+    """بدنهٔ `self.addEventListener("event", …)` → متنِ خام، یا None.
+    محلش از متنِ پوشانده (رشته/کامنت بی‌اثر) و نامِ رویداد از متنِ خام در همان
+    آفست خوانده می‌شود — دو متن هم‌طول‌اند."""
+    for m in re.finditer(r"addEventListener\s*\(", masked):
+        am = re.match(r'\s*["\']([^"\']*)["\']', raw[m.end():m.end() + 80])
+        if not am or am.group(1) != event:
+            continue
+        i = masked.find("{", m.end())
+        if i < 0:
+            return None
+        return _js_block_at(raw, i)
+    return None
+
+
+def pwa_contract_problems(root):
+    """وعده‌های سرویس‌ورکر و مانیفست را با خودِ اپ مقابله می‌کند → (خطاها, هشدارها, آمار).
+
+    کاملاً استاتیک: هیچ‌کد و سرویسی اجرا نمی‌شود. اگر پوشه اصلاً PWA نداشته
+    باشد (نه sw.js نه مانیفست) چیزی گزارش نمی‌شود — مگر آنکه خودِ صفحه به آن‌ها
+    وعده داده باشد (لینکِ مانیفست/ثبتِ سرویس‌ورکر)، چون آن‌وقت وعده‌ی بی‌فایل است."""
+    probs, warns = [], []
+    stats = {"promised": 0, "shell": 0, "icons": 0, "cache": None, "served": 0,
+             "api_bypass": False, "offline": False, "cache_first_icons": False}
+    src = read_text(os.path.join(root, "app.py"))
+    sw = read_text(os.path.join(root, "sw.js"))
+    man_raw = read_text(os.path.join(root, "manifest.webmanifest"))
+    if not src and not sw and not man_raw:
+        return probs, warns, stats
+
+    # مسیرهایی که خودِ اپ سرو می‌کند: allowlistِ ثابت + پیشوندهای startswith
+    served = set(_PWA_ROUTE_EQ_RE.findall(src))
+    for body in _PWA_ROUTE_TUPLE_RE.findall(src):
+        served |= set(_PWA_QUOTED_RE.findall(body))
+    prefixes = _PWA_STARTSWITH_RE.findall(src)
+    stats["served"] = len(served)
+
+    def is_served(path):
+        return path in served or any(path.startswith(p) for p in prefixes)
+
+    def on_disk(path):
+        return os.path.isfile(os.path.join(root, os.path.basename(path)))
+
+    pages = page_sources(root)
+    page_html = "\n".join(pages.values())
+
+    # ۱) وعده‌های خودِ صفحه (نقطه‌ای که زنجیره از آن شروع می‌شود)
+    has_man_link = bool(_PWA_MANIFEST_LINK_RE.search(page_html))
+    reg = _PWA_REGISTER_RE.search(page_html)
+    if has_man_link:
+        stats["promised"] += 1
+        if not man_raw:
+            probs.append("صفحه به «manifest.webmanifest» لینک داده ولی فایلش کنارِ app.py نیست")
+        if not is_served("/manifest.webmanifest"):
+            probs.append("مسیرِ «/manifest.webmanifest» در app.py سرو نمی‌شود (لینکِ مانیفست ۴۰۴ می‌دهد)")
+    if reg:
+        stats["promised"] += 1
+        sw_path = reg.group(1)
+        if not sw:
+            probs.append(f"صفحه سرویس‌ورکرِ «{sw_path}» را ثبت می‌کند ولی فایلش کنارِ app.py نیست")
+        elif not is_served(sw_path):
+            probs.append(f"مسیرِ «{sw_path}» در app.py سرو نمی‌شود (ثبتِ سرویس‌ورکر ۴۰۴ می‌دهد)")
+    elif sw:
+        probs.append("سرویس‌ورکر موجود است ولی خودِ صفحه هیچ‌جا ثبتش نمی‌کند — PWA بی‌صدا خاموش شده")
+
+    if not sw and not man_raw:
+        return probs, warns, stats
+
+    shell_list = []
+    # ۲) سرویس‌ورکر: سینتکس، هندلرها، نامِ کش، پوستهٔ کش، رفتارِ fetch
+    if sw:
+        sw_code = _blank_js_comments(sw)
+        engine = js_engine()
+        if not engine:
+            warns.append("موتورِ JS پیدا نشد (node) — سینتکسِ sw.js چک نشد")
+        else:
+            tmpd = tempfile.mkdtemp(prefix="pf_swcheck_")
+            try:
+                fp = os.path.join(tmpd, "sw.js")
+                with open(fp, "w", encoding="utf-8") as f:
+                    f.write(sw)
+                cmd = [engine, "check", fp] if engine.endswith("deno") else [engine, "--check", fp]
+                try:
+                    r = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
+                    if r.returncode != 0:
+                        blob = [l.strip() for l in ((r.stderr or "") + (r.stdout or "")).strip().splitlines() if l.strip()]
+                        detail = next((l for l in blob if "Error" in l), (blob[-1][:160] if blob else ""))
+                        probs.append(f"sw.js خطای سینتکس دارد: {detail or 'بدونِ جزئیات'}")
+                except Exception as e:
+                    warns.append(f"اجرای چکِ سینتکسِ sw.js ممکن نشد ({e})")
+            finally:
+                shutil.rmtree(tmpd, ignore_errors=True)
+
+        handlers = set(re.findall(r'addEventListener\s*\(\s*["\']([a-z]+)["\']', sw_code))
+        for h in ("install", "activate", "fetch"):
+            if h not in handlers:
+                probs.append(f"سرویس‌ورکر هندلرِ «{h}» را ندارد")
+
+        m = _PWA_CACHE_CONST_RE.search(sw_code)
+        cache_name = m.group(1) if m else None
+        stats["cache"] = cache_name
+        if not cache_name:
+            probs.append('نامِ کش در sw.js تعریف نشده (const CACHE = "…")')
+        else:
+            for raw_arg in _PWA_OPEN_RE.findall(sw_code):
+                arg = raw_arg.strip()
+                if arg == "CACHE" or arg.strip("\"'") == cache_name:
+                    continue
+                probs.append(f"«caches.open({arg})» با نامِ کشِ اعلام‌شده («{cache_name}») "
+                             "نمی‌خواند — activate آن کش را پاک می‌کند")
+
+        addall = _PWA_ADDALL_RE.search(sw_code)
+        arrays = {nm: body for nm, body in _PWA_ARRAY_DECL_RE.findall(sw_code)}
+        if not addall:
+            probs.append("در sw.js هیچ آرایه‌ای با addAll پیش‌کش نمی‌شود (پوستهٔ آفلاین ساخته نمی‌شود)")
+        elif addall.group(1) not in arrays:
+            probs.append(f"addAll({addall.group(1)}) به آرایه‌ای اشاره می‌کند که تعریف نشده "
+                         "— سرِ نصب ReferenceError می‌دهد و سرویس‌ورکر نصب نمی‌شود")
+        else:
+            body = _strip_block_comments(arrays[addall.group(1)])
+            shell_list = _PWA_QUOTED_RE.findall(body)
+            stats["shell"] = len(shell_list)
+            if not shell_list:
+                probs.append(f"آرایهٔ پوستهٔ کش ({addall.group(1)}) خالی است — آفلاین چیزی برای نمایش نمی‌مانَد")
+            for p in shell_list:
+                if p.startswith("/api/"):
+                    probs.append(f"«{p}» در پوستهٔ کش پیش‌کش شده — دادهٔ زنده هرگز نباید کش شود")
+                elif not p.startswith("/"):
+                    probs.append(f"«{p}» در پوستهٔ کش مسیرِ مطلقِ همین‌مبدأ نیست")
+                elif not is_served(p):
+                    probs.append(f"«{p}» در پوستهٔ کش است ولی app.py سروش نمی‌کند "
+                                 "— نصبِ سرویس‌ورکر نیمه‌کاره می‌مانَد")
+                elif "." in os.path.basename(p) and not on_disk(p):
+                    # `addAll` با یک URLِ ناموفق کلّاً رد می‌شود و `catch` خفه‌اش
+                    # می‌کند: سرویس‌ورکر نصب می‌شود ولی **هیچ‌چیز** پیش‌کش نشده.
+                    probs.append(f"«{p}» در پوستهٔ کش است ولی فایلش روی دیسک نیست — "
+                                 "addAll رد می‌شود و کشِ آفلاین خالی می‌مانَد")
+
+        masked = strip_js_literals(sw_code) if sw_code.strip() else ""
+        fb = _js_listener_body(sw_code, masked, "fetch") if masked else None
+        if fb is None and "fetch" in handlers:
+            warns.append("بدنهٔ هندلرِ fetch خوانده نشد — بندهای کشِ داده/آفلاین سنجیده نشد")
+        if fb:
+            if re.search(r'startsWith\(\s*"/api/"', fb):
+                stats["api_bypass"] = True
+            else:
+                probs.append("هندلرِ fetch مسیرهای «/api/» را مستثنا نمی‌کند — دادهٔ زنده کش می‌شود")
+            # فالبکِ آفلاین: پشتِ یکی از catchها باید caches.match( باشد. عمداً
+            # بدونِ regexِ تُو‌در‌تُو: هر «شرطی بودن» الگو باعثِ منفیِ کاذب می‌شود
+            # (همین تله در توسعهٔ همین چک لو رفت — فاصلهٔ ثابتِ ۲۶۰ نویسه با
+            # کامنت‌های فارسیِ وسطِ کد می‌شکست).
+            if any("caches.match(" in fb[m.end():m.end() + 220]
+                   for m in re.finditer(r"\bcatch\b", fb)):
+                stats["offline"] = True
+            else:
+                probs.append("شاخهٔ شبکه‌ی fetch پشتوانهٔ کش ندارد (آفلاین صفحهٔ خطای مرورگر می‌آید)")
+            if not _ok_guarded_puts(fb):
+                probs.append("پاسخ بدونِ گاردِ «res.ok» کش می‌شود — یک ۴۰۴/۵۰۰ گذرا تا "
+                             "ارتقای کش گیر می‌مانَد")
+            im = re.search(r"if\s*\(([^)]*icon[^)]*)\)\s*\{", fb, re.I)
+            if not im:
+                probs.append("سرویس‌ورکر شاخهٔ کش‌اولِ آیکون ندارد (هر آیکون هر بار از شبکه)")
+            else:
+                blk = _js_block_at(fb, fb.index("{", im.start()))
+                if blk is None:
+                    warns.append("بلوکِ شاخهٔ آیکون خوانده نشد — ترتیبِ کش/شبکه سنجیده نشد")
+                else:
+                    mc, fc = blk.find("caches.match("), blk.find("fetch(")
+                    if mc < 0 or (0 <= fc < mc):
+                        probs.append("شاخهٔ آیکون کش‌اول نیست (fetch قبل از caches.match) — آفلاین آیکون ندارد")
+                    else:
+                        stats["cache_first_icons"] = True
+
+    shell_set = set(shell_list)
+
+    # ۳) مانیفست: آیکون‌ها و start_url باید واقعاً وجود داشته و سرو شوند
+    man = {}
+    if man_raw:
+        try:
+            man = json.loads(man_raw)
+        except Exception as e:
+            probs.append(f"manifest.webmanifest JSON نامعتبر است ({e})")
+            man = {}
+        if not isinstance(man, dict):
+            probs.append("manifest.webmanifest باید یک شیءِ JSON باشد")
+            man = {}
+    if man:
+        start = str(man.get("start_url") or "/")
+        stats["promised"] += 1
+        if not is_served(start):
+            probs.append(f"start_urlِ «{start}» در app.py سرو نمی‌شود")
+        icons = [str(i.get("src")) for i in (man.get("icons") or [])
+                 if isinstance(i, dict) and i.get("src")]
+        stats["icons"] = len(icons)
+        if not icons:
+            probs.append("مانیفست هیچ آیکونی اعلام نکرده — نصبِ اپ بدونِ آیکون می‌شود")
+        for ic in icons:
+            if not on_disk(ic):
+                probs.append(f"آیکونِ «{ic}» در مانیفست اعلام شده ولی فایلش روی دیسک نیست")
+            elif not is_served(ic):
+                probs.append(f"آیکونِ «{ic}» سرو نمی‌شود — نصبِ اپ با آیکونِ شکسته")
+            elif shell_set and ic not in shell_set:
+                probs.append(f"آیکونِ «{ic}» در پوستهٔ کش پیش‌کش نشده — نصبِ آفلاینِ اولین‌بار آیکون ندارد")
+        if shell_set and "/manifest.webmanifest" not in shell_set:
+            probs.append("«/manifest.webmanifest» در پوستهٔ کش نیست — نصبِ آفلاینِ اولین‌بار ممکن نیست")
+        if shell_set and not (man.get("start_url") or "/") in shell_set:
+            probs.append(f"start_urlِ «{start or '/'}» در پوستهٔ کش نیست — آفلاین صفحهٔ فالبک پیدا نمی‌شود")
+
+    # ۴) آیکون‌های خودِ صفحه (فاوآیکون/اپل‌تاچ): فایل، مسیر و پوششِ کش
+    page_icons = []
+    for tm in _PWA_LINK_TAG_RE.finditer(page_html):
+        tag = tm.group(0)
+        rel = _PWA_REL_RE.search(tag)
+        if not rel or "icon" not in (rel.group(1) or "").lower():
+            continue
+        hm = _PWA_HREF_RE.search(tag)
+        if not hm:
+            continue
+        href = hm.group(1)
+        if href.startswith(("http:", "https:", "data:", "//")):
+            continue
+        page_icons.append(href)
+        stats["promised"] += 1
+        if not on_disk(href):
+            probs.append(f"آیکونِ صفحه «{href}» روی دیسک نیست")
+        elif not is_served(href):
+            probs.append(f"آیکونِ صفحه «{href}» سرو نمی‌شود")
+        elif shell_set and href not in shell_set:
+            probs.append(f"آیکونِ صفحه «{href}» در پوستهٔ کش پیش‌کش نشده — آفلاین آیکون ندارد")
+
+    # ۵) هم‌خوانیِ قاعدهٔ کش‌اولِ آیکون با نامِ آیکون‌های اعلام‌شده
+    if sw and stats["cache_first_icons"] and shell_set:
+        pm = _PWA_PATHNAME_TEST_RE.search(sw)
+        if not pm:
+            warns.append("قاعدهٔ مسیرِ آیکون در sw.js پیدا نشد — هم‌خوانیِ نام‌ها سنجیده نشد")
+        else:
+            try:
+                rx = re.compile(re.sub(r"\\/", "/", pm.group(1)))
+            except re.error:
+                rx = None
+            if rx is None:
+                warns.append("قاعدهٔ مسیرِ آیکون در sw.js به regexِ پایتون ترجمه نشد")
+            else:
+                for ic in [str(i.get("src")) for i in (man.get("icons") or [])
+                           if isinstance(i, dict) and i.get("src")] + page_icons:
+                    if not rx.search(ic):
+                        probs.append(f"آیکونِ «{ic}» با قاعدهٔ کش‌اولِ آیکون در sw.js نمی‌خواند "
+                                     "(از شاخهٔ شبکه رد می‌شود)")
+    return probs, warns, stats
+
+
 def read_baseline(root=None):
     """مبنای «نسخه‌ی سالم» → (inventory, منبع).
     اول اسنپ‌شاتِ همین ماشین (~/pipfound/good)، بعد فایلِ نسخه‌بندی‌شده‌ی
@@ -705,6 +1047,16 @@ def run_checks(root, live=False, enforce_contract=True, accept_removals=False):
     rep["wiring"] = wstats
     rep["problems"] += [f"اتصالِ HTML/JS → {p}" for p in wp]
     rep["warnings"] += [f"اتصالِ HTML/JS → {w}" for w in ww]
+
+    # ── چکِ استاتیکِ قراردادِ PWA (سرویس‌ورکر ↔ مانیفست ↔ اپ) ──
+    # نه سینتکسِ sw.js را جایی می‌سنجید و نه وعده‌های مانیفست/پوستهٔ کش را با
+    # مسیرهای واقعیِ سرور مقابله می‌کرد: آیکونِ ناموجود، مسیرِ سرو‌نشده در
+    # پوستهٔ کش، `addAll(نامِ غلط)` و پاسخِ ناموفقِ کش‌شده — همه بی‌صدا نصب یا
+    # حالتِ آفلاین را می‌شکنند و هیچ لایه‌ای قرمز نمی‌شد.
+    pw, pn, pstats = pwa_contract_problems(root)
+    rep["pwa"] = pstats
+    rep["problems"] += [f"PWA → {p}" for p in pw]
+    rep["warnings"] += [f"PWA → {p}" for p in pn]
 
     inv = inventory(pages)
     inv["routes"] = routes_of(root)
@@ -833,6 +1185,16 @@ def _human(rep):
                      f" · داراییِ وب: {len(wg.get('assets') or [])}"
                      f" · استفاده‌نشده: {len(wg.get('unused_ids') or [])} id"
                      f" / {len(wg.get('unused_classes') or [])} کلاس")
+    pw = rep.get("pwa") or {}
+    if pw:
+        def _mark(flag):
+            return "✓" if flag else "✗"
+        lines.append(
+            f"   PWA: {pw.get('promised', 0)} وعده · کش: {pw.get('cache') or '—'}"
+            f" · پوستهٔ کش: {pw.get('shell', 0)} مسیر · آیکون: {pw.get('icons', 0)}"
+            f" · /api/ مستثنا: {_mark(pw.get('api_bypass'))}"
+            f" · فالبکِ آفلاین: {_mark(pw.get('offline'))}"
+            f" · کش‌اولِ آیکون: {_mark(pw.get('cache_first_icons'))}")
     for p in rep.get("problems") or []:
         lines.append(f"   ✗ {p}")
     for w in rep.get("warnings") or []:
