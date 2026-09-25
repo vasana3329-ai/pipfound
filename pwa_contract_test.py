@@ -61,6 +61,12 @@ SW_ANCHORS = {
     "cache_const": 'const CACHE = "pipfound-__CACHE_REV__";',
     "skip_handler": 'if (d.type === "SKIP_WAITING") { self.skipWaiting(); return; }',
     "msg_listener": 'self.addEventListener("message", (e) => {',
+    "verify_call": "    let healthy = await shellHealthy(CACHE);",
+    "verify_body": "    const c = await caches.open(name);\n"
+                   "    for (const p of SHELL) {",
+    "safe_gate": "    if (healthy) {",
+    "cache_pref": '.catch(() => fromCache(req).then((hit) => hit || caches.match("/")))',
+    "open_param": "const c = await caches.open(name);",
     "shell_head": '  "/", "/manifest.webmanifest",',
     "shell_icons": '  "/icon-180.png", "/icon-192.png", "/icon-512.png",',
     "addall": ".then((c) => c.addAll(SHELL))",
@@ -83,7 +89,7 @@ SW_ANCHORS = {
                        "        return res;\n"
                        "      })"),
     "open_icon": "caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});",
-    "fallback": '.catch(() => caches.match(req).then((hit) => hit || caches.match("/")))',
+    "fallback": '.catch(() => fromCache(req).then((hit) => hit || caches.match("/")))',
 }
 
 APP_ANCHORS = {
@@ -186,6 +192,8 @@ check("نامِ کش خوانده شده و جای‌گذارِ بازنگری �
       st.get("cache") == "pipfound-__CACHE_REV__", str(st.get("cache")))
 check("نسخه‌بندیِ خودکارِ کش سنجیده و تأیید شد", st.get("cache_rev") is True, str(st))
 check("بنرِ «نسخهٔ تازه» در صفحه پیدا شد", st.get("update_banner") is True, str(st))
+check("قراردادِ ارتقای ایمن (سنجش + گاردِ حذف + فالبکِ کشِ فعال) تأیید شد",
+      st.get("safe_upgrade") is True, str(st))
 check("مسیرهای سرو‌شده‌ی app.py خوانده شده‌اند (ضدِ ناوَکوم)", st.get("served", 0) >= 8,
       str(st.get("served")))
 check("«/api/» مستثنا است", st.get("api_bypass") is True, str(st))
@@ -359,6 +367,48 @@ expect_red("نشانِ «کاربر خواسته» هیچ‌وقت ست نمی�
            "به نشانِ «کاربر خواسته» گره نخورده",
            app=mutate_app("asked_flag", ""))
 
+expect_red("پاک‌کردنِ کشِ قبلی بی‌قید شد (دیگر به تأییدِ پوستهٔ تازه گره نخورده)",
+           "به تأییدِ پوستهٔ تازه گره",
+           sw=mutate_sw("safe_gate", "    if (true) {"))
+
+expect_red("هر دو مسیرِ سنجش بی‌سنجش شدند (فقط ترمیم صدا زده می‌شود)",
+           "به تأییدِ پوستهٔ تازه گره نخورده",
+           sw=mutate_sw("verify_call", "    let healthy = true;")
+              .replace("      healthy = await shellHealthy(CACHE);",
+                       "      healthy = true;", 1))
+
+# جهشِ «حذفِ کاملِ سنجش از activate» (هم مسیرِ اولیه هم مسیرِ ترمیم): تابعِ
+# سنجش سرِ جایش هست ولی هیچ‌جا در activate خوانده نمی‌شود.
+expect_red("activate هیچ سنجشگری را صدا نمی‌زند (سنجش و ترمیم هر دو حذف شد)",
+           "activate درستیِ پوستهٔ تازه را نمی‌سنجد",
+           sw=mutate_sw("verify_call", "    let healthy = true;")
+              .replace("      healthy = await shellHealthy(CACHE);",
+                       "      healthy = true;", 1)
+              .replace("      await healFromOld();", "      void 0;", 1))
+
+expect_red("هیچ تابعی برای سنجشِ درستیِ پوسته نمانده (فقط ترمیم)",
+           "به تأییدِ پوستهٔ تازه گره نخورده",
+           sw=mutate_sw("verify_body",
+                        "    const c = await caches.open(name);\n"
+                        "    for (const p of []) {"))
+
+expect_red("هیچ تابعی SHELL را نمی‌سنجد (سنجش و ترمیم هر دو برداشته شده)",
+           "تابعی برای سنجشِ درستیِ پوستهٔ کش ندارد",
+           sw=SW.replace("for (const p of SHELL) {", "for (const p of []) {"))
+
+expect_red("فالبکِ کش کشِ فعال را در اولویت نمی‌گذارد",
+           "کشِ فعالِ همین نسخه را در اولویت نمی‌گذارد",
+           sw=mutate_sw("cache_pref",
+                        '.catch(() => caches.match(req).then((hit) => hit || caches.match("/")))'))
+
+r = expect_red(
+    "caches.open یک ثابتِ رشته‌ایِ *متفاوت* را باز می‌کند",
+    "را باز می‌کند که با نامِ کشِ اعلام‌شده",
+    sw=mutate_sw("cache_const",
+                 'const CACHE = "pipfound-__CACHE_REV__";\nconst OLD_CACHE = "pipfound-v9";')
+       .replace(SW_ANCHORS["open_param"], "const c = await caches.open(OLD_CACHE);", 1))
+check("...و همان یک گزارش را می‌دهد", len(r["pwa"]) == 1, str(r["pwa"]))
+
 expect_red("خطای سینتکس در sw.js",
            "خطای سینتکس دارد",
            sw=SW.replace(SW_ANCHORS["cache_const"],
@@ -432,6 +482,22 @@ _ren = (APP.replace("pfReg", "pfReg2").replace("pfReloading", "pfBusy")
            .replace("pfAsked", "pfAskedUser").replace("cache_rev", "sw_cache_rev"))
 check("جهشِ «تغییرِ نامِ متغیر» واقعاً اعمال شد", _ren != APP)
 expect_green("تغییرِ نامِ متغیرهای محلیِ بنر و تابعِ بازنگری", app=_ren)
+
+expect_green("کامنتِ حاویِ «skipWaiting»/«caches.delete» در sw.js (کامنت قرارداد نیست)",
+             sw=mutate_sw("safe_gate",
+                          "    // caches.delete(k) عمداً بعد از تأیید\n    if (healthy) {"))
+
+# پارامترِ قابلِ حل نبودن: `caches.open(name)` (خواندنِ کش‌های دیگر برای ترمیم)
+# نباید «نامِ ناهمخوان» شمرده شود — این مثبتِ کاذب در توسعه دیده شد.
+expect_green("caches.open با پارامترِ متغیر (خواندنِ کش‌های دیگر برای ترمیم)",
+             sw=SW)
+
+_hoisted = (SW.replace(SW_ANCHORS["verify_call"], "    let healthy = true;", 1)
+               .replace('    if (healthy) {',
+                        "    if (await shellHealthy(CACHE)) {", 1))
+check("جهشِ «سنجشِ درون‌خطی بدونِ متغیر» واقعاً اعمال شد", _hoisted != SW)
+expect_green("سنجشِ درون‌خطی بدونِ متغیرِ واسط (همان قرارداد، سبکِ متفاوت)",
+             sw=_hoisted)
 
 expect_green("کامنتِ حاویِ «skipWaiting» در sw.js (کامنت قرارداد نیست)",
              sw=mutate_sw("msg_listener", "// skipWaiting فقط با پیامِ کاربر\n"
