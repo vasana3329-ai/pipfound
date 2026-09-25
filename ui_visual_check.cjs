@@ -908,6 +908,108 @@ function loadPuppeteer() {
             notes.push("بنرِ «نسخهٔ تازه» در عمل کار می‌کند: با یک کلیک، نسخهٔ در انتظار "
               + "فعال شد و صفحه با کدِ تازه بالا آمد");
         }
+
+        /* ۹.۲) «بعداً» تا پایانِ همان بازدید یادش می‌مانَد، و با بازدیدِ تازه
+           برمی‌گردد. سه‌گانهٔ زیر، «بنرِ مرده» را از «یادِ بعداً» جدا می‌کند:
+           (الف) با نسخهٔ در انتظار بنر دیده می‌شود؛ (ب) با «بعداً» پنهان می‌شود و
+           چیزی در نشست ذخیره می‌شود، و پس از بارگذاریِ دوباره هم بنر
+           برنمی‌گردد (خواستهٔ کاربر: در هر بارگذاری دوباره نپرسد)؛ (ج) با
+           پاک‌کردنِ نشست (بازدیدِ تازه) همان بنر برمی‌گردد — پس پنهان‌بودن
+           نشانهٔ یادِ «بعداً» است، نه بنرِ خراب. */
+        let laterReady = false;
+        if (!probe.err && probe.waiting && probe.shown) {
+          /* نسخهٔ در انتظارِ *قطعی* برای بندِ ۹.۲: همان کارِ بندِ ۹.۱ تکرار می‌شود
+             (`?pfprobe=2`) چون بعد از رفرشِ ۹.۱، نسخهٔ در انتظار از مسیرِ ثبتِ
+             خودِ صفحه ساخته می‌شود و ممکن است تا زمانِ تصمیمِ بنر نرسیده باشد.
+             بدونِ این، بندِ ۹.۲ روی بنرِ پنهان کلیک می‌کرد (خطای گویا نه — ولی
+             سنجش بی‌معنا). */
+          const probe2 = await p2.evaluate(async () => {
+            const out = { waiting: false, shown: false };
+            try { await navigator.serviceWorker.register("/sw.js?pfprobe=2"); }
+            catch (e) { out.err = "ثبتِ نسخهٔ دومِ تازه ممکن نشد: " + e; return out; }
+            const shown = () => {
+              const b = document.getElementById("pfSwBanner");
+              return !!(b && b.classList.contains("show") && b.offsetHeight > 0);
+            };
+            for (let i = 0; i < 120; i++) {
+              const regs = await navigator.serviceWorker.getRegistrations();
+              out.waiting = regs.some((r) => !!r.waiting);
+              out.shown = shown();
+              if (out.waiting && out.shown) break;
+              await new Promise((r) => setTimeout(r, 250));
+            }
+            return out;
+          });
+          if (probe2.err) fail(probe2.err);
+          else if (!probe2.waiting || !probe2.shown)
+            fail("نسخهٔ دومِ تازه در انتظار نماند یا بنر دیده نشد — یادِ «بعداً» سنجیده نشد");
+          else laterReady = true;
+        }
+        if (laterReady) {
+          const ssSnap = () => p2.evaluate(() => {
+            const out = {};
+            try {
+              for (let i = 0; i < sessionStorage.length; i++) {
+                const k = sessionStorage.key(i);
+                out[k] = sessionStorage.getItem(k);
+              }
+            } catch (e) { out["__err__"] = String(e); }
+            return out;
+          });
+          const before = await ssSnap();
+          const shownNow = () => p2.evaluate(() => {
+            const b = document.getElementById("pfSwBanner");
+            return !!(b && b.classList.contains("show") && b.offsetHeight > 0);
+          });
+          await p2.click("#pfSwHide");
+          if (await shownNow()) fail("کلیکِ «بعداً» بنرِ «نسخهٔ تازه» را پنهان نکرد");
+          else {
+            const after = await ssSnap();
+            const changed = Object.keys(after).some((k) => before[k] !== after[k]);
+            if (!changed)
+              fail("«بعداً» هیچ‌جا در نشست یاد نمی‌شود — با هر بارگذاریِ دوباره "
+                + "تا پایانِ همان بازدید می‌پرسد");
+            else {
+              await p2.reload({ waitUntil: "load", timeout: 30000 });
+              const still = await p2.evaluate(async () => {
+                const b = document.getElementById("pfSwBanner");
+                const shown = () => !!(b && b.classList.contains("show") && b.offsetHeight > 0);
+                let waiting = false;
+                for (let i = 0; i < 60; i++) {
+                  const regs = await navigator.serviceWorker.getRegistrations();
+                  waiting = regs.some((r) => !!r.waiting);
+                  if (waiting) break;
+                  await new Promise((r) => setTimeout(r, 250));
+                }
+                await new Promise((r) => setTimeout(r, 2000));   // فرصتِ مسیرِ بنر
+                return { waiting, shown: shown() };
+              });
+              if (!still.waiting)
+                fail("پس از «بعداً» و بارگذاریِ دوباره، نسخهٔ در انتظار در صف نماند "
+                  + "— نسخهٔ تازه باید تا تصمیمِ کاربر در انتظار بماند");
+              else if (still.shown)
+                fail("«بعداً» تا پایانِ همان بازدید یادش نماند — با بارگذاریِ دوباره بنر برگشت");
+              else {
+                await p2.evaluate(() => { try { sessionStorage.clear(); } catch (e) {} });
+                await p2.reload({ waitUntil: "load", timeout: 30000 });
+                const fresh = await p2.evaluate(async () => {
+                  const b = document.getElementById("pfSwBanner");
+                  for (let i = 0; i < 60; i++) {
+                    if (b && b.classList.contains("show") && b.offsetHeight > 0) return true;
+                    await new Promise((r) => setTimeout(r, 250));
+                  }
+                  return false;
+                });
+                if (!fresh)
+                  fail("با بازدیدِ تازه (یادِ پاک‌شده) بنرِ «نسخهٔ تازه» دیگر برنگشت "
+                    + "— بنرِ مرده به‌جای یادِ «بعداً»");
+                else
+                  notes.push("«بعداً»ی بنر تا پایانِ همان بازدید یادش می‌مانَد "
+                    + "(بارگذاریِ دوباره نمی‌پرسد) و در بازدیدِ تازه برمی‌گردد");
+              }
+            }
+          }
+        }
       } catch (e) {
         fail("سنجشِ بنرِ «نسخهٔ تازه» ممکن نشد: " + e.message);
       } finally {

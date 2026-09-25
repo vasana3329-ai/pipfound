@@ -217,6 +217,18 @@ async function waitFor(fn, ms, what) {
       return { exists: true, visible: b.classList.contains("show") && b.offsetHeight > 0,
                text: t ? (t.textContent || "") : "" };
     });
+    // زوجِ کلید/مقدارِ نشست — بی‌وابسته به نامِ کلید، تا سنجیدنِ «یادِ بعداً» به
+    // نامِ داخلی گره نخورد ولی هم بی‌نتیجه (ناوَکوم) نماند.
+    const ssSnapshot = () => page.evaluate(() => {
+      const out = {};
+      try {
+        for (let i = 0; i < sessionStorage.length; i++) {
+          const k = sessionStorage.key(i);
+          out[k] = sessionStorage.getItem(k);
+        }
+      } catch (e) { out["__err__"] = String(e); }
+      return out;
+    });
     const shellPaths = () => page.evaluate(() =>
       fetch("/sw.js", { cache: "no-store" }).then((r) => r.text()).then((txt) => {
         const m = txt.match(/const\s+SHELL\s*=\s*\[([\s\S]*?)\]/);
@@ -345,6 +357,32 @@ async function waitFor(fn, ms, what) {
       fail("بعد از برگردانِ نسخه، به کاربر گفته نشد (بنرِ هشدار دیده نمی‌شود)");
     else if (!b3.text.includes("ناقص"))
       fail(`متنِ هشدارِ برگردان گویا نیست: «${b3.text}»`);
+
+    /* «بعداً»ی بنر تا پایانِ همان بازدید یادش می‌مانَد (بارگذاریِ دوباره
+       نمی‌پرسد)، ولی پیامِ «برگردانِ نسخه» هر بار دیده می‌شود: روی همان هشدارِ
+       برگردان «بعداً» زده می‌شود (یادِ نشست ست می‌شود)، صفحه از نو بالا می‌آید
+       و هشدار باید همان‌جا باشد — وگرنه خبرِ «نسخهٔ تازه ناقص بود» بی‌صدا می‌مانَد. */
+    const ss0 = await ssSnapshot();
+    await page.evaluate(() => {
+      const b = document.getElementById("pfSwHide");
+      if (b) b.click();
+    });
+    if ((await banner()).visible)
+      fail("کلیکِ «بعداً» هشدارِ برگردان را از صفحه برنداشت");
+    const ss1 = await ssSnapshot();
+    if (!Object.keys(ss1).some((k) => ss0[k] !== ss1[k]))
+      fail("«بعداً» هیچ‌جا در نشست یاد نمی‌شود — بارگذاریِ دوباره تا پایانِ هماین "
+        + "بازدید دوباره می‌پرسد");
+    await page.reload({ waitUntil: "load", timeout: 30000 });
+    const b5 = await waitFor(async () => {
+      const b = await banner();
+      return b.visible && (b.text || "").includes("ناقص") ? b : null;
+    }, 20000, "بازگشتِ هشدارِ برگردان با یادِ «بعداً»");
+    if (!b5)
+      fail("با یادِ «بعداً» در نشست، پیامِ «برگردانِ نسخه» پس از بارگذاریِ دوباره "
+        + "دیده نشد — این پیام باید هر بار به کاربر گفته شود");
+    else
+      notes.push("پیامِ «برگردانِ نسخه» با وجودِ «بعداً»ی همان بازدید هم دوباره دیده شد");
     const off3 = await offlineStillWorks("برگردانِ نسخه");
     notes.push(`نسخه‌ی ۳ (نصبِ ناموفق · کشِ قبلیِ ناقص): برگردان انجام شد · کشِ قبلی ` +
       `(${active}) نگه داشته شد · رکورد: shell_ok=false, kept=${who3 ? who3.kept : "?"} · ` +

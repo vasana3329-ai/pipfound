@@ -15,6 +15,10 @@
      کشی که fetch در آن می‌نویسد؛ در هر دو حالت سرویس‌ورکر بی‌اثر است.
   ۴) کش‌کردنِ پاسخِ ناموفق (بدونِ گاردِ `res.ok`) یا کش‌کردنِ `/api/` → یک ۴۰۴/۵۰۰
      گذرا یا داده‌ی زنده تا ارتقای کش گیر می‌مانَد.
+  ۵) یادِ «بعداً»ی بنرِ نسخهٔ تازه: نداشتنش یعنی همان بنر در هر بارگذاریِ دوباره
+     (کاربری که یک‌بار «بعداً» گفته تا آخرِ بازدید آزار می‌بیند)، داشتنش روی
+     `localStorage` یعنی بنر تا ابد خفه می‌شود، و گره‌خوردنِ پیامِ «برگردانِ نسخه»
+     به همان یاد یعنی خبرِ «نسخهٔ تازه ناقص بود» بی‌صدا می‌مانَد.
 
 و برعکسش سنجیده می‌شود که این چک بی‌دلیل قرمز نکند: کامنتِ حاویِ مسیر، مرتب‌کردنِ
 پوستهٔ کش، افزودنِ آیکونِ **کاملاً سیم‌کشی‌شده**، افزودنِ یک مسیرِ سرو‌شده به
@@ -103,6 +107,12 @@ APP_ANCHORS = {
     "asked_flag": 'pfAsked=true;',
     "cb_gate": 'if(!pfAsked || pfReloading) return;',
     "cb_reload": 'pfReloading=true;\n    location.reload();',
+    "later_gate": 'if(pfLaterSaid()) return;',
+    "later_write": 'try{ sessionStorage.setItem(PF_SW_LATER,"1"); }catch(e){}',
+    "later_read": 'try{ return sessionStorage.getItem(PF_SW_LATER)==="1"; }catch(e){ return false; }',
+    "later_hide": 'pfMarkLater();',
+    "rollback_head": 'function pfShowRollback(){\n  const b=document.getElementById("pfSwBanner");',
+    "later_key": 'const PF_SW_LATER="pfSwLater";',
 }
 
 
@@ -192,6 +202,8 @@ check("نامِ کش خوانده شده و جای‌گذارِ بازنگری �
       st.get("cache") == "pipfound-__CACHE_REV__", str(st.get("cache")))
 check("نسخه‌بندیِ خودکارِ کش سنجیده و تأیید شد", st.get("cache_rev") is True, str(st))
 check("بنرِ «نسخهٔ تازه» در صفحه پیدا شد", st.get("update_banner") is True, str(st))
+check("یادِ «بعداً» تا پایانِ بازدید + بی‌قیدِ پیامِ برگردان تأیید شد",
+      st.get("banner_memory") is True, str(st))
 check("قراردادِ ارتقای ایمن (سنجش + گاردِ حذف + فالبکِ کشِ فعال) تأیید شد",
       st.get("safe_upgrade") is True, str(st))
 check("مسیرهای سرو‌شده‌ی app.py خوانده شده‌اند (ضدِ ناوَکوم)", st.get("served", 0) >= 8,
@@ -367,6 +379,26 @@ expect_red("نشانِ «کاربر خواسته» هیچ‌وقت ست نمی�
            "به نشانِ «کاربر خواسته» گره نخورده",
            app=mutate_app("asked_flag", ""))
 
+# ── «بعداً»: یادِ نشستی که مسیرِ نمایش را می‌بندد، ولی پیامِ برگردان را نه ──
+expect_red("قیدِ «بعداً» از مسیرِ نمایشِ بنر برداشته شده (بنر در هر بارگذاری برمی‌گردد)",
+           "یادِ «بعداً» را نمی\u200cخواند",
+           app=mutate_app("later_gate", "// بی‌قید شد"))
+
+expect_red("«بعداً» هیچ‌جا در نشست ذخیره نمی‌شود (هر بارگذاری دوباره می‌پرسد)",
+           "در نشست (`sessionStorage`) ذخیره نمی‌شود",
+           app=mutate_app("later_write", "void 0;"))
+
+expect_red("یادِ «بعداً» روی localStorage می‌نشیند (بنر تا ابد خفه می‌شود)",
+           "روی `localStorage` نشسته",
+           app=mutate_app("later_write",
+                          'try{ localStorage.setItem(PF_SW_LATER,"1"); }catch(e){}'))
+
+expect_red("پیامِ «برگردانِ نسخه» هم به یادِ «بعداً» گره خورده (خبرِ برگردان بی‌صدا)",
+           "هم به یادِ «بعداً» گره خورده",
+           app=mutate_app("rollback_head",
+                          'function pfShowRollback(){\n  if(pfLaterSaid()) return;\n'
+                          '  const b=document.getElementById("pfSwBanner");'))
+
 expect_red("پاک‌کردنِ کشِ قبلی بی‌قید شد (دیگر به تأییدِ پوستهٔ تازه گره نخورده)",
            "به تأییدِ پوستهٔ تازه گره",
            sw=mutate_sw("safe_gate", "    if (true) {"))
@@ -502,6 +534,20 @@ expect_green("سنجشِ درون‌خطی بدونِ متغیرِ واسط (ه�
 expect_green("کامنتِ حاویِ «skipWaiting» در sw.js (کامنت قرارداد نیست)",
              sw=mutate_sw("msg_listener", "// skipWaiting فقط با پیامِ کاربر\n"
                            + SW_ANCHORS["msg_listener"]))
+
+# کلیدِ نشست و نامِ توابعِ کمکیِ «بعداً» جزوِ قرارداد نیستند: نگهبان قراردادِ
+# **رفتار** را می‌سنجد (مسیرِ نمایش قید شده، مسیرِ پنهان می‌نویسد، برگردان بی‌قید).
+expect_green("تغییرِ نامِ کلیدِ نشست (همان رفتار)",
+             app=mutate_app("later_key", 'const PF_SW_LATER="pfSwLaterV2";'))
+
+_inline_later = (APP.replace(APP_ANCHORS["later_gate"],
+                             'if(sessionStorage.getItem(PF_SW_LATER)==="1") return;', 1)
+                    .replace(APP_ANCHORS["later_hide"],
+                             'try{ sessionStorage.setItem(PF_SW_LATER,"1"); }catch(e){}', 1))
+check("جهشِ «درون‌خطی‌کردنِ یادِ بعداً» واقعاً اعمال شد",
+      _inline_later != APP and APP_ANCHORS["later_read"] in _inline_later)
+expect_green("خواندن/نوشتنِ درون‌خطیِ نشست بدونِ توابعِ کمکی (همان قرارداد)",
+             app=_inline_later)
 
 # ═══════════════════════════════════════════════════════════════════
 print("═══ ۴) چک بی‌نتیجه (ناوَکوم) نیست و پوشهٔ بی‌PWA را نمی‌ترساند ═══")
