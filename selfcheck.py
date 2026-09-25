@@ -782,6 +782,89 @@ def _js_fn_bodies(text):
     return out
 
 
+def _banner_memory_problems(page_html):
+    """قراردادِ «بعداً»ی بنرِ نسخهٔ تازه → [خطاها].
+
+    خواسته‌ی کاربر: «بعداً» تا پایانِ **همان بازدید** یاد بمانَد (بارگذاریِ دوباره
+    بنر را برنگرداند)، ولی پیامِ «برگردانِ نسخه» هر بار دیده شود. سه خرابیِ
+    بی‌صدا این‌جا گرفته می‌شود: (۱) یادِ نداشتن — کاربری که یک‌بار «بعداً» گفته،
+    تا آخرِ بازدید در هر بارگذاری همان بنر را می‌بیند (بنرِ آزاردهنده = بنرِ
+    بی‌اعتبار)؛ (۲) یادِ **خیلی** بادوام (`localStorage`) — بنر تا ابد خفه
+    می‌شود و کاربر هیچ‌وقت خبرِ نسخهٔ تازه را نمی‌گیرد؛ (۳) گره‌خوردنِ پیامِ
+    «برگردانِ نسخه» به همان یاد — خبرِ «نسخهٔ تازه ناقص بود» بی‌صدا می‌مانَد.
+
+    مسیرها **ساختاری** پیدا می‌شوند (نه با نامِ ثابتِ تابع): تابع‌هایی که کلاسِ
+    `show` را به `#pfSwBanner` می‌دهند = مسیرهای نمایش؛ آن‌که متنِ `#pfSwTxt` را
+    عوض می‌کند = پیامِ برگردان؛ و آن‌که کلاسِ `show` را برمی‌دارد = مسیرِ «بعداً».
+    """
+    code = _blank_js_comments(page_html)
+    fns = _js_fn_bodies(code)
+    shows = {n: b for n, b in fns.items()
+             if "pfSwBanner" in b and re.search(r'classList\.add\(\s*["\']show["\']', b)}
+    rollbacks = {n: b for n, b in shows.items() if "pfSwTxt" in b}
+    updates = {n: b for n, b in shows.items() if n not in rollbacks}
+    hides = {n: b for n, b in fns.items()
+             if "pfSwBanner" in b and re.search(r'classList\.remove\(\s*["\']show["\']', b)}
+    if not (updates and rollbacks and hides):
+        return ["دو مسیرِ بنر (نمایشِ نسخهٔ تازه ↔ پیامِ «برگردانِ نسخه») یا مسیرِ «بعداً» "
+                "شناسایی نشد — قراردادِ «بعداً» سنجیده نشد"]
+    readers = {n for n, b in fns.items() if re.search(r"sessionStorage\s*\.\s*getItem", b)}
+    writers = {n for n, b in fns.items()
+               if re.search(r"(?:session|local)Storage\s*\.\s*setItem", b)}
+
+    def _with_helpers(bodies):
+        """بدنه‌ها + بدنهٔ توابعِ خواندن/نوشتنِ یاد که در همان مسیر صدا زده می‌شوند."""
+        txt = "\n".join(bodies)
+        for n in sorted(readers | writers):
+            if n in fns and re.search(r"\b%s\s*\(" % re.escape(n), txt):
+                txt += "\n" + fns[n]
+        return txt
+
+    def _gated_by_later(txt):
+        """آیا این مسیر با «یادِ بعداً» قید شده؟ (`if (<خواننده>) return …`)
+
+        پارانتزِ تودرتو با شمارشِ عمق خوانده می‌شود: `if(pfLaterSaid())` با
+        regexِ `[^)]*` شرطِ بریده می‌دهد و قیدِ درست را قید نمی‌شناسد.
+        """
+        for m in re.finditer(r"if\s*\(", txt):
+            j, depth = m.end() - 1, 0
+            while j < len(txt):
+                if txt[j] == "(":
+                    depth += 1
+                elif txt[j] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            cond = txt[m.end():j]
+            if not ("getItem" in cond
+                    or any(re.search(r"\b%s\b" % re.escape(n), cond) for n in readers)):
+                continue
+            tail = txt[j + 1:j + 1 + 200]
+            if re.match(r"\s*(\{[\s\S]{0,200}?\breturn\b|\breturn\b)", tail):
+                return True
+        return False
+
+    probs = []
+    dismiss = _with_helpers(list(hides.values()))
+    if not re.search(r"sessionStorage\s*\.\s*setItem", dismiss):
+        probs.append("«بعداً»ی بنر در نشست (`sessionStorage`) ذخیره نمی‌شود — کاربری که "
+                     "یک‌بار «بعداً» گفته، تا پایانِ همان بازدید در هر بارگذاریِ دوباره "
+                     "همان بنر را می‌بیند")
+    if re.search(r"localStorage\s*\.\s*setItem", dismiss):
+        probs.append("یادِ «بعداً» روی `localStorage` نشسته — بنر تا ابد خفه می‌شود و کاربر "
+                     "هیچ‌وقت خبرِ نسخهٔ تازه را نمی‌گیرد (باید یادِ نشستی/sessionStorage باشد)")
+    if not _gated_by_later(_with_helpers(list(updates.values()))):
+        probs.append("مسیرِ نمایشِ بنرِ «نسخهٔ تازه» یادِ «بعداً» را نمی‌خواند — با هر "
+                     "بارگذاریِ دوباره تا پایانِ همان بازدید بنر برمی‌گردد")
+    roll_src = _with_helpers(list(rollbacks.values()))
+    if _gated_by_later(roll_src) or any(re.search(r"\b%s\b" % re.escape(n), roll_src)
+                                        for n in readers):
+        probs.append("پیامِ «برگردانِ نسخه» هم به یادِ «بعداً» گره خورده — خبرِ «نسخهٔ تازه "
+                     "ناقص بود» می‌تواند بی‌صدا بمانَد (این پیام باید هر بار دیده شود)")
+    return probs
+
+
 def _js_block_at(text, i):
     """بدنهٔ بلوکِ آکولادی که از جایِ `{`ِ i شروع می‌شود → متنِ درون، وگرنه None."""
     depth, j = 0, i
@@ -821,7 +904,8 @@ def pwa_contract_problems(root):
     probs, warns = [], []
     stats = {"promised": 0, "shell": 0, "icons": 0, "cache": None, "served": 0,
              "api_bypass": False, "offline": False, "cache_first_icons": False,
-             "cache_rev": False, "update_banner": False, "safe_upgrade": False}
+             "cache_rev": False, "update_banner": False, "safe_upgrade": False,
+             "banner_memory": False}
     src = read_text(os.path.join(root, "app.py"))
     sw = read_text(os.path.join(root, "sw.js"))
     man_raw = read_text(os.path.join(root, "manifest.webmanifest"))
@@ -1193,6 +1277,14 @@ def pwa_contract_problems(root):
                              for i in gate):
                     probs.append("قیدِ جانشینی به نشانِ «کاربر خواسته» گره نخورده "
                                  "— رفرشِ بی‌قیدِ صفحه احتمالاً نصبِ اول را هم برمی‌گرداند")
+            # ── ۸) «بعداً» تا پایانِ همان بازدید یادش می‌مانَد، ولی پیامِ «برگردانِ
+            # نسخه» هر بار دیده می‌شود (خواسته‌ی کاربر). یادِ نداشتن = بنرِ
+            # آزاردهنده در هر بارگذاری؛ یادِ ابدی (`localStorage`) = بنرِ خفه‌شده
+            # تا ابد؛ و گره‌خوردنِ پیامِ برگردان = خبرِ «نسخهٔ تازه ناقص بود»
+            # بی‌صدا. هر سه در `_banner_memory_problems` سنجیده می‌شود.
+            later_fails = _banner_memory_problems(page_html)
+            probs.extend(later_fails)
+            stats["banner_memory"] = not later_fails
     return probs, warns, stats
 
 
@@ -1435,6 +1527,7 @@ def _human(rep):
             f" · کش‌اولِ آیکون: {_mark(pw.get('cache_first_icons'))}"
             f" · نسخه‌بندیِ خودکارِ کش: {_mark(pw.get('cache_rev'))}"
             f" · بنرِ به‌روزرسانی: {_mark(pw.get('update_banner'))}"
+            f" · یادِ «بعداً» تا پایانِ بازدید: {_mark(pw.get('banner_memory'))}"
             f" · ارتقای ایمن (تأیید و برگردان): {_mark(pw.get('safe_upgrade'))}")
     for p in rep.get("problems") or []:
         lines.append(f"   ✗ {p}")

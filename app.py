@@ -1750,7 +1750,7 @@ tr.on td{background:rgba(34,197,94,.05)}
     <button class="updbtn" id="pfSwBtn" type="button"
             title="صفحه با کدِ تازه دوباره بالا می‌آید؛ کشِ کهنه هم پاک می‌شود.">به‌روزرسانی</button>
     <button class="updlater" id="pfSwHide" type="button"
-            title="بعداً؛ سرویس‌ورکرِ تازه در انتظار می‌ماند و دفعهٔ بعد هم یادآوری می‌شود.">بعداً</button>
+            title="بعداً؛ تا پایانِ همین بازدید دیگر پرسیده نمی‌شود و نسخهٔ تازه در صف می‌مانَد (در بازدیدِ بعد یادآوری می‌شود).">بعداً</button>
   </div>
 </div>
 
@@ -2609,7 +2609,22 @@ if(fundBtn){ fundBtn.onclick=()=>window.open("/fundamental","_blank","noopener")
 // می‌شود. مهم: در نصبِ اول یا جانشینیِ خودسر هیچ بنری نشان داده نمی‌شود و هیچ
 // رفرشی رخ نمی‌دهد (بنرِ اشتباهی = بی‌اعتبارشدنِ بنر).
 let pfReg=null, pfAsked=false, pfReloading=false;
+// «بعداً»ی کاربر تا پایانِ **همین بازدید** یادش می‌مانَد: بارگذاریِ دوباره/رفرش
+// بنر را برنمی‌گرداند (کاربری که یک‌بار «بعداً» گفته نباید در هر بارگذاری
+// دوباره بنر ببیند)، ولی با بستنِ تب فراموش می‌شود. عمداً `localStorage` نیست:
+// آن تا ابد بنر را خفه می‌کرد و کاربر هیچ‌وقت خبرِ نسخهٔ تازه را نمی‌گرفت.
+const PF_SW_LATER="pfSwLater";
+function pfLaterSaid(){
+  try{ return sessionStorage.getItem(PF_SW_LATER)==="1"; }catch(e){ return false; }
+}
+function pfMarkLater(){
+  try{ sessionStorage.setItem(PF_SW_LATER,"1"); }catch(e){}
+}
+function pfForgetLater(){
+  try{ sessionStorage.removeItem(PF_SW_LATER); }catch(e){}
+}
 function pfShowUpdate(){
+  if(pfLaterSaid()) return;      // «بعداً» تا پایانِ همین بازدید احترام دارد
   const b=document.getElementById("pfSwBanner");
   if(b) b.classList.add("show");
 }
@@ -2628,6 +2643,9 @@ function pfAskWho(){
     setTimeout(()=>done(null), 4000);
   });
 }
+// مهم: پیامِ «برگردانِ نسخه» **عمداً** به یادِ «بعداً» گره نخورده است — اگر
+// کاربر در همین بازدید «بعداً» گفته باشد هم این هشدار هر بار دیده می‌شود؛
+// برگردان یعنی «نسخهٔ تازه ناقص بود»، و این خبر نباید بی‌صدا بمانَد.
 function pfShowRollback(){
   const b=document.getElementById("pfSwBanner");
   if(!b || b.classList.contains("show")) return;   // بنرِ «نسخهٔ تازه» اولویت دارد
@@ -2639,6 +2657,7 @@ function pfShowRollback(){
   b.classList.add("show");
 }
 function pfHideUpdate(){
+  pfMarkLater();                 // تا پایانِ همین بازدید یادش می‌مانَد
   const b=document.getElementById("pfSwBanner");
   if(b) b.classList.remove("show");
 }
@@ -2649,6 +2668,8 @@ function pfSwSetup(){
   if(btn) btn.onclick=()=>{
     if(pfReg && pfReg.waiting){
       pfAsked=true;
+      pfForgetLater();           // کاربر پذیرفت: «بعداً»ی قبلی باطل شود تا نسخهٔ
+                                 // بازهم‌تازه‌تر در همین بازدید بی‌صدا نمانَد
       pfReg.waiting.postMessage({type:"SKIP_WAITING"});
       // تورِ ایمنی: اگر جانشینی تا ۴ ثانیه رخ نداد، رفرشِ ساده (HTML از سرور
       // می‌آید و کشِ صفحه تازه می‌شود) — "دکمهٔ بی‌اثر" بدترین حالت است.
