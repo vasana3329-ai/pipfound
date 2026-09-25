@@ -782,6 +782,98 @@ def _js_fn_bodies(text):
     return out
 
 
+def _js_called_bodies(fns, bodies, rounds=1):
+    """متنِ بدنه‌ها + بدنهٔ توابعی که (تا `rounds` پله) در همان متن صدا زده می‌شوند.
+
+    لازم است چون رفتارِ یک مسیر می‌تواند در تابعِ کمکی بنشیند (مثلاً `pfNotice`
+    که `pfTrack` صدایش می‌زند): بدونِ بازکردنِ آن پله‌ها، «قیدِ گم‌شده» یا
+    «بازخوانیِ گم‌شده» دیده نمی‌شود و نگهبان سبزِ دروغ می‌مانَد.
+    """
+    txt = "\n".join(bodies)
+    seen = set()
+    for _ in range(max(1, rounds)):
+        more = [n for n in sorted(fns)
+                if n not in seen and re.search(r"\b%s\s*\(" % re.escape(n), txt)]
+        if not more:
+            break
+        seen.update(more)
+        txt += "\n" + "\n".join(fns[n] for n in more)
+    return txt
+
+
+def _js_block_around(text, i):
+    """تنگ‌ترین بلوکِ آکولادی که نقطهٔ `i` را در بر می‌گیرد → (شروع, پایان).
+
+    برای این‌که «بعد از وصل‌کردنِ شنونده» معنای دقیقی داشته باشد: نه کلِ فایل
+    (که هر جای دیگری بتواند چک را سبزِ دروغ کند) و نه پنجرهٔ ثابتِ نویسه‌ای (که
+    با کامنت/قالب‌بندی می‌شکند). اگر بلوکی نبود، کلِ متن.
+    """
+    depth, j = 0, i
+    while j >= 0:
+        c = text[j]
+        if c == "}":
+            depth += 1
+        elif c == "{":
+            if depth == 0:
+                break
+            depth -= 1
+        j -= 1
+    if j < 0:
+        return 0, len(text)
+    close, depth = j, 0            # از خودِ «{»ی بازکننده شمرده می‌شود
+    while close < len(text):
+        if text[close] == "{":
+            depth += 1
+        elif text[close] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        close += 1
+    return j, close
+
+
+def _update_watch_problems(page_html):
+    """قراردادِ «نسخهٔ تازهٔ در صف بی‌بنر نمی‌مانَد» → [خطاها] (S10).
+
+    چرا: ثبتِ **خودِ** صفحه سرِ بارگذاری (`register("/sw.js")`) هم می‌تواند یک
+    نسخهٔ تازهٔ تازه نصب کند. اگر شنوندهٔ `updatefound` بعد از `await`ها وصل شود
+    **و** وضعیتِ کنونیِ ثبت یک‌بار دیگر خوانده نشود، نصبِ سریعِ همان لحظه از دست
+    می‌رود: `reg.waiting` در چکِ قبلش `null` بوده و رویداد هم پیش از وصل‌شدنِ
+    شنونده رخ داده — پس کاربر روی کدِ کهنه می‌ماند **بدونِ این‌که بداند نسخهٔ تازه
+    در صف است** (این حالت زنده دیده شد). این قاعده هر دو شرط را می‌سنجد: شنوندهٔ
+    `updatefound` در دسترس باشد، و **بعد از** وصل‌کردنش همان مسیر وضعیت را
+    دوباره بخواند (`reg.waiting`/`installed`) یا مسیرِ نمایشِ بنر را صدا بزند.
+    """
+    code = _blank_js_comments(page_html)
+    fns = _js_fn_bodies(code)
+    shows = {n for n, b in fns.items()
+             if "pfSwBanner" in b and re.search(r'classList\.add\(\s*["\']show["\']', b)}
+    m = re.search(r"addEventListener\s*(\()\s*[\"']updatefound[\"']", code)
+    if not m:
+        return ["صفحه روی `updatefound` گوش نمی‌دهد — نسخهٔ تازهٔ در صف هیچ‌وقت به کاربر خبر "
+                "داده نمی‌شود و کاربر بی‌خبر روی کدِ کهنه می‌مانَد"]
+    # پایانِ **همان فراخوانیِ** addEventListener (نه فقط نامِ رویداد): بدنهٔ
+    # کل‌بکِ خودش «قید» نیست، بلکه انتظارِ رویداد است.
+    j, depth = m.start(1), 0
+    while j < len(code):
+        if code[j] == "(":
+            depth += 1
+        elif code[j] == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        j += 1
+    after = code[j + 1:_js_block_around(code, m.start(1))[1]]
+    reach = _js_called_bodies(fns, [after], rounds=4)
+    reread = re.search(r"\.\s*waiting\b|\.\s*state\s*===?\s*[\"']installed[\"']", reach)
+    shown = any(re.search(r"\b%s\s*\(" % re.escape(n), reach) for n in shows)
+    if not (reread or shown):
+        return ["بعد از وصل‌کردنِ شنوندهٔ `updatefound` وضعیتِ کنونیِ ثبت یک‌بار دیگر خوانده "
+                "نمی‌شود — نسخهٔ تازه‌ای که خودِ همین بارگذاری راه انداخته (نصبِ سریع، پیش "
+                "از وصل‌شدنِ شنونده) بی‌بنر و بی‌صدا در صف می‌مانَد"]
+    return []
+
+
 def _banner_memory_problems(page_html):
     """قراردادِ «بعداً»ی بنرِ نسخهٔ تازه → [خطاها].
 
@@ -813,12 +905,8 @@ def _banner_memory_problems(page_html):
                if re.search(r"(?:session|local)Storage\s*\.\s*setItem", b)}
 
     def _with_helpers(bodies):
-        """بدنه‌ها + بدنهٔ توابعِ خواندن/نوشتنِ یاد که در همان مسیر صدا زده می‌شوند."""
-        txt = "\n".join(bodies)
-        for n in sorted(readers | writers):
-            if n in fns and re.search(r"\b%s\s*\(" % re.escape(n), txt):
-                txt += "\n" + fns[n]
-        return txt
+        """بدنه‌ها + بدنهٔ توابعِ کمکيِ خواندن/نوشتنِ یاد که در همان مسیر صدا زده می‌شوند."""
+        return _js_called_bodies({n: fns[n] for n in (readers | writers)}, bodies)
 
     def _gated_by_later(txt):
         """آیا این مسیر با «یادِ بعداً» قید شده؟ (`if (<خواننده>) return …`)
@@ -905,7 +993,7 @@ def pwa_contract_problems(root):
     stats = {"promised": 0, "shell": 0, "icons": 0, "cache": None, "served": 0,
              "api_bypass": False, "offline": False, "cache_first_icons": False,
              "cache_rev": False, "update_banner": False, "safe_upgrade": False,
-             "banner_memory": False}
+             "banner_memory": False, "update_watch": False}
     src = read_text(os.path.join(root, "app.py"))
     sw = read_text(os.path.join(root, "sw.js"))
     man_raw = read_text(os.path.join(root, "manifest.webmanifest"))
@@ -1285,6 +1373,12 @@ def pwa_contract_problems(root):
             later_fails = _banner_memory_problems(page_html)
             probs.extend(later_fails)
             stats["banner_memory"] = not later_fails
+            # ── ۹) نسخهٔ تازه‌ای که **خودِ همین بارگذاری** راه می‌اندازد هم باید
+            # بنر بدهد (S10): فقط منتظرِ رویدادِ `updatefound` ماندن کافی نیست،
+            # چون ممکن است نصب پیش از وصل‌شدنِ شنونده تمام شده باشد.
+            watch_fails = _update_watch_problems(page_html)
+            probs.extend(watch_fails)
+            stats["update_watch"] = not watch_fails
     return probs, warns, stats
 
 
@@ -1528,6 +1622,7 @@ def _human(rep):
             f" · نسخه‌بندیِ خودکارِ کش: {_mark(pw.get('cache_rev'))}"
             f" · بنرِ به‌روزرسانی: {_mark(pw.get('update_banner'))}"
             f" · یادِ «بعداً» تا پایانِ بازدید: {_mark(pw.get('banner_memory'))}"
+            f" · خبرِ نسخهٔ تازهٔ سرِ بارگذاری: {_mark(pw.get('update_watch'))}"
             f" · ارتقای ایمن (تأیید و برگردان): {_mark(pw.get('safe_upgrade'))}")
     for p in rep.get("problems") or []:
         lines.append(f"   ✗ {p}")

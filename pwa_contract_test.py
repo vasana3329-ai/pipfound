@@ -111,6 +111,13 @@ APP_ANCHORS = {
     "later_write": 'try{ sessionStorage.setItem(PF_SW_LATER,"1"); }catch(e){}',
     "later_read": 'try{ return sessionStorage.getItem(PF_SW_LATER)==="1"; }catch(e){ return false; }',
     "later_hide": 'pfMarkLater();',
+    "watch_call": ('      pfWatchInstall(reg);   // پیش از هر awaitِ بعدی — وگرنه نصبِ سریع '
+                   'بی‌بنر می‌مانَد'),
+    "watch_event": ('reg.addEventListener("updatefound", ()=>{ if(!pfTrack(reg.installing)) '
+                    'pfNotice(null); });'),
+    "watch_recheck": ('  if(!pfTrack(reg.installing)) pfNotice(null);   '
+                      '// رویداد از قبل رخ داده بود'),
+    "watch_rollback": '        if(st && (st.shell_ok===false || (st.kept|0)>0)) pfShowRollback();',
     "rollback_head": 'function pfShowRollback(){\n  const b=document.getElementById("pfSwBanner");',
     "later_key": 'const PF_SW_LATER="pfSwLater";',
 }
@@ -204,6 +211,8 @@ check("نسخه‌بندیِ خودکارِ کش سنجیده و تأیید شد
 check("بنرِ «نسخهٔ تازه» در صفحه پیدا شد", st.get("update_banner") is True, str(st))
 check("یادِ «بعداً» تا پایانِ بازدید + بی‌قیدِ پیامِ برگردان تأیید شد",
       st.get("banner_memory") is True, str(st))
+check("خبرِ نسخهٔ تازهٔ سرِ بارگذاری تأیید شد (شنونده + بازخوانیِ وضعیتِ ثبت)",
+      st.get("update_watch") is True, str(st))
 check("قراردادِ ارتقای ایمن (سنجش + گاردِ حذف + فالبکِ کشِ فعال) تأیید شد",
       st.get("safe_upgrade") is True, str(st))
 check("مسیرهای سرو‌شده‌ی app.py خوانده شده‌اند (ضدِ ناوَکوم)", st.get("served", 0) >= 8,
@@ -399,6 +408,34 @@ expect_red("پیامِ «برگردانِ نسخه» هم به یادِ «بعد
                           'function pfShowRollback(){\n  if(pfLaterSaid()) return;\n'
                           '  const b=document.getElementById("pfSwBanner");'))
 
+# ── S10: نسخهٔ تازه‌ای که خودِ همین بارگذاری راه می‌اندازد نباید بی‌بنر بماند ──
+expect_red("بازخوانیِ وضعیتِ ثبت بعد از وصل‌کردنِ شنونده برداشته شده (نصبِ سریع بی‌بنر می‌مانَد)",
+           "وضعیتِ کنونیِ ثبت یک‌بار دیگر خوانده نمی‌شود",
+           app=mutate_app("watch_recheck", ""))
+
+expect_red("شنوندهٔ `updatefound` از صفحه برداشته شده (نسخهٔ در صف هیچ‌وقت خبر داده نمی‌شود)",
+           "روی `updatefound` گوش نمی‌دهد",
+           app=mutate_app("watch_event", "// شنونده حذف شد"))
+
+# شکلِ باگ‌دارِ اصلی (S10): شنوندهٔ درون‌خطیِ دیرهنگام، بدونِ هیچ بازخوانی —
+# همان چیزی که در نسخهٔ قبلِ اصلاح زنده دیده شد.
+_old_shape = (APP.replace(APP_ANCHORS["watch_event"], "", 1)
+                 .replace(APP_ANCHORS["watch_recheck"], "", 1)
+                 .replace(APP_ANCHORS["watch_rollback"],
+                          APP_ANCHORS["watch_rollback"] + '\n'
+                          '      reg.addEventListener("updatefound", ()=>{ const nw=reg.installing;\n'
+                          '        if(!nw) return;\n'
+                          '        nw.addEventListener("statechange", ()=>{\n'
+                          '          if(nw.state==="installed" && navigator.serviceWorker.controller) '
+                          'pfShowUpdate();\n'
+                          '        });\n'
+                          '      });', 1))
+check("جهشِ «شکلِ باگ‌دارِ S10» واقعاً اعمال شد",
+      _old_shape != APP and "pfWatchInstall(reg)" in _old_shape)
+expect_red("شکلِ باگ‌دارِ S10 (شنونده دیرهنگام + بدونِ بازخوانی) → گرفتن می‌شود",
+           "وضعیتِ کنونیِ ثبت یک‌بار دیگر خوانده نمی‌شود",
+           app=_old_shape)
+
 expect_red("پاک‌کردنِ کشِ قبلی بی‌قید شد (دیگر به تأییدِ پوستهٔ تازه گره نخورده)",
            "به تأییدِ پوستهٔ تازه گره",
            sw=mutate_sw("safe_gate", "    if (true) {"))
@@ -548,6 +585,23 @@ check("جهشِ «درون‌خطی‌کردنِ یادِ بعداً» واقع�
       _inline_later != APP and APP_ANCHORS["later_read"] in _inline_later)
 expect_green("خواندن/نوشتنِ درون‌خطیِ نشست بدونِ توابعِ کمکی (همان قرارداد)",
              app=_inline_later)
+
+# S10: دو سبکِ درست نباید قرمز شوند: بازخوانیِ درون‌خطیِ وضعیت، و صدا زدنِ
+# «دیده‌بان» در انتهای همان مسیر (به‌جای بلافاصله بعد از ثبت) — هر دو بازخوانیِ
+# وضعیت را دارند، پس نصبِ سریع هم بی‌بنر نمی‌مانَد.
+expect_green("بازخوانیِ درون‌خطیِ وضعیت به‌جای تابعِ بسته‌بندی‌شده",
+             app=APP.replace(APP_ANCHORS["watch_recheck"],
+                             "  if(reg.waiting) pfShowUpdate();", 1))
+
+_late_watch = (APP.replace(APP_ANCHORS["watch_call"] + "\n", "", 1)
+                  .replace(APP_ANCHORS["watch_rollback"],
+                           APP_ANCHORS["watch_rollback"] + "\n      pfWatchInstall(reg);", 1))
+check("جهشِ «دیده‌بانِ دیرهنگام» واقعاً اعمال شد",
+      _late_watch != APP and _late_watch.count("      pfWatchInstall(reg);") == 1
+      and _late_watch.index("      pfWatchInstall(reg);")
+      > _late_watch.index(APP_ANCHORS["watch_rollback"]))
+expect_green("دیده‌بان در انتهای مسیر صدا زده می‌شود ولی وضعیت را بازمی‌خواند (همان قرارداد)",
+             app=_late_watch)
 
 # ═══════════════════════════════════════════════════════════════════
 print("═══ ۴) چک بی‌نتیجه (ناوَکوم) نیست و پوشهٔ بی‌PWA را نمی‌ترساند ═══")
