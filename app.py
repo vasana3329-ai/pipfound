@@ -12,7 +12,7 @@
 
 هستهٔ تحلیل همان confluence.py + smc_engine.py + macro_context.py است.
 """
-import sys, os, json, argparse, traceback, threading, time, datetime, re
+import sys, os, json, argparse, traceback, threading, time, datetime, re, hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -901,6 +901,45 @@ def _rev_state_write(rec):
         print("⚠️ ثبتِ وضعیتِ ری‌استارت ناموفق: %s" % e, flush=True)
 
 
+# ── نامِ کشِ سرویس‌ورکر: جای‌گذارِ بازنگریِ کد (auto-versioning) ──────────────
+# در `sw.js` نامِ کش به‌شکلِ `pipfound-__CACHE_REV__` نوشته شده و همین‌جا سرِ سرو
+# با بازنگریِ کدِ روی دیسک پر می‌شود. چرا لازم است: نامِ دستیِ «v1» یعنی ارتقای
+# کش به یادِ آدم وابسته است؛ اگر یادت برود، `activate` هیچ کشی را پاک نمی‌کند،
+# پوستهٔ کهنه با تازه قاطی می‌شود و کاربرِ آفلاین هم نمی‌فهمد نسخهٔ تازه‌ای آمده.
+CACHE_REV_TOKEN = "__CACHE_REV__"
+_CACHE_REV_MEM = {"val": None}
+
+
+def cache_rev():
+    """بازنگریِ کوتاهِ کد برای نامِ کشِ سرویس‌ورکر.
+
+    اول SHAِ گیتِ روی دیسک (همان چیزی که چیپِ بازنگری نشان می‌دهد، با نشانِ
+    «-d» اگر درخت کثیف باشد)، و اگر گیت نبود هشِ محتوای فایل‌های رابط — تا در
+    هیچ حالتی «یخ‌زده» نمانَد. یک‌بار در عمرِ پروسه حساب می‌شود؛ خودِ اپ موقعِ
+    تغییرِ کد ری‌استارت می‌شود، پس مقدار در حافظه همیشه بازنگریِ همان کد است."""
+    if _CACHE_REV_MEM["val"]:
+        return _CACHE_REV_MEM["val"]
+    rev = ""
+    try:
+        disk = code_rev().get("disk") or {}
+        sha = (disk.get("sha") or "").strip()
+        if sha:
+            rev = sha[:7] + ("-d" if disk.get("dirty") else "")
+    except Exception:
+        rev = ""
+    if not rev:                       # بدونِ گیت: هشِ محتوا (همیشه در دسترس)
+        h = hashlib.sha1()
+        for n in REV_TRACKED:
+            try:
+                with open(os.path.join(REV_ROOT, n), "rb") as f:
+                    h.update(f.read())
+            except Exception:
+                continue
+        rev = h.hexdigest()[:8]
+    _CACHE_REV_MEM["val"] = rev
+    return rev
+
+
 def code_rev():
     """بازنگریِ کدِ بارشده در برابرِ دیسک + وضعیتِ ری‌استارتِ خودکار.
 
@@ -1529,6 +1568,20 @@ tr.on td{background:rgba(34,197,94,.05)}
   z-index:100;padding:24px;cursor:zoom-out}
 .lightbox.on{display:flex}
 .lightbox img{max-width:95%;max-height:95%;border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+/* بنرِ «نسخهٔ تازه» — پیش‌فرض پنهان؛ فقط وقتی سرویس‌ورکرِ تازه در انتظار است
+   با کلاسِ show دیده می‌شود (کاربرِ آفلاین نباید بی‌خبر بماند) */
+.updbar{position:fixed;inset-inline:12px;bottom:14px;max-width:720px;margin-inline:auto;z-index:120;
+  display:none;align-items:center;gap:10px;flex-wrap:wrap;padding:11px 14px;border-radius:14px;
+  background:linear-gradient(135deg,#0ea5e9,#6366f1);color:#04121f;font-size:13px;font-weight:700;
+  box-shadow:0 12px 34px rgba(0,0,0,.5)}
+.updbar.show{display:flex}
+.updbar span{flex:1 1 190px;line-height:1.7}
+.updbtn,.updlater{border:0;border-radius:9px;padding:7px 14px;cursor:pointer;font-family:inherit;
+  font-size:12.5px;font-weight:700}
+.updbtn{background:#04121f;color:#e6f6ff}
+.updbtn:hover{filter:brightness(1.25)}
+.updlater{background:rgba(4,18,31,.16);color:#04121f}
+.updlater:hover{background:rgba(4,18,31,.3)}
 .foot{color:var(--muted);font-size:11px;text-align:center;margin-top:22px;line-height:1.8}
 @media(max-width:560px){.pgrid{grid-template-columns:repeat(2,1fr)}.styles{width:100%}.styles button{flex:1}}
 </style>
@@ -1658,6 +1711,16 @@ tr.on td{background:rgba(34,197,94,.05)}
   </div>
 
   <div class="lightbox" id="lightbox"><img id="lightboxImg" src="" alt=""></div>
+
+  <!-- بنرِ «نسخهٔ تازه» — پیش‌فرض پنهان است و فقط وقتی سرویس‌ورکرِ تازه در حالتِ
+       انتظار است با کلاسِ show دیده می‌شود (جانشینی فقط با تأییدِ کاربر). -->
+  <div class="updbar" id="pfSwBanner" role="status" aria-live="polite">
+    <span>🔄 نسخهٔ تازهٔ اپ آماده است — همین‌حالا بگیرش</span>
+    <button class="updbtn" id="pfSwBtn" type="button"
+            title="صفحه با کدِ تازه دوباره بالا می‌آید؛ کشِ کهنه هم پاک می‌شود.">به‌روزرسانی</button>
+    <button class="updlater" id="pfSwHide" type="button"
+            title="بعداً؛ سرویس‌ورکرِ تازه در انتظار می‌ماند و دفعهٔ بعد هم یادآوری می‌شود.">بعداً</button>
+  </div>
 </div>
 
 <script>
@@ -2508,21 +2571,60 @@ if(fundBtn){ fundBtn.onclick=()=>window.open("/fundamental","_blank","noopener")
   };
 })();
 
-// بنرِ «نسخهٔ تازهٔ اپ آماده است» — وقتی سرویس‌ورکرِ جدید فعال می‌شود
-if("serviceWorker" in navigator){
+// ── به‌روزرسانیِ اپ: نامِ کشِ سرویس‌ورکر به بازنگریِ کد گره خورده (سرور جایش
+// می‌گذارد)، و جانشینیِ نسخهٔ تازه **با تأییدِ کاربر** انجام می‌شود. اگر تازه
+// در حالتِ انتظار بماند، بنرِ #pfSwBanner دیده می‌شود؛ دکمهٔ «به‌روزرسانی»
+// پیامِ SKIP_WAITING را می‌فرستد و با controllerchange صفحه یک‌بار رفرش
+// می‌شود. مهم: در نصبِ اول یا جانشینیِ خودسر هیچ بنری نشان داده نمی‌شود و هیچ
+// رفرشی رخ نمی‌دهد (بنرِ اشتباهی = بی‌اعتبارشدنِ بنر).
+let pfReg=null, pfAsked=false, pfReloading=false;
+function pfShowUpdate(){
+  const b=document.getElementById("pfSwBanner");
+  if(b) b.classList.add("show");
+}
+function pfHideUpdate(){
+  const b=document.getElementById("pfSwBanner");
+  if(b) b.classList.remove("show");
+}
+function pfSwSetup(){
+  if(!("serviceWorker" in navigator)) return;
+  if(!(location.protocol==="http:" || location.protocol==="https:")) return;
+  const btn=document.getElementById("pfSwBtn");
+  if(btn) btn.onclick=()=>{
+    if(pfReg && pfReg.waiting){
+      pfAsked=true;
+      pfReg.waiting.postMessage({type:"SKIP_WAITING"});
+      // تورِ ایمنی: اگر جانشینی تا ۴ ثانیه رخ نداد، رفرشِ ساده (HTML از سرور
+      // می‌آید و کشِ صفحه تازه می‌شود) — "دکمهٔ بی‌اثر" بدترین حالت است.
+      setTimeout(()=>{ if(!pfReloading) location.reload(); }, 4000);
+    } else location.reload();
+  };
+  const later=document.getElementById("pfSwHide");
+  if(later) later.onclick=pfHideUpdate;
   navigator.serviceWorker.addEventListener("controllerchange", ()=>{
-    // فقط اگر صفحه از قبل کامل بار شده (نصبِ اول نیست)
-    if(!window.__pfReady) return;
-    const old=document.getElementById("pfSwBanner"); if(old) return;
-    const b=document.createElement("div"); b.id="pfSwBanner";
-    b.setAttribute("style","position:fixed;bottom:14px;inset-inline-start:14px;z-index:2147483646;"+
-      "background:linear-gradient(135deg,#0ea5e9,#6366f1);color:#04121f;padding:10px 16px;border-radius:12px;"+
-      "font:700 13px/1.6 inherit,system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.45);cursor:pointer;display:flex;gap:10px;align-items:center");
-    b.innerHTML="🔄 نسخهٔ تازهٔ اپ آماده است — برای فعال‌شدن، رفرش کن";
-    b.onclick=()=>location.reload();
-    document.body.appendChild(b);
+    // فقط جانشینیِ تازه‌ای که **خودمان** خواستیم باعثِ رفرش می‌شود؛ نصبِ اول
+    // (clients.claim) نباید صفحه را وسطِ کار از نو بالا بیاورد.
+    if(!pfAsked || pfReloading) return;
+    pfReloading=true;
+    location.reload();
+  });
+  window.addEventListener("load", async ()=>{
+    try{
+      const reg=await navigator.serviceWorker.register("/sw.js");
+      pfReg=reg;
+      if(reg.waiting) pfShowUpdate();      // نسخهٔ تازه از قبل در صف بود
+      reg.addEventListener("updatefound", ()=>{
+        const nw=reg.installing;
+        if(!nw) return;
+        nw.addEventListener("statechange", ()=>{
+          // «installed» + کنترل‌کنندهٔ قبلی = نسخهٔ تازه در انتظار است
+          if(nw.state==="installed" && navigator.serviceWorker.controller) pfShowUpdate();
+        });
+      });
+    }catch(e){ /* PWA اختیاری است؛ نبودش اپ را نمی‌شکند */ }
   });
 }
+pfSwSetup();
 
 // پنجره‌ی عمومی (مودال) — بدونِ وابستگیِ بیرونی
 function openModal(title, html){
@@ -2749,9 +2851,7 @@ loadAlarms();
 setInterval(loadAlarms, 30000);
 
 // ثبتِ service worker تا اپ مثلِ یک اپِ نصب‌پذیر بالا بیاید (فقط روی http/https)
-if("serviceWorker" in navigator && (location.protocol==="http:" || location.protocol==="https:")){
-  window.addEventListener("load", ()=>{ navigator.serviceWorker.register("/sw.js").catch(()=>{}); });
-}
+  // ثبتِ سرویس‌ورکر + بنرِ «نسخهٔ تازه» در pfSwSetup() انجام می‌شود (بالاتر در همین اسکریپت).
 
 // نشانگرِ بازنگریِ کد + وضعیتِ ری‌استارتِ خودکارِ «کهنه»
 let revFirst=null, revRetry=null;
@@ -2798,7 +2898,6 @@ async function loadRev(){
 }
 loadRev();
 setInterval(loadRev, 30000);
-window.__pfReady = true;   // بعد از این، controllerchange یعنی «به‌روزرسانی»، نه نصبِ اول
 
 // چیپِ «سنِ داده / باز-بستهٔ بازار» — مستقل از چیپِ کد و بدونِ هزینه‌ی شبکه‌ی سنگین:
 // اندپوینت فقط وضعیتِ آخرین تحلیل را می‌خواند و سنِ داده را همین‌حالا بازمحاسبه می‌کند.
@@ -3550,6 +3649,13 @@ class Handler(BaseHTTPRequestHandler):
                               os.path.basename(u.path))
             if os.path.isfile(fp):
                 try:
+                    if u.path == "/sw.js":
+                        # نامِ کش = بازنگریِ کد؛ پس محتوای سرو‌شده‌ی sw.js با هر
+                        # کامیت عوض می‌شود و مرورگر نسخه‌ی تازه را می‌بیند.
+                        with open(fp, encoding="utf-8") as f:
+                            body = f.read().replace(CACHE_REV_TOKEN,
+                                                    cache_rev()).encode("utf-8")
+                        return self._send(200, body, wctype)
                     with open(fp, "rb") as f:
                         return self._send(200, f.read(), wctype)
                 except Exception as e:
