@@ -12,7 +12,7 @@
 
 هستهٔ تحلیل همان confluence.py + smc_engine.py + macro_context.py است.
 """
-import sys, os, json, argparse, traceback, threading, time, datetime, re, hashlib
+import sys, os, json, argparse, traceback, threading, time, datetime, re, hashlib, subprocess
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -1003,15 +1003,40 @@ def _rev_validate():
     """کدِ تازه روی دیسک قبل از ری‌استارت اعتبارسنجی می‌شود.
 
     بدونِ این مرحله، یک ویرایشِ نیمه‌کاره/خراب سرورِ سالم را می‌کشت.
+
+    **قوانینِ سنجش باید از خودِ دیسک بیایند، نه از حافظه.** اگر با همان
+    `selfcheck`ی که موقعِ بوت import شده سنجیده شود، پروسه هرگز نمی‌تواند
+    *اصلاحِ خودِ نگهبان* را بپذیرد: نسخهٔ کهنهٔ درونِ حافظه رکوردهای تازه را با
+    قوانینِ قدیم قضاوت می‌کند و یک مثبتِ کاذبِ کهنه تا ابد «کدِ تازه خراب است»
+    می‌دهد — قفلِ خودارجاعی که سرور را روی نسخهٔ قدیم زندانی می‌کند، درحالی‌که
+    خودِ درخت روی دیسک سالم است. پس سنجش در یک **زیرفرایندِ جدا** با همان
+    `selfcheck.py`ِ روی دیسک اجرا می‌شود (دقیقاً همان چیزی که CI اجرا می‌کند).
+    اگر زیرفرایند ممکن نشد، به نسخهٔ بارشده برمی‌گردیم ولی همان را صریح در
+    `detail` می‌گوییم تا «سبزِ» بی‌اعتبار شبیهِ سبزِ واقعی به‌نظر نرسد.
     """
+    script = os.path.join(REV_ROOT, "selfcheck.py")
+    if os.path.exists(script):
+        try:
+            p = subprocess.run([sys.executable, script, "--root", REV_ROOT, "--json"],
+                               cwd=REV_ROOT, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, timeout=180)
+            rep = json.loads((p.stdout or b"").decode("utf-8", "replace"))
+            if rep.get("ok"):
+                return True, "selfcheck ✅ (قوانینِ روی دیسک)"
+            return False, (" | ".join(rep.get("problems") or [])[:400]
+                           or "selfcheck ❌")
+        except Exception as e:
+            why = "اجرای زیرفرایندیِ selfcheck ممکن نشد: %s" % e
+    else:
+        why = "selfcheck.py روی دیسک نیست"
     try:
         import selfcheck as SC
         rep = SC.run_checks(REV_ROOT)
         if rep.get("ok"):
-            return True, "selfcheck ✅"
+            return True, "selfcheck ✅ (نسخهٔ بارشده — %s)" % why
         return False, " | ".join(rep.get("problems") or [])[:400] or "selfcheck ❌"
     except Exception as e:
-        return False, "selfcheck در دسترس نیست: %s" % e
+        return False, "selfcheck در دسترس نیست: %s (%s)" % (e, why)
 
 
 def _rev_restart(rev, detail, guard_key=None):
@@ -1099,6 +1124,11 @@ def _rev_watch_once():
             print("⚠️ کدِ تازه روی دیسک هست ولی سالم نیست (%s) — روی نسخه‌ی فعلی می‌مانم."
                   % detail, flush=True)
         return False
+    # نسخهٔ تازه تأیید شد ⇒ وضعیتِ «متوقف» دیگر معنا ندارد و نباید در
+    # /api/revision بمانَد (وگرنه چیپ دروغ می‌گوید «کدِ تازه خراب است»).
+    with _REV_LOCK:
+        _REV_WATCH["blocked"] = None
+        _REV_WATCH["blocked_mtime"] = None
     # تمیز: تا هیچ درخواستی در جریان نباشد صبر کن (تا وسطِ یک تحلیل قطع نشود)
     with _REV_LOCK:
         _REV_WATCH["waiting"] = True
@@ -1575,6 +1605,7 @@ tr.on td{background:rgba(34,197,94,.05)}
   background:linear-gradient(135deg,#0ea5e9,#6366f1);color:#04121f;font-size:13px;font-weight:700;
   box-shadow:0 12px 34px rgba(0,0,0,.5)}
 .updbar.show{display:flex}
+.updbar.warn{background:linear-gradient(135deg,#f59e0b,#ef4444);color:#2a1206}
 .updbar span{flex:1 1 190px;line-height:1.7}
 .updbtn,.updlater{border:0;border-radius:9px;padding:7px 14px;cursor:pointer;font-family:inherit;
   font-size:12.5px;font-weight:700}
@@ -1715,7 +1746,7 @@ tr.on td{background:rgba(34,197,94,.05)}
   <!-- بنرِ «نسخهٔ تازه» — پیش‌فرض پنهان است و فقط وقتی سرویس‌ورکرِ تازه در حالتِ
        انتظار است با کلاسِ show دیده می‌شود (جانشینی فقط با تأییدِ کاربر). -->
   <div class="updbar" id="pfSwBanner" role="status" aria-live="polite">
-    <span>🔄 نسخهٔ تازهٔ اپ آماده است — همین‌حالا بگیرش</span>
+    <span id="pfSwTxt">🔄 نسخهٔ تازهٔ اپ آماده است — همین‌حالا بگیرش</span>
     <button class="updbtn" id="pfSwBtn" type="button"
             title="صفحه با کدِ تازه دوباره بالا می‌آید؛ کشِ کهنه هم پاک می‌شود.">به‌روزرسانی</button>
     <button class="updlater" id="pfSwHide" type="button"
@@ -2582,6 +2613,31 @@ function pfShowUpdate(){
   const b=document.getElementById("pfSwBanner");
   if(b) b.classList.add("show");
 }
+// پرسشِ وضعیتِ سرویس‌ورکر: «پوستهٔ فعال سالم است؟ چند کشِ قبلی نگه داشته شده؟»
+// در حالتِ «برگردانِ نسخه» (نسخهٔ تازه ناقص بوده) صفحه باید همین را به کاربر
+// بگوید، وگرنه ارتقا بی‌صدا عقب می‌افتد و کاربر فکر می‌کند اپ خراب است.
+function pfAskWho(){
+  return new Promise((res)=>{
+    const done=(v)=>{ try{ navigator.serviceWorker.removeEventListener("message", on); }
+                      catch(e){} res(v); };
+    const on=(ev)=>{ const d=ev.data||{}; if(d.type==="PF_WHO_ACK") done(d); };
+    const ctrl=navigator.serviceWorker.controller;
+    if(!ctrl) return done(null);
+    navigator.serviceWorker.addEventListener("message", on);
+    ctrl.postMessage({type:"PF_WHO"});
+    setTimeout(()=>done(null), 4000);
+  });
+}
+function pfShowRollback(){
+  const b=document.getElementById("pfSwBanner");
+  if(!b || b.classList.contains("show")) return;   // بنرِ «نسخهٔ تازه» اولویت دارد
+  const t=document.getElementById("pfSwTxt");
+  if(t) t.textContent="⚠ نسخهٔ تازه ناقص بود — روی نسخهٔ سالمِ قبلی ماندی (کشِ قبلی نگه داشته شد)";
+  const btn=document.getElementById("pfSwBtn");
+  if(btn) btn.textContent="تلاشِ دوباره";
+  b.classList.add("warn");
+  b.classList.add("show");
+}
 function pfHideUpdate(){
   const b=document.getElementById("pfSwBanner");
   if(b) b.classList.remove("show");
@@ -2613,6 +2669,12 @@ function pfSwSetup(){
       const reg=await navigator.serviceWorker.register("/sw.js");
       pfReg=reg;
       if(reg.waiting) pfShowUpdate();      // نسخهٔ تازه از قبل در صف بود
+      else {
+        // هیچ نسخهٔ در انتظاری نیست؛ تنها حالتِ دیگری که کاربر باید بداند،
+        // «برگردانِ نسخه» است (پوستهٔ تازه ناقص بوده و کشِ قبلی نگه داشته شده).
+        const st=await pfAskWho();
+        if(st && (st.shell_ok===false || (st.kept|0)>0)) pfShowRollback();
+      }
       reg.addEventListener("updatefound", ()=>{
         const nw=reg.installing;
         if(!nw) return;

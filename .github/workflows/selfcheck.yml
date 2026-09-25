@@ -157,6 +157,8 @@ jobs:
       # شود و با یک کلیک فعال شود. این‌ها را هیچ چکِ متنی نمی‌بیند (جهش‌آزماییِ
       # خودِ این بند نشان داد: هم پیامِ به‌هدفِ‌غلط و هم بنرِ هیچ‌وقت‌دیده‌شده
       # برای نگهبانِ استاتیک سبزند).
+      # مسیرِ **خرابی** (نصبِ نیمه‌کاره → ترمیم یا برگردان) در گامِ بعدی است،
+      # `sw_upgrade_check.cjs`.
       - name: تستِ بصری و سیم‌کشیِ کلیدها (headless)
         run: |
           set -e
@@ -171,6 +173,28 @@ jobs:
           echo "مرورگر: $BROWSER"
           PF_BROWSER="$BROWSER" PF_PUPPETEER_DIR="$MODDIR/node_modules" \
             node ui_visual_check.cjs --url http://127.0.0.1:8787/ --shot "$RUNNER_TEMP/pf-ui.png"
+
+      # ── لایه‌ی ۳.۵: ارتقای ایمنِ نسخه (ترمیم و برگردان) ──
+      # چرا لازم است: لایه‌ی ۱ قراردادِ ارتقا را استاتیک می‌سنجد و خودِ اپ هم سرِ بوت
+      # نسخه‌ی استاتیکاً خراب را برمی‌گرداند؛ ولی **خرابیِ زمانِ نصب** (یک ۴۰۴ یا
+      # خطای گذرا که `addAll` را رد می‌کند) هیچ چکِ متنی نمی‌بیند. این تست سه نسخه را
+      # روی یک مرورگرِ واقعی اجرا می‌کند: مبنا → نصبِ ناقصِ ترمیم‌شدنی (باید از کشِ
+      # قبلی ترمیم شود) → نصبِ ناقصِ ترمیم‌نشدنی (باید **برگردان** شود و آفلاین بماند).
+      # همه‌چیز در یک کپیِ موقت با سرورِ جداگانه است؛ به مخزن/سرورِ 8787 دست نمی‌زند.
+      - name: ارتقای ایمنِ نسخه — ترمیم و برگردان (headless)
+        run: |
+          set -e
+          MODDIR="$RUNNER_TEMP/pf-visual"
+          BROWSER="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)"
+          if [ -z "$BROWSER" ] && [ -d "$MODDIR/browsers" ]; then
+            BROWSER="$(find "$MODDIR/browsers" -type f -name chrome -perm -u+x | head -1)"
+          fi
+          if [ -z "$BROWSER" ]; then
+            echo "::error::مرورگری برای تستِ ارتقای ایمن پیدا نشد"
+            exit 1
+          fi
+          PF_BROWSER="$BROWSER" PF_PUPPETEER_DIR="$MODDIR/node_modules" \
+            node sw_upgrade_check.cjs --port 8795
 
       # ── لایه‌ی ۴: رفت‌وبرگشتِ ژورنال — مسیرِ دفتر، ثبت/خواندن، مهاجرتِ بی‌خطر ──
       # خودش نمونه‌های موقتِ اپ را با HOME و env کنترل‌شده بالا می‌آورد، پس به سرورِ 8787

@@ -749,6 +749,39 @@ def _ok_guarded_puts(text):
                for m in _PWA_PUT_RE.finditer(text))
 
 
+def _js_if_blocks(text):
+    """[(شرط, بدنه, شروع, پایان)] برای هر `if (…) { … }`.
+
+    لازم است چون «داخلِ گارد بودنِ یک عملِ خطرناک» با جست‌وجوی متنیِ ساده قابلِ
+    تشخیص نیست: `if (healthy) { … caches.delete(…) }` و همان حذفِ **بی‌قید** در
+    متن شبیه‌اند، ولی اولی امن و دومی برگشت‌ناپذیر است."""
+    out = []
+    for m in re.finditer(r"if\s*\(([^{;]*)\)\s*\{", text):
+        i = text.find("{", m.start())
+        body = _js_block_at(text, i)
+        if body is not None:
+            out.append((m.group(1), body, i, i + len(body) + 1))
+    return out
+
+
+def _js_fn_bodies(text):
+    """{نامِ تابع: بدنهٔ آکولادی} برای شکل‌های سادهٔ همین پروژه
+    (`function f(…){}`، `async function f(…){}` و `const f = (…) => {…}`)."""
+    out = {}
+    for m in re.finditer(r"(?:^|\n)\s*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(", text):
+        i = text.find("{", m.end())
+        body = _js_block_at(text, i) if i > 0 else None
+        if body is not None:
+            out.setdefault(m.group(1), body)
+    for m in re.finditer(
+            r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\([^)]*\)\s*=>\s*\{", text):
+        i = text.index("{", m.end() - 1)
+        body = _js_block_at(text, i)
+        if body is not None:
+            out.setdefault(m.group(1), body)
+    return out
+
+
 def _js_block_at(text, i):
     """بدنهٔ بلوکِ آکولادی که از جایِ `{`ِ i شروع می‌شود → متنِ درون، وگرنه None."""
     depth, j = 0, i
@@ -788,7 +821,7 @@ def pwa_contract_problems(root):
     probs, warns = [], []
     stats = {"promised": 0, "shell": 0, "icons": 0, "cache": None, "served": 0,
              "api_bypass": False, "offline": False, "cache_first_icons": False,
-             "cache_rev": False, "update_banner": False}
+             "cache_rev": False, "update_banner": False, "safe_upgrade": False}
     src = read_text(os.path.join(root, "app.py"))
     sw = read_text(os.path.join(root, "sw.js"))
     man_raw = read_text(os.path.join(root, "manifest.webmanifest"))
@@ -872,10 +905,22 @@ def pwa_contract_problems(root):
         if not cache_name:
             probs.append('نامِ کش در sw.js تعریف نشده (const CACHE = "…")')
         else:
+            # تنها نام‌های **قطعی** خطا هستند: یک رشتهٔ متفاوت با نامِ کش، یا
+            # شناسه‌ای که به یک ثابتِ رشته‌ایِ متفاوت می‌رسد. پارامتر/متغیرِ محلی
+            # قابلِ حل نیست پس هشدار نمی‌گیرد — وگرنه ترمیمِ عمدیِ
+            # `caches.open(name)` (خواندنِ کش‌های دیگر برای برگردانِ نسخه) به‌غلط
+            # «نامِ ناهمخوان» شمرده می‌شد (همین مثبتِ کاذب در توسعه دیده شد).
+            consts = dict(re.findall(
+                r"(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\"([^\"\n]*)\"", sw_code))
             for raw_arg in _PWA_OPEN_RE.findall(sw_code):
                 arg = raw_arg.strip()
                 if arg == "CACHE" or arg.strip("\"'") == cache_name:
                     continue
+                if re.fullmatch(r"[A-Za-z_$][\w$]*", arg):
+                    if arg in consts and consts[arg] != cache_name:
+                        probs.append(f"«caches.open({arg})» ثابتِ «{consts[arg]}» را باز می‌کند که "
+                                     f"با نامِ کشِ اعلام‌شده («{cache_name}») نمی‌خواند")
+                    continue          # پارامتر/متغیرِ محلی — قابلِ حلِ استاتیک نیست
                 probs.append(f"«caches.open({arg})» با نامِ کشِ اعلام‌شده («{cache_name}») "
                              "نمی‌خواند — activate آن کش را پاک می‌کند")
 
@@ -1076,6 +1121,49 @@ def pwa_contract_problems(root):
         # بنر یعنی صفحه وعدهٔ «به‌روزرسانی با تأییدِ کاربر» داده؛ پس کلِ زنجیره
         # (پیام → skipWaiting → controllerchange → رفرش) باید کامل باشد، وگرنه
         # دکمهٔ بنر بی‌اثر است یا برعکس، صفحه بی‌اجازه از نو بالا می‌آید.
+        # ── ۷) ارتقای ایمن: پاک‌کردنِ کشِ قبلی مشروط به تأییدِ درستیِ پوستهٔ تازه ──
+        # چرا: نصبِ نیمه‌کاره (اینترنتِ قطع، یک ۴۰۴، `addAll`ِ ردشده) با پاک‌کردنِ
+        # بی‌قید، کشِ سالمِ قبلی را نابود می‌کند و آفلاینِ کاربر **برنمی‌گردد**.
+        # سه شرط: (الف) تابعی هست که با SHELL + caches.open درستیِ پوسته را می‌سنجد؛
+        # (ب) activate آن را صدا می‌زند و هر `caches.delete(` داخلِ گاردی است که به
+        # همان نتیجه گره دارد؛ (ج) فالبکِ کش در fetch اول کشِ فعال را می‌بیند تا در
+        # حالتِ «برگردانِ نسخه» پوستهٔ سالمِ قبلی خوانده شود.
+        safe_fails = []
+        act_body = _js_listener_body(_swc, _swm, "activate") or ""
+        fns = _js_fn_bodies(_swc)
+        verifiers = sorted(n for n, b in fns.items()
+                           if "SHELL" in b and "caches.open(" in b)
+        if not verifiers:
+            safe_fails.append("سرویس‌ورکر تابعی برای سنجشِ درستیِ پوستهٔ کش ندارد "
+                              "(SHELL + caches.open) — ارتقا بدونِ تأیید انجام می‌شود")
+        else:
+            called = [n for n in verifiers if re.search(r"\b%s\s*\(" % re.escape(n), act_body)]
+            if not called:
+                safe_fails.append("activate درستیِ پوستهٔ تازه را نمی‌سنجد — کشِ قبلی پیش از "
+                                  "تأییدِ سالم بودنِ نسخهٔ تازه پاک می‌شود")
+            else:
+                aliases = set(re.findall(
+                    r"([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:%s)\s*\("
+                    % "|".join(map(re.escape, verifiers)), act_body))
+                trusted = set(called) | aliases
+                guards = _js_if_blocks(act_body)
+                for dm in re.finditer(r"caches\.delete\s*\(", act_body):
+                    inside = [c for c, _b, a, z in guards if a < dm.start() < z]
+                    if not any(any(re.search(r"\b%s\b" % re.escape(t), c) for t in trusted)
+                               for c in inside):
+                        safe_fails.append("پاک‌کردنِ کشِ قبلی در activate به تأییدِ پوستهٔ تازه گره "
+                                          "نخورده — نصبِ نیمه‌کاره آفلاینِ کاربر را از بین می‌برد")
+                        break
+        pref_re = re.compile(r"caches\.open\([^)]*\)[^;]{0,240}\.match\(")
+        called_helpers = set(re.findall(r"\b([A-Za-z_$][\w$]*)\s*\(", fb or ""))
+        pref_ok = bool(pref_re.search(fb or "")) or any(
+            pref_re.search(fns.get(n, "")) for n in called_helpers if n in fns)
+        if fb and not pref_ok:
+            safe_fails.append("فالبکِ کش در fetch کشِ فعالِ همین نسخه را در اولویت نمی‌گذارد "
+                              "— در حالتِ برگردانِ نسخه پوستهٔ سالمِ قبلی خوانده نمی‌شود")
+        probs.extend(safe_fails)
+        stats["safe_upgrade"] = (not safe_fails) and bool(verifiers)
+
         if banner_present or page_asks:
             if not page_asks:
                 probs.append("بنرِ «نسخهٔ تازه» هست ولی صفحه پیامِ SKIP_WAITING نمی‌فرستد "
@@ -1346,7 +1434,8 @@ def _human(rep):
             f" · فالبکِ آفلاین: {_mark(pw.get('offline'))}"
             f" · کش‌اولِ آیکون: {_mark(pw.get('cache_first_icons'))}"
             f" · نسخه‌بندیِ خودکارِ کش: {_mark(pw.get('cache_rev'))}"
-            f" · بنرِ به‌روزرسانی: {_mark(pw.get('update_banner'))}")
+            f" · بنرِ به‌روزرسانی: {_mark(pw.get('update_banner'))}"
+            f" · ارتقای ایمن (تأیید و برگردان): {_mark(pw.get('safe_upgrade'))}")
     for p in rep.get("problems") or []:
         lines.append(f"   ✗ {p}")
     for w in rep.get("warnings") or []:

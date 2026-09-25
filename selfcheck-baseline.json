@@ -36,6 +36,7 @@
     "pfSwBanner",
     "pfSwBtn",
     "pfSwHide",
+    "pfSwTxt",
     "pickFull",
     "pipModal",
     "refresh",
@@ -96,7 +97,7 @@
     "/manifest.webmanifest",
     "/sw.js"
   ],
-  "saved_at": "2026-09-25T14:37:26+03:30",
+  "saved_at": "2026-09-25T16:22:40+03:30",
   "wired": [
     "alarmBtn",
     "alarmMsg",
@@ -115,6 +116,7 @@
     "pfSwBanner",
     "pfSwBtn",
     "pfSwHide",
+    "pfSwTxt",
     "pickFull",
     "pipModal",
     "refreshBtn",

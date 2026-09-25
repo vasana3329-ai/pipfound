@@ -11,6 +11,10 @@
      سرورِ سالم **کشته نمی‌شود** و ری‌استارت نمی‌کند؛ به‌محضِ سالم شدنِ فایل، خودش
      ترمیم می‌شود.
   C) ری‌استارتِ تمیز: تا وقتی درخواستی در جریان است صبر می‌کند و وسطِ کار قطع نمی‌کند.
+  D) کامیتی که هیچ فایلِ تعیین‌کننده‌ای را لمس نمی‌کند (فقط SHA) هم ری‌استارت می‌آورد.
+  E) **اصلاحِ خودِ نگهبان پذیرفته می‌شود:** `selfcheck.py` روی دیسک عوض شود و
+     نسخهٔ کهنه‌ی درونِ حافظه رد کند ⇒ باید نسخهٔ تازه را بپذیرد و ری‌استارت کند
+     (باگِ قفلِ خودارجاع: سنجیدنِ رکوردِ تازه با قوانینِ بوت‌شده).
 
 اجرا:  python3 autorestart_test.py     (خروجی: ۰ سالم، ۱ خراب)
 """
@@ -336,12 +340,93 @@ def case_sha_drift_restart():
           "لاگ صریحاً می‌گوید علتِ ری‌استارت «فقط SHA» بود")
 
 
+# ── E) اصلاحِ خودِ نگهبان باید پذیرفته شود (نه زندانِ قوانینِ بوت‌شده) ───────────
+STRICT_TAIL = '''
+
+# ── (تستِ رگرسیون) قاعدهٔ سخت‌گیرِ اضافه: این نسخه فقط در **حافظه** می‌ماند ──
+# اگر پروسه با همین ماژولِ بوت‌شده رکوردِ تازه را قضاوت کند، برداشتنِ این قاعده
+# روی دیسک هیچ اثری ندارد و پروسه تا ابد «کدِ تازه خراب است» می‌گوید.
+_pf_orig_run_checks = run_checks
+
+
+def run_checks(root, *a, **k):
+    rep = _pf_orig_run_checks(root, *a, **k)
+    import os as _os
+    if _os.path.exists(_os.path.join(root, ".pf_guard_locked")):
+        rep["ok"] = False
+        rep["problems"] = list(rep.get("problems") or []) + [
+            "قاعدهٔ سخت‌گیرِ آزمایشی: پرچمِ .pf_guard_locked هنوز برداشته نشده"]
+    return rep
+'''
+
+
+def case_selfcheck_self_fix():
+    """اصلاحِ خودِ نگهبان هم باید مثلِ هر تغییرِ دیگری پذیرفته شود.
+
+    باگِ واقعی (دیده‌شده روی سرورِ زنده): `_rev_validate` با همان ماژولِ
+    `selfcheck`ی که موقعِ بوت import شده بود می‌سنجید. پس یک مثبتِ کاذبِ قدیمی
+    (نسخهٔ کهنه) رکوردهای **تازه** را با قوانینِ **قدیم** قضاوت می‌کرد و پروسه
+    هرگز نمی‌توانست اصلاحِ نگهبان را بپذیرد: چیپ می‌گفت «کدِ تازه خراب است»
+    درحالی‌که همان درخت روی دیسک سالم بود → سرور روی نسخهٔ قدیم زندانی می‌شد.
+    """
+    app_dir, home = copy_tree()
+    sc = os.path.join(app_dir, "selfcheck.py")
+    with io.open(sc, encoding="utf-8") as f:
+        real = f.read()
+    # نسخهٔ A (سخت‌گیر) فقط روی دیسک می‌نشیند تا موقعِ بوت در حافظه بار شود.
+    # هنوز پرچم نیست، پس خودِ بوت سبز است.
+    with io.open(sc, "w", encoding="utf-8") as f:
+        f.write(real + STRICT_TAIL)
+
+    pr, url, log, _ = start(app_dir, home)
+    j0 = rev(url)
+    boot0, pid0 = j0["boot_ts"], j0["pid"]
+    check(j0.get("stale") is False,
+          "خودترمیمیِ نگهبان: شروع با نسخهٔ A سبز است (stale=false)")
+
+    # اصلاحِ نگهبان روی دیسک: قاعدهٔ سخت‌گیر برداشته می‌شود، ولی شرطی که A رد
+    # می‌کند فعال می‌شود (پرچم ساخته می‌شود).
+    with io.open(sc, "w", encoding="utf-8") as f:
+        f.write(real)
+    with io.open(os.path.join(app_dir, ".pf_guard_locked"), "w", encoding="utf-8") as f:
+        f.write("x")
+
+    try:
+        disk = json.loads(subprocess.run(
+            [sys.executable, sc, "--root", app_dir, "--json"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.decode("utf-8"))
+    except Exception as e:
+        disk = {}
+        notes.append("خودِ selfcheck.py روی دیسک اجرا نشد: %s" % e)
+    check(disk.get("ok") is True,
+          "قوانینِ روی دیسک (نسخهٔ B) این درخت را سالم می‌دانند — پس هر «رد»ی "
+          "یعنی پروسه با قوانینِ کهنه قضاوت کرده")
+
+    j1 = wait_restart(url, boot0, timeout=60)
+    if not check(j1 is not None,
+                 "اصلاحِ خودِ selfcheck.py پذیرفته شد و ری‌استارت انجام شد "
+                 "(باگِ قبلی: نسخهٔ بوت‌شده تا ابد رد می‌کرد)"):
+        st = rev_soft(url) or {}
+        notes.append("وضعیتِ متوقف: %s" % json.dumps(
+            (st.get("autorestart") or {}).get("blocked"), ensure_ascii=False))
+        notes.append("لاگ:\n" + tail(log))
+        return
+    check(j1["pid"] == pid0, "PID در این ری‌استارت هم ثابت ماند (execv)")
+    check(j1.get("stale") is False, "بعد از پذیرشِ اصلاحِ نگهبان، stale=false شد")
+    check(not ((j1.get("autorestart") or {}).get("blocked")),
+          "وضعیتِ «متوقف» پاک شد (%s)" % (j1.get("note"),))
+    check("قوانینِ روی دیسک" in tail(log),
+          "لاگ صریحاً می‌گوید با قوانینِ روی دیسک سنجیده شد: %s"
+          % [l for l in tail(log).splitlines() if "selfcheck" in l][-1:])
+
+
 def main():
     try:
         case_real_restart()
         case_broken_code_stays_alive()
         case_in_flight_request()
         case_sha_drift_restart()
+        case_selfcheck_self_fix()
     finally:
         stop_all()
         for d in TMPDIRS:
@@ -356,8 +441,8 @@ def main():
         print("\n❌ تستِ ری‌استارتِ خودکار رد شد — %d مشکل" % len(problems))
         return 1
     print("\n✅ تستِ ری‌استارتِ خودکار پاس شد: ری‌استارتِ واقعی، محافظت از کدِ خراب، "
-          "ری‌استارتِ تمیز (بدونِ قطعِ درخواستِ در جریان)، و ری‌استارتِ «فقط SHA"
-          " عوض شده»")
+          "ری‌استارتِ تمیز (بدونِ قطعِ درخواستِ در جریان)، ری‌استارتِ «فقط SHA"
+          " عوض شده»، و پذیرشِ اصلاحِ خودِ نگهبان (قوانینِ روی دیسک)")
     return 0
 
 
