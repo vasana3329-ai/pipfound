@@ -13,6 +13,9 @@
      ندارد، چکِ «صدا زده شده» نمی‌بیندش؛ اگر تعریفش پاک شود دکمه بی‌صدا می‌میرد.
   ۵) کلاس/idِ استفاده‌نشده → **هشدارِ اطلاعاتی**، نه خطا (کدِ مرده خرابی نیست و
      اگر خطا شمرده شود، نگهبانِ بازگردان نیم‌کاره‌ی در حالِ ساخت را برمی‌گرداند).
+     «استفاده‌نشده» یعنی هیچ‌جا نامش برده نشده — نه در صفحه، نه در دارایی‌های
+     وبِ بیرون (هارنسِ بصری/سرویس‌ورکر)؛ وگرنه هشدار، پاک‌کردنِ لنگرِ زنده را
+     توصیه می‌کرد و لایهٔ ۳ می‌شکست (تستِ جهشِ همین قاعده در بندِ ۴ می‌آید).
 
 و برعکسش هم سنجیده می‌شود: جهش‌های «ظاهراً مشکوک ولی بی‌گناه» نباید گزارش شوند —
 مارک‌آپی که داخلِ رشتهٔ JS ساخته می‌شود (innerHTML)، idِ داخلِ رشته/کامنت،
@@ -64,12 +67,17 @@ ANCHORS = {
 }
 
 
-def run_mutation(text):
-    """جهش را در پوشه‌ای موقت می‌گذارد و از خودِ گیتِ لایه‌ی ۱ می‌پرسد."""
+def run_mutation(text, extra=None):
+    """جهش را در پوشه‌ای موقت می‌گذارد و از خودِ گیتِ لایه‌ی ۱ می‌پرسد.
+
+    `extra` = دارایی‌های وبِ همراه (مثلِ هارنسِ بصری) که گیت باید بخواندشان."""
     d = tempfile.mkdtemp(prefix="pf_wiring_")
     try:
         with open(os.path.join(d, "app.py"), "w", encoding="utf-8") as f:
             f.write(text)
+        for nm, body in (extra or {}).items():
+            with open(os.path.join(d, nm), "w", encoding="utf-8") as g:
+                g.write(body)
         rep = SC.run_checks(d)
         return {"ok": rep["ok"], "problems": rep.get("problems") or [],
                 "warnings": rep.get("warnings") or [], "w": rep.get("wiring") or {}}
@@ -210,7 +218,45 @@ for label, text, expect_green in INNOCENT:
         check(f"{label} → گیت قرمز می‌شود", r["ok"] is False, "گیت سبز ماند!")
 
 # ═══════════════════════════════════════════════════════════════════
-print("═══ ۴) خودِ چک مستقل از مبنای کلیدها و بی‌نتیجه نیست ═══")
+print("═══ ۴) داراییِ وبِ بیرون: لنگرهای زنده «کدِ مرده» شمرده نمی‌شوند ═══")
+# هارنسِ تستِ بصری وجودِ بعضی idها را لازم دارد ولی خودِ app.py هیچ‌جا صدا‌شان
+# نمی‌زند؛ اگر هشدارِ «استفاده‌نشده» شاملِ آن‌ها شود، حرفش همان پاک‌کردنِ لنگرِ
+# زنده است و لایهٔ ۳ می‌شکند. پس یک جهش داریم که id/کلاس اضافه می‌کند و با/بی
+# دارایی سنجیده می‌شود (جهشِ کنترل ثابت می‌کند قاعده واقعاً کار می‌کند).
+PIN_ID = mutate(h_sp_head='<div class="sp-head"><i id="ghostPinned"></i>')
+CTL = 'const REQUIRED=["ghostPinned"];\n'
+pin_no = run_mutation(PIN_ID)
+pin_yes = run_mutation(PIN_ID, extra={"ui_visual_check.cjs": CTL})
+check("بدونِ داراییِ وب → idِ بی‌ارجاع هشدار می‌گیرد (جهشِ کنترل)",
+      "HTML:ghostPinned" in unused_needles(pin_no), str(unused_needles(pin_no)))
+check("داراییِ وب که نامش را پین کرده → دیگر هشدار نمی‌گیرد",
+      "HTML:ghostPinned" not in unused_needles(pin_yes), str(unused_needles(pin_yes)))
+check("داراییِ وب واقعاً خوانده شده (ضدِ ناوَکوم)",
+      "ui_visual_check.cjs" in (pin_yes["w"].get("assets") or []),
+      str(pin_yes["w"].get("assets")))
+check("خواندنِ دارایی گیت را قرمز نمی‌کند", pin_yes["ok"], str(pin_yes["problems"][:2]))
+
+PIN_CLS = mutate(h_sp_head='<div class="sp-head ghost-pin-cls">')
+cls_no = run_mutation(PIN_CLS)
+cls_yes = run_mutation(PIN_CLS, extra={"ui_visual_check.cjs": 'q(".ghost-pin-cls");\n'})
+check("بدونِ داراییِ وب → کلاسِ بی‌استایل هشدار می‌گیرد (جهشِ کنترل)",
+      "HTML:ghost-pin-cls" in unused_needles(cls_no), str(unused_needles(cls_no)))
+check("داراییِ وب که کلاسش را می‌گیرد → هشدار نمی‌گیرد",
+      "HTML:ghost-pin-cls" not in unused_needles(cls_yes), str(unused_needles(cls_yes)))
+
+# و روی مخزنِ واقعی: لنگرهای خودِ هارنسِ بصری نباید «مرده» نام بگیرند.
+_ctext, _cnames = SC.consumer_assets(HERE)
+_real_probs, _real_warns, real_st = SC.wiring_problems(SC.page_sources(HERE), _ctext)
+check("مخزنِ واقعی: هارنسِ بصری به‌عنوانِ دارایی خوانده می‌شود (ضدِ ناوَکوم)",
+      "ui_visual_check.cjs" in _cnames and "btPanel" in _ctext, str(_cnames))
+check("مخزنِ واقعی: لنگرهای هارنس (btPanel/riskPanel/alarmsDock) هشدار نمی‌گیرند",
+      not ({"HTML:btPanel", "HTML:riskPanel", "HTML:alarmsDock"}
+           & set(real_st.get("unused_ids") or [])), str(real_st.get("unused_ids")))
+check("مخزنِ واقعی: گیتِ قائل به دارایی هنوز خطایی گزارش نمی‌کند",
+      wiring_needles({"w": real_st}) == [], str(real_st))
+
+# ═══════════════════════════════════════════════════════════════════
+print("═══ ۵) خودِ چک مستقل از مبنای کلیدها و بی‌نتیجه نیست ═══")
 probs, warns, st0 = SC.wiring_problems({})
 check("بدونِ صفحه → نه خطا، نه هشدار، و آمارِ صفر (سبزِ دروغ نمی‌دهد)",
       probs == [] and warns == [] and st0.get("ids") == 0 and st0.get("refs") == 0,

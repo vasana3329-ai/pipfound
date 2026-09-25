@@ -12,7 +12,9 @@
   ۳) چکِ اتصالِ HTML و JS (استاتیک): idِ تکراری در یک سند، ارجاعِ JS به idی که
      ساخته نمی‌شود، هندلرِ inline، و انتسابِ هندلر/تایمر به نامی که تعریف
      نشده (`x.onclick = foo` پرانتز ندارد، پس چکِ بندِ ۲ نمی‌بیندش). کلاس/idِ
-     استفاده‌نشده هم شمرده می‌شود، ولی فقط به‌شکلِ «هشدار».
+     استفاده‌نشده هم شمرده می‌شود، ولی فقط به‌شکلِ «هشدار» — آن هم با احتسابِ
+     دارایی‌های وبِ بیرون (هارنسِ بصری، سرویس‌ورکر)، تا لنگرهای زنده «مرده»
+     نام نگیرند.
   ۴) چکِ «هیچ کلیدی گم نشود»: هر کنترلی که در نسخه‌ی سالمِ قبلی وجود داشت و
      جاوااسکریپت به آن وصل بود، باید سرِ جایش باشد. همچنین مسیرها (routeها).
   ۵) اسنپ‌شاتِ نسخه‌ی سالم را در ~/pipfound/good نگه می‌دارد و با فلگ --guard
@@ -409,7 +411,9 @@ def undefined_calls(pages):
 #      (همین الگو در این اپ رایج است: `jb.onclick = saveJournal`.)
 # ۵) استفاده‌نشده‌ها (کلاس/idِ مرده) شمرده می‌شوند ولی فقط «هشدار»اند: کدِ مرده
 #    خرابی نیست، و اگر خطا شمرده شود نگهبانِ بازگردان، نیم‌کاره‌ی در حالِ ساخت
-#    را بی‌دلیل برمی‌گرداند.
+#    را بی‌دلیل برمی‌گرداند. و «استفاده‌نشده» یعنی هیچ‌جا نامش برده نشده: نه در
+#    خودِ صفحه، نه در دارایی/هارنسِ وبِ بیرون (`consumer_assets`) — وگرنه هشدار،
+#    پاک‌کردنِ لنگرِ زنده‌ی لایهٔ ۳ را توصیه می‌کرد (خطای هشدارِ دروغ).
 # هر دو سند جدا سنجیده می‌شوند (HTML و FUND_PAGE دو دامنه و دو مارک‌آپِ جدا).
 _ID_TOKEN = r"[A-Za-z0-9_\-]+"
 _ID_DECL_RE = re.compile(r'\bid\s*=\s*["\'](' + _ID_TOKEN + r')["\']')
@@ -443,6 +447,29 @@ _LISTENER_HEAD_RE = re.compile(r"addEventListener\s*\(")
 _LISTENER_ARG_RE = re.compile(
     r'\s*["\'][^"\']*["\']\s*,\s*([A-Za-z_$][\w$]*)\s*[,)]')
 _CLASS_ATTR_RE = re.compile(r'\bclass\s*=\s*(?:"([^"]*)"|\'([^\']*)\')')
+# فایل‌های «مصرف‌کننده»ی سمتِ مرورگر: هارنسِ تستِ بصری، سرویس‌ورکر، و هر
+# داراییِ وبِ دیگر که به شناسه/کلاسِ صفحه ارجاع می‌دهد. بدونِ این‌ها هشدارِ
+# «استفاده‌نشده» دروغ می‌گوید: مثلاً `btPanel` هیچ‌جا در app.py صدا زده
+# نمی‌شود ولی تستِ بصری (ui_visual_check.cjs) وجودش را لازم دارد — اگر کسی
+# حرفِ هشدار را گوش کند و «کدِ مرده» را پاک کند، لایهٔ ۳ می‌شکند.
+_CONSUMER_SUFFIXES = (".cjs", ".js", ".html", ".css")
+
+
+def consumer_assets(root):
+    """(متن, نام‌ها)ی مصرف‌کننده‌های وبِ بیرونِ app.py — برای تفکیکِ «واقعاً
+    بی‌ارجاع» از «لنگرِ هارنس/دارایی». اگر این‌ها خوانده نشوند، هشدارِ
+    «استفاده‌نشده» بی‌اعتبار می‌شود (پیشنهادِ پاک‌کردنِ یک لنگرِ زنده)."""
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        names = []
+    kept, out = [], []
+    for n in names:
+        p = os.path.join(root, n)
+        if n.endswith(_CONSUMER_SUFFIXES) and os.path.isfile(p):
+            kept.append(n)
+            out.append(read_text(p))
+    return "\n".join(out), kept
 
 
 def markup_of(html):
@@ -467,12 +494,16 @@ def _class_tokens(page):
     return counts
 
 
-def wiring_problems(pages):
-    """اتصالِ HTML و JS را استاتیک می‌سنجد → (خطاها, هشدارها, آمار)."""
+def wiring_problems(pages, consumers=""):
+    """اتصالِ HTML و JS را استاتیک می‌سنجد → (خطاها, هشدارها, آمار).
+
+    `consumers` متنِ دارایی‌های وبِ دیگر است (هارنسِ بصری، سرویس‌ورکر) و فقط در
+    بندِ ۵ بکار می‌آید: نامی که آن‌ها می‌برند «استفاده‌نشده» نیست."""
     probs, warns = [], []
     stats = {"pages": 0, "ids": 0, "classes": 0, "refs": 0, "handlers": 0,
              "dups": [], "missing_ids": [], "bad_handlers": [],
-             "unused_ids": [], "unused_classes": []}
+             "unused_ids": [], "unused_classes": [],
+             "consumer_chars": len(consumers)}
     for pname in sorted(pages):
         html = pages[pname]
         if not html.strip():
@@ -538,17 +569,22 @@ def wiring_problems(pages):
                 probs.append(f"{pname} · «{kind}» به نامِ «{nm}» وصل شده که در این "
                              "صفحه وجود ندارد")
 
-        # ۵) استفاده‌نشده‌ها — هشدار، نه خطا (کدِ مرده است، نه خرابی)
+        # ۵) استفاده‌نشده‌ها — هشدار، نه خطا (کدِ مرده است، نه خرابی).
+        # «استفاده‌نشده» یعنی **هیچ‌جا هم** نامش برده نشده: نه در خودِ صفحه،
+        # نه در دارایی/هارنسِ وبِ بیرون. دارایی‌ها فقط همین‌جا بکار می‌آیند.
         for i in sorted(set(decl)):
             own = len(re.findall(r'\bid\s*=\s*["\']' + re.escape(i) + r'["\']', html))
-            if len(_token_re(i).findall(html)) <= own:
+            elsewhere = len(_token_re(i).findall(consumers))
+            if len(_token_re(i).findall(html)) + elsewhere <= own:
                 stats["unused_ids"].append(f"{pname}:{i}")
-                warns.append(f"{pname} · idِ «{i}» جایی استفاده نشده (نه CSS، نه JS)")
+                warns.append(f"{pname} · idِ «{i}» جایی استفاده نشده (نه در صفحه، نه در "
+                             "دارایی/هارنسِ وب)")
         in_html = _class_tokens(markup)
         everywhere = _class_tokens(html)
         stats["classes"] += len(in_html)
         for c in sorted(in_html):
-            if len(_token_re(c).findall(html)) <= everywhere.get(c, 0):
+            if len(_token_re(c).findall(html)) + len(_token_re(c).findall(consumers)) \
+                    <= everywhere.get(c, 0):
                 stats["unused_classes"].append(f"{pname}:{c}")
                 warns.append(f"{pname} · کلاسِ «{c}» جایی استایل/استفاده نشده")
     return probs, warns, stats
@@ -660,7 +696,12 @@ def run_checks(root, live=False, enforce_contract=True, accept_removals=False):
 
     # ── چکِ استاتیکِ اتصالِ HTML و JS (شناسه‌ها، هندلرها، استفاده‌نشده‌ها) ──
     # خطاها گیت را قرمز می‌کنند؛ «استفاده‌نشده»‌ها فقط هشدارند (کدِ مرده).
-    wp, ww, wstats = wiring_problems(pages) if pages else ([], [], {})
+    # دارایی‌های وبِ بیرون (هارنسِ بصری/سرویس‌ورکر) هم خوانده می‌شوند تا نامی که
+    # آن‌ها پین کرده‌اند «کدِ مرده» شمرده نشود (وگرنه هشدار، پاک‌کردنِ لنگرِ زنده
+    # را توصیه می‌کرد و لایهٔ ۳ می‌شکست).
+    ctext, cnames = consumer_assets(root)
+    wp, ww, wstats = wiring_problems(pages, ctext) if pages else ([], [], {})
+    wstats["assets"] = cnames
     rep["wiring"] = wstats
     rep["problems"] += [f"اتصالِ HTML/JS → {p}" for p in wp]
     rep["warnings"] += [f"اتصالِ HTML/JS → {w}" for w in ww]
@@ -789,6 +830,7 @@ def _human(rep):
                      f" · تکراری: {len(wg.get('dups') or [])}"
                      f" · ارجاعِ بی‌عنصر: {len(wg.get('missing_ids') or [])}"
                      f" · هندلرِ بد: {len(wg.get('bad_handlers') or [])}"
+                     f" · داراییِ وب: {len(wg.get('assets') or [])}"
                      f" · استفاده‌نشده: {len(wg.get('unused_ids') or [])} id"
                      f" / {len(wg.get('unused_classes') or [])} کلاس")
     for p in rep.get("problems") or []:
