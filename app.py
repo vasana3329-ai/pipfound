@@ -51,6 +51,10 @@ try:
     import backup as BK        # برون‌بری/درون‌بریِ دادهٔ کاربر (ژورنال/آلارم/تنظیمات)
 except Exception:
     BK = None
+try:
+    import autobackup as AB    # پشتیبانِ خودکارِ زمان‌بندی‌شده + نگه‌داشتِ چند نسخهٔ اخیر
+except Exception:
+    AB = None
 
 # ماژولِ ژورنال از پوشه‌ی همسایه‌ی trade-journal
 _JRN_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
@@ -241,6 +245,109 @@ def _backup_bundle():
         raise RuntimeError("ماژولِ پشتیبان بار نشد")
     return BK.build(_journal_rows(_JR_FILE) or [], _journal_fields(),
                     _load_alarms(), _risk_settings())
+
+
+def _backup_by_name(name):
+    """محتوای یک نسخهٔ پشتیبانِ ذخیره‌شده را با نامش برمی‌گرداند (یا None).
+
+    نام با الگوی سختِ `AB.is_backup_name` سنجیده می‌شود تا `?file=../../…`
+    هیچ‌وقت از پوشهٔ پشتیبان بیرون نزند — خواندنِ فایلِ دلخواهِ سیستم از راهِ
+    همین پارامتر بدترین نوعِ شکاف است و این‌جا بسته می‌شود.
+    """
+    if AB is None or not AB.is_backup_name(name):
+        return None
+    p = os.path.join(AB.backup_dir(), name)
+    if not os.path.isfile(p):
+        return None
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _autobackup_record(res):
+    """نتیجهٔ یک اسنپ‌شات را در حالت (state) ثبت می‌کند."""
+    st = AB.load_state()
+    return AB.save_state({
+        "last_run": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "last_run_ts": time.time(),
+        "last_file": res.get("name"),
+        "last_bytes": res.get("bytes") or 0,
+        "runs": int(st.get("runs") or 0) + 1,
+        "last_error": None,
+    })
+
+
+def _autobackup_run_now():
+    """یک اسنپ‌شاتِ فوری می‌گیرد و ثبت می‌کند — همان کاری که زمان‌بند می‌کند.
+
+    بسته از همان `_backup_bundle()` می‌آید که `GET /api/export` می‌دهد؛ پس
+    فایلِ پشتیبانِ خودکار **دقیقاً** همان چیزی است که `POST /api/import`
+    می‌خوانَد و نسخهٔ خودکار هرگز به قالبِ ناسازگار تبدیل نمی‌شود.
+    """
+    res = AB.snapshot(_backup_bundle(), keep=AB.load_settings()["keep"])
+    _autobackup_record(res)
+    return res
+
+
+def _autobackup_status():
+    """وضعیتِ کاملِ پشتیبانِ خودکار (تنظیمات، نسخه‌ها، نوبتِ بعدی)."""
+    cfg = AB.load_settings()
+    st = AB.load_state()
+    bks = AB.list_backups()
+    now = time.time()
+    last = AB.effective_last_run(st.get("last_run_ts"), bks)
+    pending = AB.due(last, now, cfg["interval_h"], cfg["enabled"])
+    nxt = None
+    if cfg["enabled"]:
+        if pending:
+            nxt = 0.0
+        elif last is not None:
+            nxt = max(0.0, (last + cfg["interval_h"] * 3600.0 - now) / 3600.0)
+    return {
+        "ok": True, "settings": cfg, "state": st, "dir": AB.backup_dir(),
+        "count": len(bks), "total_bytes": sum((b.get("bytes") or 0) for b in bks),
+        "due_now": bool(pending),
+        "next_in_h": None if nxt is None else round(nxt, 2),
+        "backups": [{"name": b["name"], "at": b["at"], "bytes": b["bytes"],
+                     "age_h": round((now - b["mtime"]) / 3600.0, 2)} for b in bks],
+    }
+
+
+def _autobackup_worker():
+    """هر دقیقه می‌سنجد آیا نوبتِ نسخهٔ تازه است (بدونِ cron و ابزارِ بیرونی).
+
+    چرا داخلِ همین پروسه: داده و تنظیمات همه این‌جاست و «هیچ‌وقت بی‌پشتیبان
+    نماندن» نباید به نصبِ ابزارِ سیستمی گره بخورد. اگر حالت گم/خراب شود،
+    سنِ تازه‌ترین فایلِ موجود ملاک است (`AB.effective_last_run`) تا با هر
+    ری‌استارتِ اپ یک نسخهٔ اضافه ساخته نشود و نسخه‌های سالمِ قدیمی هرس نشوند.
+    """
+    while True:
+        try:
+            cfg = AB.load_settings()
+            if cfg.get("enabled"):
+                st = AB.load_state()
+                last = AB.effective_last_run(st.get("last_run_ts"), AB.list_backups())
+                if AB.due(last, time.time(), cfg["interval_h"], True):
+                    res = _autobackup_run_now()
+                    extra = (f" · {res['deleted']} نسخهٔ قدیمی هرس شد"
+                             if res.get("deleted") else "")
+                    print(f"📦 پشتیبانِ خودکار: {res['name']} "
+                          f"({res['bytes']} بایت · نگه‌داشتِ {res['kept']} نسخه{extra})")
+        except Exception as e:
+            try:
+                AB.save_state(dict(AB.load_state(), last_error=str(e)))
+            except Exception:
+                pass
+            traceback.print_exc()
+        time.sleep(60)
+
+
+def start_autobackup_worker():
+    t = threading.Thread(target=_autobackup_worker, daemon=True)
+    t.start()
+    return t
 
 
 try:
@@ -817,7 +924,9 @@ def _rev_track_imported():
     تریگر نمی‌کرد و پروسه تا ابد نسخهٔ قدیمیِ آن ماژول را سرو می‌کرد — بی‌صدا،
     دقیقاً همان «کهنه سرو شدن»ی که این مکانیزم برای بستنش ساخته شد.
     """
-    for mod in (C, E, BT, M, FUND, RK):
+    # BK/AB هم عمداً این‌جایند: ویرایشِ ماژولِ انتقال/پشتیبان باید مثلِ بقیه
+    # ری‌استارتِ خودکار را تریگر کند، وگرنه پروسه نسخهٔ قدیمی را سرو می‌کند.
+    for mod in (C, E, BT, M, FUND, RK, BK, AB):
         try:
             p = getattr(mod, "__file__", None)
             if not p:
@@ -1622,6 +1731,18 @@ tr.on td{background:rgba(34,197,94,.05)}
 .upbtn:disabled{opacity:.5;cursor:default}
 .upnote{flex:1;min-width:180px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;
   color:var(--txt);font-size:14px;padding:11px 14px;outline:none}
+/* پشتیبانِ خودکار: زمان‌بندی + فهرستِ نسخه‌های نگه‌داشته‌شده */
+input.abnum{flex:0 0 86px;min-width:86px;text-align:center;direction:ltr;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.ablabel{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--txt);cursor:pointer;
+  background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 14px}
+.ablabel input{width:16px;height:16px;accent-color:var(--accent);cursor:pointer;margin:0}
+#abList{margin-top:10px;display:flex;flex-direction:column;gap:6px}
+.abrow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:var(--panel2);
+  border:1px solid var(--line);border-radius:10px;padding:8px 12px;font-size:12.5px}
+.abrow .abname{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;direction:ltr;color:var(--txt)}
+.abrow .abmeta{color:var(--muted);font-variant-numeric:tabular-nums}
+.abrow .abrestore{margin-inline-start:auto;padding:6px 12px;font-size:12px}
 .shotgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin-top:14px}
 .shot{background:var(--panel2);border:1px solid var(--line);border-radius:12px;overflow:hidden}
 .shot img{width:100%;height:150px;object-fit:cover;cursor:pointer;display:block;background:#000}
@@ -1766,6 +1887,22 @@ tr.on td{background:rgba(34,197,94,.05)}
       <button class="upbtn" id="impBtn" title="یک فایلِ پشتیبانِ JSON را می‌خواند و بدونِ پاک‌کردنِ دادهٔ فعلی به آن اضافه می‌کند: ژورنال/آلارم‌های تکراری نادیده می‌روند (تکرارپذیر) و تنظیماتِ ریسک اعمال می‌شوند.">⬆️ درون‌بری (JSON)</button>
       <span id="bkMsg" class="jmsg"></span>
     </div>
+    <div class="uprow" style="margin-top:10px">
+      <label class="ablabel" for="abToggle" title="روشن باشد، خودِ اپ هر چند ساعت یک نسخهٔ کامل از ژورنال/آلارم‌ها/تنظیمات می‌سازد و فقط چند نسخهٔ آخر را نگه می‌دارد — پس حتی اگر یادت برود، پشتیبان داری.">
+        <input type="checkbox" id="abToggle"> پشتیبانِ خودکار
+      </label>
+      <input class="upnote abnum" id="abEvery" type="number" min="1" max="720" step="1"
+             title="هر چند ساعت یک نسخهٔ تازه ساخته شود (۱ تا ۷۲۰ ساعت).">
+      <span class="jmsg">ساعت یک‌بار · نگه‌داشتِ</span>
+      <input class="upnote abnum" id="abKeep" type="number" min="1" max="50" step="1"
+             title="چند نسخهٔ آخر نگه داشته شود؛ قدیمی‌ترها خودکار هرس می‌شوند — فقط فایل‌های پشتیبانِ خودِ اپ، هیچ فایلِ دیگری در آن پوشه لمس نمی‌شود.">
+      <span class="jmsg">نسخه</span>
+      <button class="upbtn" id="abSave" title="تنظیماتِ زمان‌بندی را ذخیره کن؛ در ~/pipfound/autobackup.json می‌مانَد و بعد از ری‌استارتِ خودکارِ اپ هم حفظ می‌شود.">ذخیره</button>
+      <button class="upbtn" id="abNow" title="همین حالا یک نسخه بساز، بدونِ انتظار برای نوبتِ زمان‌بند — دقیقاً همان بسته‌ای که با «برون‌بری» می‌گیری.">▶️ همین حالا نسخه بساز</button>
+      <span id="abMsg" class="jmsg"></span>
+    </div>
+    <div class="riskstat" id="abStat">در حالِ خواندنِ وضعیتِ پشتیبانِ خودکار…</div>
+    <div id="abList"></div>
   </div>
 
   <div class="livewrap">
@@ -3044,6 +3181,94 @@ if(expBtn) expBtn.onclick=pfExportData;
 if(impBtn&&impFile) impBtn.onclick=()=>impFile.click();
 if(impFile) impFile.onchange=pfImportData;
 
+// ── پشتیبانِ خودکار: زمان‌بندی + نگه‌داشتِ چند نسخهٔ اخیر ──
+// برگرداندنِ هر نسخه از همان مسیرِ درون‌بری می‌رود؛ یعنی ادغامِ بی‌خطر:
+// فقط چیزهای تازه اضافه می‌شوند و هیچ ردیفِ فعلی پاک نمی‌شود (تکرارپذیر).
+function pfAbMsg(t, bad){
+  const el=document.getElementById("abMsg");
+  if(!el) return;
+  el.textContent=t;
+  el.className = bad ? "jmsg bad" : "jmsg good";
+}
+function pfAbBytes(n){
+  n=Number(n)||0;
+  if(n<1024) return n+" بایت";
+  if(n<1048576) return (n/1024).toFixed(1)+" کیلوبایت";
+  return (n/1048576).toFixed(2)+" مگابایت";
+}
+async function loadAutobackup(){
+  const st=document.getElementById("abStat");
+  try{
+    const r=await fetch("/api/autobackup",{cache:"no-store"});
+    const j=await r.json();
+    if(!r.ok||!j||j.ok===false) throw new Error((j&&j.error)||("HTTP "+r.status));
+    const cf=j.settings||{};
+    const tg=document.getElementById("abToggle"), ev=document.getElementById("abEvery"), kp=document.getElementById("abKeep");
+    if(tg) tg.checked=!!cf.enabled;
+    if(ev&&document.activeElement!==ev) ev.value=cf.interval_h;
+    if(kp&&document.activeElement!==kp) kp.value=cf.keep;
+    if(st){
+      const when = !cf.enabled ? "خاموش است"
+        : (j.due_now ? "نوبتِ نسخهٔ تازه رسیده"
+           : (j.next_in_h==null ? "—" : "نسخهٔ بعدی تا ~"+j.next_in_h+" ساعتِ دیگر"));
+      st.textContent="📦 "+j.count+" نسخه ("+pfAbBytes(j.total_bytes)+") · نگه‌داشتِ "+cf.keep
+        +" نسخه · هر "+cf.interval_h+" ساعت · "+when+" · پوشه: "+j.dir;
+    }
+    const list=document.getElementById("abList");
+    if(list){
+      const rows=(j.backups||[]).map(b=>
+        '<div class="abrow"><span class="abname">'+b.name+'</span>'
+        +'<span class="abmeta">'+b.at+" · "+pfAbBytes(b.bytes)+"</span>"
+        +'<button class="upbtn abrestore" data-name="'+b.name+'" title="این نسخه را برگردان. مثلِ درون‌بری است: فقط چیزهای تازه اضافه می‌شود و هیچ ردیفِ فعلی پاک نمی‌شود.">↩️ برگرداندن</button></div>'
+      ).join("");
+      list.innerHTML = rows || '<div class="aempty">هنوز نسخه‌ای ساخته نشده.</div>';
+      list.querySelectorAll(".abrestore").forEach(b=>{ b.onclick=()=>pfAbRestore(b.dataset.name); });
+    }
+  }catch(e){ if(st) st.textContent="⚠ وضعیتِ پشتیبانِ خودکار خوانده نشد: "+e; }
+}
+async function pfAbSave(){
+  const tg=document.getElementById("abToggle"), ev=document.getElementById("abEvery"), kp=document.getElementById("abKeep");
+  pfAbMsg("در حالِ ذخیره…", false);
+  try{
+    const body={enabled:!!(tg&&tg.checked), interval_h:Number((ev&&ev.value)||24), keep:Number((kp&&kp.value)||7)};
+    const r=await fetch("/api/autobackup",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    const j=await r.json();
+    if(!r.ok||j.ok===false) throw new Error((j&&(j.error||(j.errors||[]).join(" · ")))||("HTTP "+r.status));
+    pfAbMsg("✅ ذخیره شد", false);
+    loadAutobackup();
+  }catch(e){ pfAbMsg("⚠ ذخیره نشد: "+e, true); }
+}
+async function pfAbNow(){
+  pfAbMsg("در حالِ ساختِ نسخه…", false);
+  try{
+    const r=await fetch("/api/autobackup",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({run_now:true})});
+    const j=await r.json();
+    if(!r.ok||j.ok===false) throw new Error((j&&(j.error||(j.errors||[]).join(" · ")))||("HTTP "+r.status));
+    const made=j.ran||{};
+    pfAbMsg("✅ نسخه ساخته شد: "+made.name+" ("+pfAbBytes(made.bytes)+(made.deleted?(" · "+made.deleted+" نسخهٔ قدیمی هرس شد"):"")+")", false);
+    loadAutobackup();
+  }catch(e){ pfAbMsg("⚠ نسخه ساخته نشد: "+e, true); }
+}
+async function pfAbRestore(name){
+  pfAbMsg("در حالِ برگرداندنِ «"+name+"»…", false);
+  try{
+    const r=await fetch("/api/autobackup?file="+encodeURIComponent(name),{cache:"no-store"});
+    const doc=await r.json();
+    if(!r.ok) throw new Error((doc&&doc.error)||("HTTP "+r.status));
+    const ir=await fetch("/api/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(doc)});
+    const ij=await ir.json();
+    if(!ir.ok||ij.ok===false) throw new Error((ij&&(ij.error||(ij.errors||[]).join(" · ")))||("HTTP "+ir.status));
+    pfAbMsg("✅ برگردانده شد — ژورنال: "+ij.journal_added+" تازه ("+ij.journal_skipped+" تکراری) · آلارم: "+ij.alarms_added, false);
+    loadAlarms(); loadRisk(); loadAutobackup();
+  }catch(e){ pfAbMsg("⚠ برگرداندن نشد: "+e, true); }
+}
+const abToggle=document.getElementById("abToggle"), abSave=document.getElementById("abSave"), abNow=document.getElementById("abNow");
+if(abSave) abSave.onclick=pfAbSave;
+if(abNow) abNow.onclick=pfAbNow;
+if(abToggle) abToggle.onchange=pfAbSave;
+loadAutobackup();
+setInterval(loadAutobackup, 60000);
+
 // ثبتِ service worker تا اپ مثلِ یک اپِ نصب‌پذیر بالا بیاید (فقط روی http/https)
   // ثبتِ سرویس‌ورکر + بنرِ «نسخهٔ تازه» در pfSwSetup() انجام می‌شود (بالاتر در همین اسکریپت).
 
@@ -3809,6 +4034,20 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 traceback.print_exc()
                 return self._send(500, json.dumps({"error": str(e)}, ensure_ascii=False))
+        if u.path == "/api/autobackup":
+            # وضعیتِ پشتیبانِ خودکار، یا محتوای یک نسخهٔ ذخیره‌شده با ?file=نام
+            if AB is None:
+                return self._send(500, json.dumps(
+                    {"error": "ماژولِ پشتیبانِ خودکار بار نشد"}, ensure_ascii=False))
+            name = (parse_qs(u.query).get("file", [""])[0] or "").strip()
+            if name:
+                doc = _backup_by_name(name)
+                if doc is None:
+                    return self._send(400, json.dumps(
+                        {"error": "نامِ پشتیبان نامعتبر است یا فایل وجود ندارد"},
+                        ensure_ascii=False))
+                return self._send(200, json.dumps(doc, ensure_ascii=False))
+            return self._send(200, json.dumps(_autobackup_status(), ensure_ascii=False))
         if u.path == "/api/screenshots":
             with _shots_lock:
                 return self._send(200, json.dumps(_load_shots(), ensure_ascii=False))
@@ -4038,6 +4277,36 @@ class Handler(BaseHTTPRequestHandler):
                     {"error": "فایلِ JSON خوانده نشد — بستهٔ برون‌بریِ خودِ اپ را بده"},
                     ensure_ascii=False))
             return self._handle_import(doc)
+        if u.path == "/api/autobackup":
+            # تنظیماتِ زمان‌بندی (+ اجرای فوری با run_now) — اعتبارسنجی پیش از ذخیره
+            if AB is None:
+                return self._send(500, json.dumps(
+                    {"error": "ماژولِ پشتیبانِ خودکار بار نشد"}, ensure_ascii=False))
+            try:
+                ln = int(self.headers.get("Content-Length", 0) or 0)
+                body = self.rfile.read(ln) if ln else b""
+                d = json.loads(body.decode("utf-8")) if body.strip() else {}
+            except Exception:
+                return self._send(400, json.dumps(
+                    {"error": "تنظیماتِ پشتیبان خوانده نشد (JSON خراب است)"},
+                    ensure_ascii=False))
+            probs = AB.validate_settings(d)
+            if probs:
+                return self._send(400, json.dumps({"ok": False, "errors": probs},
+                                                  ensure_ascii=False))
+            cur = AB.load_settings()
+            for k in ("enabled", "interval_h", "keep"):
+                if k in d:
+                    cur[k] = d[k]
+            AB.save_settings(cur)
+            ran = None
+            if isinstance(d, dict) and d.get("run_now"):
+                res = _autobackup_run_now()
+                ran = {"name": res["name"], "bytes": res["bytes"],
+                       "kept": res["kept"], "deleted": res["deleted"]}
+            out = _autobackup_status()
+            out["ran"] = ran
+            return self._send(200, json.dumps(out, ensure_ascii=False))
         if u.path == "/api/screenshot":
             return self._handle_upload()
         if u.path == "/api/alarm":
@@ -4223,6 +4492,7 @@ def main():
             _TLS_PORT = None
     start_alarm_worker()
     start_fund_alarm_worker()
+    start_autobackup_worker()
     print(f"✅ pipfound روی {url} بالا آمد.")
     if a.lan:
         info = _install_info()
@@ -4234,6 +4504,15 @@ def main():
     print("   نمادها: XAUUSD, XAGUSD, EURUSD, BTCUSDT, ... — Ctrl+C برای توقف.")
     print("   🔔 موتورِ آلارم فعال شد (بررسیِ هر ۹۰ ثانیه).")
     print("   📰 آلارمِ فاندمنتال فعال شد (هشدارِ ~۲۴ ساعت پیش از هر خبرِ پرتأثیر).")
+    if AB is not None:
+        _abc = AB.load_settings()
+        if _abc.get("enabled"):
+            print(f"   📦 پشتیبانِ خودکار فعال شد (هر {_abc.get('interval_h')} ساعت · "
+                  f"نگه‌داشتِ {_abc.get('keep')} نسخه در {AB.backup_dir()}).")
+        else:
+            print("   📦 پشتیبانِ خودکار خاموش است (از پنلِ «پشتیبان و انتقالِ داده» روشنش کن).")
+    else:
+        print("   📦 پشتیبانِ خودکار: ماژولِ autobackup بار نشد.")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

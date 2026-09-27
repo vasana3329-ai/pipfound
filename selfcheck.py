@@ -1392,6 +1392,26 @@ def pwa_contract_problems(root):
 _BK_WRITE_RE = re.compile(r"(?:\bsave_settings|_journal_write|_save_alarms|os\.replace)\s*\(")
 
 
+_PY_TRIPLE_RE = re.compile(r'"""(?:.|\n)*?"""|\'\'\'(?:.|\n)*?\'\'\'')
+
+
+def _code_only(src):
+    """رشته‌های سه‌گانه (متنِ توضیحی) و کامنت‌ها را از کد جدا می‌کند.
+
+    چرا لازم شد: قاعدهٔ «پشتیبانِ خودکار» با تطبیقِ سادهٔ زیررشته نوشته شده بود و
+    متنی که در **توضیحات** آمده بود را هم می‌دید — یعنی پاک‌کردنِ یک فراخوانیِ
+    واقعی، بی‌صدا سبز می‌مانْد چون همان نام در docstring ذکر شده بود. (همین
+    تله یک بار در جهش‌آزماییِ مسیرهای API هم لو رفته بود.) حالا قاعده فقط کدِ
+    واقعی را می‌بیند.
+    """
+    s = _PY_TRIPLE_RE.sub(
+        lambda m: "\n" * m.group(0).count("\n") or " ", src or "")
+    lines = []
+    for ln in s.splitlines():
+        lines.append(ln.split("#", 1)[0])
+    return "\n".join(lines)
+
+
 def _py_block(src, head_re):
     """بلوکِ پایتونی از خطِ منطبق با head_re تا اولین خطِ غیرخالیِ کم‌تورفتگی."""
     lines = src.splitlines()
@@ -1489,6 +1509,121 @@ def backup_problems(root, pages=None):
         if spec not in html:
             probs.append(f"JS مسیرِ {what} را صدا نمی‌زند — دکمه‌اش بی‌اثر است")
             ctrl_ok = False
+    stats["controls"] = ctrl_ok
+    return probs, stats
+
+
+# ────────── چکِ استاتیکِ پشتیبانِ خودکارِ زمان‌بندی‌شده (اسنپ‌شات + نگه‌داشت) ──────────
+# چرا این قاعده لازم است: پشتیبانِ خودکار *بی‌صدا* خراب می‌شود و کاربر تازه وقتی
+# می‌فهمد که پشتیبان لازمش شده. چهار خرابیِ کشنده: (۱) هرس فایلی را ببرد که
+# پشتیبانِ اپ نیست (دفتر/یادداشت/هر چیزی در همان پوشه) — فاجعه‌ی واقعی؛
+# (۲) نوشتن غیرِاتمیک باشد و خطای وسطِ راه یک «پشتیبانِ خراب» بگذارد که کاربر
+# به آن تکیه کند (بدتر از بی‌پشتیبانی)؛ (۳) زمان‌بند روشن ولی مرده باشد یا
+# کلیدِ روشن/خاموش را نبیند؛ (۴) مسیرِ خواندنِ نسخه با نامِ سنجیده‌نشده اجازهٔ
+# خواندنِ فایلِ دلخواهِ سیستم بدهد (`?file=../../…`). همه استاتیک سنجیده می‌شوند.
+_AB_DELETE_RE = re.compile(r"os\.remove\s*\(")
+
+
+def autobackup_problems(root, pages=None):
+    """قراردادِ پشتیبانِ خودکار: نگه‌داشتِ امن، نوشتنِ اتمیک، زمان‌بندِ زنده، مسیرِ امن."""
+    probs = []
+    stats = {"module": False, "safe_prune": False, "atomic": False,
+             "scheduler": False, "controls": False}
+    # کدِ بدونِ توضیحات: قاعده باید *کد* را بسنجد، نه نامی که در docstring آمده
+    src = _code_only(read_text(os.path.join(root, "app.py")) or "")
+    absrc = _code_only(read_text(os.path.join(root, "autobackup.py")) or "")
+    pages = pages or page_sources(root)
+    html = "\n".join(pages.values()) if pages else ""
+
+    if not absrc.strip():
+        probs.append("ماژولِ autobackup.py خوانده نشد — پشتیبانِ خودکارِ زمان‌بندی‌شده می‌مانَد")
+    else:
+        needed = (r"^DEFAULTS\s*=", r"^def is_backup_name\(", r"^def plan_prune\(",
+                  r"^def due\(", r"^def prune\(", r"^def write_snapshot\(",
+                  r"^def snapshot\(", r"^def list_backups\(",
+                  r"^def validate_settings\(", r"^def effective_last_run\(")
+        miss = [p for p in needed if not re.search(p, absrc, re.M)]
+        if miss:
+            probs.append("autobackup.py ناقص است — این‌ها پیدا نشد: "
+                         + "، ".join(m.lstrip("^").replace("\\(", "(") for m in miss))
+        else:
+            stats["module"] = True
+
+        pblk = _py_block(absrc, re.compile(r"^def plan_prune\(")) or ""
+        rblk = _py_block(absrc, re.compile(r"^def prune\(")) or ""
+        if not _AB_DELETE_RE.search(rblk):
+            probs.append("prune هیچ نسخه‌ای را حذف نمی‌کند — نگه‌داشتِ نسخه‌ها بی‌اثر "
+                         "می‌مانَد (پوشه بی‌نهایت رشد می‌کند)")
+        elif "is_backup_name(" not in pblk:
+            probs.append("plan_prune نامِ فایل را فیلتر نمی‌کند — هرس می‌تواند "
+                         "فایلِ غیرِپشتیبان را نامزدِ حذف کند")
+        elif "is_backup_name(" not in rblk:
+            probs.append("prune پیش از os.remove نام را دوباره نمی‌سنجد — فایلِ "
+                         "ناشناخته در پوشهٔ پشتیبان قربانی می‌شود")
+        else:
+            stats["safe_prune"] = True
+
+        hblk = _py_block(absrc, re.compile(r"^def _write_json\(")) or ""
+        wblk = _py_block(absrc, re.compile(r"^def write_snapshot\(")) or ""
+        if "os.replace(" not in hblk:
+            probs.append("نوشتنِ فایل‌های پشتیبان اتمیک نیست (_write_json بدونِ os.replace)")
+        elif "_write_json(" not in wblk:
+            probs.append("write_snapshot از مسیرِ اتمیکِ _write_json استفاده نمی‌کند")
+        else:
+            stats["atomic"] = True
+
+    w = _py_block(src, re.compile(r"^\s*def _autobackup_worker\("))
+    if w is None:
+        probs.append("کارگرِ پشتیبانِ خودکار (_autobackup_worker) در app.py نیست")
+    else:
+        if "AB.due(" not in w:
+            probs.append("زمان‌بند نوبت را نمی‌سنجد (AB.due نیست) — یا هرگز پشتیبان "
+                         "نمی‌گیرد یا پشتِ‌سرِهم می‌گیرد")
+        if "enabled" not in w:
+            probs.append("زمان‌بند کلیدِ روشن/خاموش را نمی‌بیند — خاموش‌کردن بی‌اثر می‌مانَد")
+        if "_autobackup_run_now(" not in w:
+            probs.append("زمان‌بند از مسیرِ مشترکِ اسنپ‌شات استفاده نمی‌کند")
+        else:
+            stats["scheduler"] = True
+    rn = _py_block(src, re.compile(r"^\s*def _autobackup_run_now\(")) or ""
+    if "_backup_bundle(" not in rn:
+        probs.append("پشتیبانِ خودکار از بستهٔ خودِ «برون‌بری» نمی‌سازد (_backup_bundle "
+                     "نیست) — فایلِ تولیدی قابلِ‌درون‌بری نیست")
+    if "AB.snapshot(" not in rn:
+        probs.append("پشتیبانِ خودکار اسنپ‌شات نمی‌گیرد (AB.snapshot نیست)")
+    # دقت: تعریفِ تابع خودش هم شاملِ «start_autobackup_worker()» است، پس شرط
+    # باید یک *فراخوانیِ سرِ خط* باشد وگرنه برداشتنِ راه‌اندازی بی‌صدا سبز می‌مانْد.
+    if not re.search(r"^\s*start_autobackup_worker\(\)\s*$", src, re.M):
+        probs.append("کارگرِ پشتیبانِ خودکار سرِ بوت راه‌اندازی نمی‌شود")
+    if src.count('u.path == "/api/autobackup"') < 2:
+        probs.append("مسیرِ /api/autobackup باید هم GET (وضعیت/نسخه) و هم "
+                     "POST (تنظیمات) داشته باشد")
+
+    bn = _py_block(src, re.compile(r"^\s*def _backup_by_name\(")) or ""
+    if "is_backup_name(" not in bn:
+        probs.append("خواندنِ نسخه با ?file نام را نمی‌سنجد — مسیرِ بیرون‌زدن از "
+                     "پوشهٔ پشتیبان باز است")
+    elif "backup_dir(" not in bn:
+        probs.append("خواندنِ نسخه از پوشهٔ رسمیِ پشتیبان نمی‌آید")
+
+    ctrl_ok = True
+    for el, what in (("abToggle", "روشن/خاموشِ پشتیبانِ خودکار"),
+                     ("abEvery", "فاصلهٔ ساعت"),
+                     ("abKeep", "تعدادِ نسخه‌های نگه‌داشته"),
+                     ("abSave", "ذخیرهٔ تنظیماتِ زمان‌بندی"),
+                     ("abNow", "اجرای فوری"),
+                     ("abMsg", "پیامِ پشتیبانِ خودکار"),
+                     ("abStat", "خطِ وضعیتِ پشتیبانِ خودکار"),
+                     ("abList", "فهرستِ نسخه‌های نگه‌داشته")):
+        if ('id="%s"' % el) not in html:
+            probs.append(f"کنترلِ «{what}» (#{el}) در صفحه نیست")
+            ctrl_ok = False
+        elif ('getElementById("%s")' % el) not in html:
+            probs.append(f"کنترلِ «{what}» (#{el}) به JS وصل نشده — بی‌اثر است")
+            ctrl_ok = False
+    if 'fetch("/api/autobackup"' not in html:
+        probs.append("JS وضعیتِ پشتیبانِ خودکار را از سرور نمی‌خوانَد — پنل مرده است")
+        ctrl_ok = False
     stats["controls"] = ctrl_ok
     return probs, stats
 
@@ -1599,6 +1734,13 @@ def run_checks(root, live=False, enforce_contract=True, accept_removals=False):
     bkp, bstats = backup_problems(root, pages)
     rep["backup"] = bstats
     rep["problems"] += [f"پشتیبان → {p}" for p in bkp]
+
+    # ── چکِ استاتیکِ پشتیبانِ خودکارِ زمان‌بندی‌شده ──
+    # زمان‌بندیِ روشن ولی مرده، هرسِ فایلِ اشتباهی، یا اسنپ‌شاتِ غیرِاتمیک همه
+    # بی‌صدا هستند تا روزی که به پشتیبان نیاز شود؛ این قاعده همان‌جا می‌گیردش.
+    abp, abstats = autobackup_problems(root, pages)
+    rep["autobackup"] = abstats
+    rep["problems"] += [f"پشتیبانِ خودکار → {p}" for p in abp]
 
     inv = inventory(pages)
     inv["routes"] = routes_of(root)
@@ -1749,6 +1891,13 @@ def _human(rep):
             f" · اعتبارسنجیِ پیش از نوشتن: {'✓' if bk.get('validate_first') else '✗'}"
             f" · نوشتنِ اتمیکِ دفتر: {'✓' if bk.get('atomic') else '✗'}"
             f" · کنترل‌های رابط: {'✓' if bk.get('controls') else '✗'}")
+    ab = rep.get("autobackup") or {}
+    if ab:
+        lines.append(
+            f"   پشتیبانِ خودکار: نگه‌داشتِ امنِ نسخه‌ها: {'✓' if ab.get('safe_prune') else '✗'}"
+            f" · نوشتنِ اتمیکِ اسنپ‌شات: {'✓' if ab.get('atomic') else '✗'}"
+            f" · زمان‌بندِ زنده: {'✓' if ab.get('scheduler') else '✗'}"
+            f" · کنترل‌های رابط: {'✓' if ab.get('controls') else '✗'}")
     for p in rep.get("problems") or []:
         lines.append(f"   ✗ {p}")
     for w in rep.get("warnings") or []:
