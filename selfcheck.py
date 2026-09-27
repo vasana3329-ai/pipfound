@@ -1382,6 +1382,117 @@ def pwa_contract_problems(root):
     return probs, warns, stats
 
 
+# ────────── چکِ استاتیکِ انتقالِ دادهٔ کاربر (برون‌بری/درون‌بریِ ژورنال/آلارم/تنظیمات) ──────────
+# چرا این قاعده لازم است: بدونِ نگهبان، سه خرابیِ بی‌صدا فقط سرِ «دستگاهِ تازه»
+# معلوم می‌شوند: (۱) برون‌بری یک بخش را از قلم بیندازد (مثلاً تنظیمات) و کاربر
+# فکر کند پشتیبانِ کامل دارد؛ (۲) درون‌بری پیش از اعتبارسنجی دست به فایل‌ها
+# بزند و بستهٔ خراب نیمه‌کاره اعمال شود؛ (۳) بازنویسیِ دفتر غیرِاتمیک باشد و
+# خطای وسطِ کار دفترِ کاربر را بریده بگذارد. پنجرهٔ دکمه‌های رابط هم بدونِ قاعده
+# بی‌صدا می‌میرد. همهٔ این‌ها استاتیک و بدونِ اجرای کد سنجیده می‌شوند.
+_BK_WRITE_RE = re.compile(r"(?:\bsave_settings|_journal_write|_save_alarms|os\.replace)\s*\(")
+
+
+def _py_block(src, head_re):
+    """بلوکِ پایتونی از خطِ منطبق با head_re تا اولین خطِ غیرخالیِ کم‌تورفتگی."""
+    lines = src.splitlines()
+    for i, ln in enumerate(lines):
+        if head_re.search(ln):
+            indent = len(ln) - len(ln.lstrip())
+            out = [ln]
+            for ln2 in lines[i + 1:]:
+                if ln2.strip() and (len(ln2) - len(ln2.lstrip())) <= indent:
+                    break
+                out.append(ln2)
+            return "\n".join(out)
+    return None
+
+
+def backup_problems(root, pages=None):
+    """قراردادِ انتقالِ داده: برون‌بریِ کامل، اعتبارسنجیِ پیش از نوشتن، نوشتنِ اتمیک."""
+    probs = []
+    stats = {"endpoints": False, "validate_first": False, "atomic": False,
+             "controls": False}
+    src = read_text(os.path.join(root, "app.py")) or ""
+    bsrc = read_text(os.path.join(root, "backup.py")) or ""
+    pages = pages or page_sources(root)
+    html = "\n".join(pages.values()) if pages else ""
+
+    if not bsrc.strip():
+        probs.append("ماژولِ backup.py خوانده نشد — برون‌بری/درون‌بری بی‌هسته می‌مانَد")
+    else:
+        if not re.search(r"^KIND\s*=\s*[\"']pipfound-backup[\"']", bsrc, re.M):
+            probs.append("نشانِ بستهٔ پشتیبان (KIND) در backup.py تعریف نشده")
+        if not re.search(r"^VERSION\s*=\s*\d+\s*$", bsrc, re.M):
+            probs.append("نسخهٔ بستهٔ پشتیبان (VERSION) در backup.py تعریف نشده")
+        blk = _py_block(bsrc, re.compile(r"^def build\("))
+        if blk is None:
+            probs.append("backup.py · تابعِ build( پیدا نشد")
+        else:
+            for key in ("journal", "alarms", "settings"):
+                if ('"%s"' % key) not in blk:
+                    probs.append(f"برون‌بری بخشِ «{key}» را در بسته نمی‌گذارد — "
+                                 "پشتیبانِ ناقص بی‌صدا است")
+        vblk = _py_block(bsrc, re.compile(r"^def validate\("))
+        if vblk is None:
+            probs.append("backup.py · تابعِ validate( پیدا نشد — درون‌بری بی‌اعتبارسنجی است")
+        else:
+            for need in ("KIND", "VERSION"):
+                if need not in vblk:
+                    probs.append(f"اعتبارسنجی کلیدِ «{need}» را نمی‌بیند — "
+                                 "بستهٔ ناسازگار بی‌صدا اعمال می‌شود")
+
+    # دقت: چک با رشتهٔ خالیِ مسیر کافی نیست — همان مسیر در JS هم به‌شکلِ
+    # `fetch("/api/export")` می‌آید، پس برداشتنِ روتِ پایتونی می‌توانست «سبزِ دروغ»
+    # بدهد (همین تله در جهش‌آزماییِ همین قاعده لو رفت). پس روت را از خودِ شرطِ پایتون
+    # می‌شناسیم و صدا‌زدن از JS را جدا می‌سنجیم.
+    has_export = 'u.path == "/api/export"' in src
+    has_import = 'u.path == "/api/import"' in src
+    stats["endpoints"] = has_export and has_import
+    if not has_export:
+        probs.append("مسیرِ /api/export (برون‌بری) در app.py نیست")
+    if not has_import:
+        probs.append("مسیرِ /api/import (درون‌بری) در app.py نیست")
+
+    hi = _py_block(src, re.compile(r"^\s*def _handle_import\("))
+    if hi is None:
+        probs.append("هندلرِ _handle_import در app.py نیست — درون‌بری سرو نمی‌شود")
+    else:
+        vm = re.search(r"\bBK\.validate\s*\(", hi)
+        wm = _BK_WRITE_RE.search(hi)
+        if vm is None:
+            probs.append("درون‌بری پیش از نوشتن اعتبارسنجی نمی‌کند (BK.validate نیست)")
+        elif wm is not None and wm.start() < vm.start():
+            probs.append("درون‌بری اول می‌نویسد و بعد اعتبارسنجی می‌کند — بستهٔ خراب "
+                         "می‌تواند نیمه‌کاره اعمال شود")
+        stats["validate_first"] = bool(vm) and (wm is None or vm.start() < wm.start())
+
+    jw = _py_block(src, re.compile(r"^\s*def _journal_write\("))
+    if jw is None:
+        probs.append("نوشتارِ اتمیکِ دفتر (_journal_write) در app.py نیست")
+    elif "os.replace(" not in jw:
+        probs.append("بازنویسیِ دفترِ ژورنال اتمیک نیست (os.replace غایب است) — "
+                     "خطای وسطِ درون‌بری دفتر را نیمه‌کاره می‌گذارد")
+    else:
+        stats["atomic"] = True
+
+    ctrl_ok = True
+    for el, what in (("expBtn", "برون‌بری"), ("impBtn", "درون‌بری"),
+                     ("impFile", "فایلِ درون‌بری"), ("bkMsg", "پیامِ پشتیبان")):
+        if ('id="%s"' % el) not in html:
+            probs.append(f"کنترلِ «{what}» (#{el}) در صفحه نیست")
+            ctrl_ok = False
+        elif ('getElementById("%s")' % el) not in html:
+            probs.append(f"کنترلِ «{what}» (#{el}) به JS وصل نشده — دکمه بی‌اثر است")
+            ctrl_ok = False
+    for spec, what in (('fetch("/api/export"', "برون‌بری"),
+                       ('fetch("/api/import"', "درون‌بری")):
+        if spec not in html:
+            probs.append(f"JS مسیرِ {what} را صدا نمی‌زند — دکمه‌اش بی‌اثر است")
+            ctrl_ok = False
+    stats["controls"] = ctrl_ok
+    return probs, stats
+
+
 def read_baseline(root=None):
     """مبنای «نسخه‌ی سالم» → (inventory, منبع).
     اول اسنپ‌شاتِ همین ماشین (~/pipfound/good)، بعد فایلِ نسخه‌بندی‌شده‌ی
@@ -1481,6 +1592,13 @@ def run_checks(root, live=False, enforce_contract=True, accept_removals=False):
     rep["pwa"] = pstats
     rep["problems"] += [f"PWA → {p}" for p in pw]
     rep["warnings"] += [f"PWA → {p}" for p in pn]
+
+    # ── چکِ استاتیکِ انتقالِ دادهٔ کاربر (برون‌بری/درون‌بریِ ژورنال/آلارم/تنظیمات) ──
+    # پشتیبانِ ناقص یا درون‌بریِ بی‌اعتبارسنجی فقط سرِ «دستگاهِ تازه» معلوم می‌شود؛
+    # این قاعده همان‌جا جلوی بی‌صدا شدن را می‌گیرد.
+    bkp, bstats = backup_problems(root, pages)
+    rep["backup"] = bstats
+    rep["problems"] += [f"پشتیبان → {p}" for p in bkp]
 
     inv = inventory(pages)
     inv["routes"] = routes_of(root)
@@ -1624,6 +1742,13 @@ def _human(rep):
             f" · یادِ «بعداً» تا پایانِ بازدید: {_mark(pw.get('banner_memory'))}"
             f" · خبرِ نسخهٔ تازهٔ سرِ بارگذاری: {_mark(pw.get('update_watch'))}"
             f" · ارتقای ایمن (تأیید و برگردان): {_mark(pw.get('safe_upgrade'))}")
+    bk = rep.get("backup") or {}
+    if bk:
+        lines.append(
+            f"   پشتیبانِ داده: برون‌بری/درون‌بری: {'✓' if bk.get('endpoints') else '✗'}"
+            f" · اعتبارسنجیِ پیش از نوشتن: {'✓' if bk.get('validate_first') else '✗'}"
+            f" · نوشتنِ اتمیکِ دفتر: {'✓' if bk.get('atomic') else '✗'}"
+            f" · کنترل‌های رابط: {'✓' if bk.get('controls') else '✗'}")
     for p in rep.get("problems") or []:
         lines.append(f"   ✗ {p}")
     for w in rep.get("warnings") or []:

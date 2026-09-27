@@ -105,9 +105,9 @@ def mutate(**subs):
 # خطای کاذب می‌سازد: (۱) لنگرهایی که هارنسِ بصری پین کرده «کدِ مرده» به‌نظر
 # می‌رسند؛ (۲) نگهبانِ تازه‌ی «قراردادِ PWA» فایلِ همراهِ app.py را نمی‌بیند و
 # «وعده‌ی بی‌فایل» گزارش می‌کند.
-COMPANION_ASSETS = ("ui_visual_check.cjs", "sw.js", "manifest.webmanifest",
-                    "icon-180.png", "icon-192.png", "icon-192-mask.png",
-                    "icon-512.png", "icon-512-mask.png")
+COMPANION_ASSETS = ("ui_visual_check.cjs", "backup.py", "sw.js",
+                    "manifest.webmanifest", "icon-180.png", "icon-192.png",
+                    "icon-192-mask.png", "icon-512.png", "icon-512-mask.png")
 
 
 def wiring_needles(r):

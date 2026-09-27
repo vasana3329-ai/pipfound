@@ -51,7 +51,9 @@ def check(name, cond, detail=""):
 
 # فایل‌های همراهی که اپِ واقعی در همین پوشه دارد. محیطِ جهش باید مثلِ مخزن
 # باشد، وگرنه نگهبان «وعده‌ی بی‌فایل» می‌بیند و شمارِ خطاهای کاذب بالا می‌رود.
-COMPANIONS = ("app.py", "sw.js", "manifest.webmanifest",
+# `backup.py` هم لازم است، وگرنه قاعدهٔ «انتقالِ داده» در سندباکس خطای کاذب
+# («ماژولِ backup.py خوانده نشد») می‌سازد.
+COMPANIONS = ("app.py", "backup.py", "sw.js", "manifest.webmanifest",
               "icon-180.png", "icon-192.png", "icon-192-mask.png",
               "icon-512.png", "icon-512-mask.png")
 
