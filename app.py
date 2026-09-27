@@ -25,6 +25,7 @@ SHOTS_DIR = os.path.join(HOME, "pipfound", "screenshots")
 _ALLOWED_IMG = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
                 "webp": "image/webp", "gif": "image/gif"}
 _MAX_UPLOAD = 12 * 1024 * 1024  # 12MB
+_MAX_IMPORT = 16 * 1024 * 1024  # 16MB — سقفِ فایلِ پشتیبانِ JSON (برون‌بری/درون‌بری)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import confluence as C
@@ -46,6 +47,10 @@ try:
     import smt as SMT          # SMT دایورجنس: شکستِ همبستگیِ دو نمادِ همبسته
 except Exception:
     RK = None
+try:
+    import backup as BK        # برون‌بری/درون‌بریِ دادهٔ کاربر (ژورنال/آلارم/تنظیمات)
+except Exception:
+    BK = None
 
 # ماژولِ ژورنال از پوشه‌ی همسایه‌ی trade-journal
 _JRN_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
@@ -205,6 +210,37 @@ def _journal_migrate(path):
             for r in rows:
                 w.writerow({f: r.get(f, "") for f in fields})
     return added
+
+
+def _journal_write(rows, fields=None):
+    """بازنویسیِ اتمیکِ کلِ دفتر (temp + os.replace) — مسیرِ درون‌بری.
+
+    چرا اتمیک: اگر وسطِ بازنویسی خطایی بخورد، دفترِ کاربر نباید بریده بمانَد؛
+    فایلِ موقت کنارِ دفتر نوشته می‌شود و فقط در پایان `os.replace` جای اصلی را
+    می‌گیرد (همان الگویی که `_save_alarms`/`save_settings` دارند).
+    """
+    import csv as _csv
+    fields = list(fields or _journal_fields())
+    path = _JR_FILE
+    d = os.path.dirname(path)
+    if d and not os.path.exists(d):
+        os.makedirs(d, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", newline="", encoding="utf-8") as fh:
+        w = _csv.DictWriter(fh, fieldnames=fields)
+        w.writeheader()
+        for r in rows:
+            w.writerow({f: (r.get(f, "") or "") for f in fields})
+    os.replace(tmp, path)
+    return path
+
+
+def _backup_bundle():
+    """بستهٔ برون‌بری: ژورنال + آلارم‌ها + تنظیمات (آمادهٔ JSON)."""
+    if BK is None:
+        raise RuntimeError("ماژولِ پشتیبان بار نشد")
+    return BK.build(_journal_rows(_JR_FILE) or [], _journal_fields(),
+                    _load_alarms(), _risk_settings())
 
 
 try:
@@ -1722,6 +1758,16 @@ tr.on td{background:rgba(34,197,94,.05)}
     <div id="alarmsList"><div class="aempty">هنوز آلارمی نگذاشته‌ای.</div></div>
   </div>
 
+  <div class="alarms-dock">
+    <h2>📦 پشتیبان و انتقالِ داده <span class="jmsg">(ژورنال، آلارم‌ها و تنظیماتِ ریسک — در یک فایلِ JSON)</span></h2>
+    <div class="uprow">
+      <input type="file" id="impFile" accept="application/json,.json" style="display:none">
+      <button class="upbtn" id="expBtn" title="کلِ دادهٔ تو (ردیف‌های ژورنال، آلارم‌ها و تنظیماتِ ریسک) را به‌شکلِ یک فایلِ JSON برون‌بری می‌کند؛ همان فایل را روی دستگاهِ تازه درون‌بری کن تا از صفر شروع نکنی.">⬇️ برون‌بری (JSON)</button>
+      <button class="upbtn" id="impBtn" title="یک فایلِ پشتیبانِ JSON را می‌خواند و بدونِ پاک‌کردنِ دادهٔ فعلی به آن اضافه می‌کند: ژورنال/آلارم‌های تکراری نادیده می‌روند (تکرارپذیر) و تنظیماتِ ریسک اعمال می‌شوند.">⬆️ درون‌بری (JSON)</button>
+      <span id="bkMsg" class="jmsg"></span>
+    </div>
+  </div>
+
   <div class="livewrap">
     <h2>📊 چارتِ زنده <span class="jmsg" id="tvSymLbl"></span></h2>
     <div class="tv-box" id="tvBox">
@@ -2952,6 +2998,52 @@ async function loadAlarms(){
 loadAlarms();
 setInterval(loadAlarms, 30000);
 
+// ── پشتیبان‌گیریِ داده: برون‌بری/درون‌بریِ JSON (ژورنال + آلارم‌ها + تنظیماتِ ریسک) ──
+// برون‌بری یک اسنپ‌شاتِ کامل می‌سازد؛ درون‌بری ادغامِ بی‌خطر است (تکراری‌ها
+// نادیده می‌روند و هیچ ردیفی پاک نمی‌شود)، پس اجرای دوباره هم بی‌خطر است.
+function pfBkMsg(t, bad){
+  const el=document.getElementById("bkMsg");
+  if(!el) return;
+  el.textContent=t;
+  el.className = bad ? "jmsg bad" : "jmsg good";
+}
+async function pfExportData(){
+  pfBkMsg("در حالِ آماده‌سازیِ پشتیبان…", false);
+  try{
+    const r=await fetch("/api/export",{cache:"no-store"});
+    const j=await r.json();
+    if(!r.ok || !j || j.kind!=="pipfound-backup") throw new Error((j&&j.error)||("HTTP "+r.status));
+    const blob=new Blob([JSON.stringify(j,null,2)],{type:"application/json"});
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download="pipfound-backup-"+new Date().toISOString().slice(0,16).replace(/[:T]/g,"-")+".json";
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),4000);
+    const c=j.counts||{};
+    pfBkMsg("✅ برون‌بری شد — ژورنال: "+(c.journal||0)+" ردیف · آلارم: "+(c.alarms||0), false);
+  }catch(e){ pfBkMsg("⚠ برون‌بری نشد: "+e, true); }
+}
+async function pfImportData(){
+  const inp=document.getElementById("impFile");
+  const f=inp && inp.files && inp.files[0];
+  if(!f) return;
+  pfBkMsg("در حالِ درون‌بریِ «"+f.name+"»…", false);
+  try{
+    const txt=await f.text();
+    try{ JSON.parse(txt); }catch(e){ throw new Error("فایلِ JSON خوانده نشد"); }
+    const r=await fetch("/api/import",{method:"POST",headers:{"Content-Type":"application/json"},body:txt});
+    const j=await r.json();
+    if(!r.ok || !j || j.ok===false) throw new Error((j&&(j.error||(j.errors||[]).join(" · ")))||("HTTP "+r.status));
+    pfBkMsg("✅ درون‌بری شد — ژورنال: "+j.journal_added+" تازه ("+j.journal_skipped+" تکراری) · آلارم: "+j.alarms_added+" · تنظیمات: "+(j.settings_applied?"اعمال شد":"—"), false);
+    inp.value="";
+    loadAlarms(); loadRisk();
+  }catch(e){ pfBkMsg("⚠ درون‌بری نشد: "+e, true); }
+}
+const expBtn=document.getElementById("expBtn"), impBtn=document.getElementById("impBtn"), impFile=document.getElementById("impFile");
+if(expBtn) expBtn.onclick=pfExportData;
+if(impBtn&&impFile) impBtn.onclick=()=>impFile.click();
+if(impFile) impFile.onchange=pfImportData;
+
 // ثبتِ service worker تا اپ مثلِ یک اپِ نصب‌پذیر بالا بیاید (فقط روی http/https)
   // ثبتِ سرویس‌ورکر + بنرِ «نسخهٔ تازه» در pfSwSetup() انجام می‌شود (بالاتر در همین اسکریپت).
 
@@ -3710,6 +3802,13 @@ class Handler(BaseHTTPRequestHandler):
         if u.path == "/api/alarms":
             with _alarms_lock:
                 return self._send(200, json.dumps(_load_alarms(), ensure_ascii=False))
+        if u.path == "/api/export":
+            # برون‌بریِ کلِ دادهٔ کاربر در یک فایلِ JSON (ژورنال + آلارم‌ها + تنظیمات)
+            try:
+                return self._send(200, json.dumps(_backup_bundle(), ensure_ascii=False))
+            except Exception as e:
+                traceback.print_exc()
+                return self._send(500, json.dumps({"error": str(e)}, ensure_ascii=False))
         if u.path == "/api/screenshots":
             with _shots_lock:
                 return self._send(200, json.dumps(_load_shots(), ensure_ascii=False))
@@ -3854,6 +3953,40 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
 
+    def _handle_import(self, doc):
+        """درون‌بریِ بستهٔ پشتیبان — اعتبارسنجیِ **کامل پیش از هر نوشتن**.
+
+        ترتیب عمدی است: اول `BK.validate` (خالص، بدونِ I/O) و فقط اگر صفر خطا
+        داد، ادغام و نوشتن‌های اتمیک. پس بدنهٔ خراب هیچ‌وقت دفترِ کاربر را لمس
+        نمی‌کند و اجرای دوبارهٔ همان بسته «۰ افزوده» می‌دهد (تکرارپذیر).
+        """
+        if BK is None:
+            return self._send(500, json.dumps({"error": "ماژولِ پشتیبان بار نشد"},
+                                              ensure_ascii=False))
+        probs = BK.validate(doc, _journal_fields())
+        if probs:
+            return self._send(400, json.dumps({"ok": False, "errors": probs},
+                                              ensure_ascii=False))
+        rows, j_add, j_skip = BK.merge_journal(_journal_rows(_JR_FILE) or [],
+                                               doc.get("journal") or [],
+                                               _journal_fields())
+        if j_add:
+            _journal_write(rows)
+        with _alarms_lock:
+            alarms, a_add, a_skip = BK.merge_alarms(_load_alarms(),
+                                                    doc.get("alarms") or [])
+            if a_add:
+                _save_alarms(alarms)
+        s_applied = False
+        if RK is not None and isinstance(doc.get("settings"), dict) and doc["settings"]:
+            RK.save_settings(BK.merge_settings(RK.load_settings(), doc["settings"]))
+            s_applied = True
+        return self._send(200, json.dumps({
+            "ok": True, "journal_added": j_add, "journal_skipped": j_skip,
+            "alarms_added": a_add, "alarms_skipped": a_skip,
+            "settings_applied": s_applied, "journal_file": _JR_FILE,
+        }, ensure_ascii=False))
+
     def do_POST(self):
         u = urlparse(self.path)
         qs = parse_qs(u.query)
@@ -3891,6 +4024,20 @@ class Handler(BaseHTTPRequestHandler):
                 traceback.print_exc()
                 return self._send(200, json.dumps(
                     {"error": str(e)}, ensure_ascii=False))
+        if u.path == "/api/import":
+            # بستهٔ برون‌بریِ خودِ اپ را بده؛ اعتبارسنجی کامل پیش از هر نوشتن
+            ln = int(self.headers.get("Content-Length", 0) or 0)
+            if ln > _MAX_IMPORT:
+                return self._send(413, json.dumps(
+                    {"error": "فایلِ پشتیبان خیلی بزرگ است"}, ensure_ascii=False))
+            try:
+                body = self.rfile.read(ln) if ln else b""
+                doc = json.loads(body.decode("utf-8"))
+            except Exception:
+                return self._send(400, json.dumps(
+                    {"error": "فایلِ JSON خوانده نشد — بستهٔ برون‌بریِ خودِ اپ را بده"},
+                    ensure_ascii=False))
+            return self._handle_import(doc)
         if u.path == "/api/screenshot":
             return self._handle_upload()
         if u.path == "/api/alarm":
@@ -3903,7 +4050,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(200, json.dumps({"error": "نماد خالی است"}, ensure_ascii=False))
                 mode = d.get("mode", "ote")
                 alarm = {
-                    "id": str(int(time.time() * 1000)),
+                    "id": "",   # پایین‌تر، داخلِ قفل و یکتا پر می‌شود
                     "symbol": sym,
                     "mode": mode,
                     "direction": d.get("direction"),
@@ -3923,6 +4070,16 @@ class Handler(BaseHTTPRequestHandler):
                     alarm["cross"] = d.get("cross", "any")
                 with _alarms_lock:
                     alarms = _load_alarms()
+                    # شناسهٔ یکتا: time.time()×۱۰۰۰ برای دو آلارمِ پشت‌سرهم می‌تواند
+                    # یکی باشد — آن‌وقت حذفِ یکی هر دو را می‌برد و انتقالِ داده هم
+                    # آنها را «تکراری» می‌دید. پس در برخورد، پسوندِ یکتا می‌گیرد.
+                    seen = {str(a.get("id")) for a in alarms}
+                    base = str(int(time.time() * 1000))
+                    aid, n = base, 1
+                    while aid in seen:
+                        aid = base + "-" + str(n)
+                        n += 1
+                    alarm["id"] = aid
                     alarms.append(alarm)
                     _save_alarms(alarms)
                 return self._send(200, json.dumps({"added": alarm["id"], "symbol": sym}, ensure_ascii=False))

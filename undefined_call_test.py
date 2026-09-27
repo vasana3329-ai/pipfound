@@ -58,7 +58,7 @@ ANCHORS = {
 # فایل‌های همراهی که اپِ واقعی در همین پوشه دارد (سرویس‌ورکر، مانیفست، آیکون‌ها).
 # محیطِ جهش باید مثلِ مخزن باشد: نگهبان حالا وعده‌های سرویس‌ورکر/مانیفست را با
 # فایل‌های واقعی مقابله می‌کند و در sandboxِ بره «وعدهی بی‌فایل» خطای کاذب می‌دهد.
-COMPANION_ASSETS = ("sw.js", "manifest.webmanifest",
+COMPANION_ASSETS = ("backup.py", "sw.js", "manifest.webmanifest",
                     "icon-180.png", "icon-192.png", "icon-192-mask.png",
                     "icon-512.png", "icon-512-mask.png")
 
