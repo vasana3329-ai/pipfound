@@ -430,10 +430,13 @@ red("برداشتنِ مسیرِ برون‌بری", "مسیرِ /api/export",
     app_src=SOURCE.replace('u.path == "/api/export"', 'u.path == "/api/export-old"', 1))
 red("برداشتنِ مسیرِ درون‌بری", "مسیرِ /api/import",
     app_src=SOURCE.replace('u.path == "/api/import"', 'u.path == "/api/import-old"', 1))
+# دقت: این دو مسیر ممکن است در صفحه **چند صدا‌زن** داشته باشند (مثلاً برگرداندنِ
+# نسخهٔ خودکار هم از `/api/import` می‌رود). جهش باید همهٔ رخدادها را بردارد
+# وگرنه یک صدا‌زنِ باقی‌مانده قاعده را سبز نگه می‌دارد و جهش بی‌صدا (ناوَکوم) می‌شود.
 red("قطع‌کردنِ صدا‌زدنِ برون‌بری از JS", "JS مسیرِ برون‌بری",
-    app_src=SOURCE.replace('fetch("/api/export"', 'fetch("/api/exportOld"', 1))
+    app_src=SOURCE.replace('fetch("/api/export"', 'fetch("/api/exportOld"'))
 red("قطع‌کردنِ صدا‌زدنِ درون‌بری از JS", "JS مسیرِ درون‌بری",
-    app_src=SOURCE.replace('fetch("/api/import"', 'fetch("/api/importOld"', 1))
+    app_src=SOURCE.replace('fetch("/api/import"', 'fetch("/api/importOld"'))
 red("برداشتنِ بخشِ settings از build", "settings",
     backup_src=BSOURCE.replace('"settings": st,', '"settingsX": st,', 1))
 red("حذفِ بررسیِ KIND از validate", "KIND",
