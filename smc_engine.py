@@ -937,6 +937,17 @@ def analyze_bars(bars, tf, disp=None, src="backtest", sym=None, now=None):
     سیگنال؛ زنده: None ⇒ همین حالا).
     """
     if len(bars)<30: raise RuntimeError("not enough bars")
+    # گیتِ «کندلِ ناقص» (P1-3): بسته‌بودنِ کندلِ آخر باید برقرار باشد، وگرنه هر سطحی
+    # که از آن ساخته شود (سوینگ/FVG/OB/PD/حتی برچسبِ کِیل‌زون) تا لحظهٔ بسته‌شدن
+    # جابه‌جا می‌شود — همان repaint. مسیرِ زنده (`fetch`) و بک‌تست (`_build_d`) این
+    # گام را با `drop_unclosed` انجام می‌دهند؛ این‌جا خودِ هسته هم قفل می‌کند تا یک
+    # فراخوانِ تازه بی‌صدا سیگنال روی کندلِ ناقص نسازد (خطای صریح، نه سبزِ خاموش).
+    _tf_secs = tf_seconds(tf)
+    _chk_now = now if now is not None else time.time()
+    if bars[-1]["t"] + _tf_secs > _chk_now:
+        raise RuntimeError(
+            "کندلِ ناقص در ورودیِ تحلیل — آخرین کندل هنوز بسته نشده (t+tf > now)؛ "
+            "اول drop_unclosed(bars, tf, now) را صدا بزن")
     sw=swings(bars,2)
     trend,labels,bos,choch,meta=structure(bars,sw)
     # فیکس C2: کیل‌زون از تایم‌استمپِ آخرین کندلِ همین برش حساب می‌شود (بازتولیدپذیر
