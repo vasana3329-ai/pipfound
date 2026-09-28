@@ -181,8 +181,12 @@ def fake_d(state, last_bar_ts, price=4300.0):
 for state in ("open", "delayed", "closed"):
     d = fake_d(state, T0)
     if state == "open":
-        d["15m"]["data"] = E.freshness_from(T0 - 60, "15m", "XAUUSD", src="yahoo", now=T0)
-        d["15m"]["data"]["state"] = "open"
+        # کندلِ **بستهٔ** تازه: باید کلوزش ≤ now باشد، وگرنه برای ۱۵m هنوز در حالِ
+        # تشکیل است (قبلاً T0-60 بود که برای ۱۵m تا ۱۲:۱۴ باز می‌ماند؛ یعنی
+        # فیکسچرِ تست یک کندلِ ناقص را «تازه» جا می‌زد و گیتِ کندلِ ناقص درست
+        # می‌گرفتش). حالا کندلِ ۱۱:۴۵–۱۲:۰۰، بسته در همان now.
+        d["15m"]["data"] = E.freshness_from(T0 - E.tf_seconds("15m"), "15m", "XAUUSD",
+                                            src="yahoo", now=T0)
     row = None
     try:
         r = CF.score("XAUUSD", ["15m"], d=d)

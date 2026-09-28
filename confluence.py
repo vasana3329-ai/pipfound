@@ -144,7 +144,15 @@ def score(symbol, tfs, d=None):
     # پلنی که روی دادهٔ کهنه یا بازارِ بسته ساخته شود «سیگنالِ ورود» نیست؛ فرضِ
     # ورود «الان» در حالی که هیچ کندلِ تازه‌ای نیست، خطای اجرایی است.
     ltf_data = (d.get(ltf, {}) or {}).get("data") or {}
-    dstate = ltf_data.get("state")
+    # دفاعِ عمقِ دوم («کندلِ ناقص»): مسیرِ تحلیل پیش از این‌جا کندلِ در حالِ تشکیل را
+    # با drop_unclosed می‌اندازد، پس `forming` در عمل همیشه False است. ولی اگر یک
+    # فراخوانِ تازه این گام را جا بیندازد یا fetch رگرسیون کند، همان‌جا قفل می‌شود:
+    # کندلِ ناقص age_s=0 می‌دهد (چون تُرَندِ بسته‌شدن در آینده است) و به‌شکلِ «تازه/
+    # باز» دیده می‌شود — یعنی درجه‌ی A و مهرِ ورود روی دادهٔ رِپینت، بی‌صدا.
+    forming_now = bool(ltf_data.get("forming"))
+    forming_reason = ("کندلِ آخر هنوز بسته نشده (در حالِ تشکیل) — سیگنال روی کندلِ "
+                      "ناقص صادر نمی‌شود؛ تا بسته‌شدنِ کندل صبر کن")
+    dstate = "closed" if forming_now else ltf_data.get("state")
     market_closed = (dstate == "closed")
     market_thin = (dstate in ("delayed", "thin"))
     if dstate == "open":
@@ -157,10 +165,15 @@ def score(symbol, tfs, d=None):
                           "detail": ltf_data.get("reason", "داده کمی عقب‌تر از حدِ معمول است")})
         pts += 0.5
     elif market_closed:
-        row("تازگیِ داده و باز بودنِ بازار", False, 1.0,
-            (ltf_data.get("reason", "بازار بسته است") +
-             (f" · آخرین کندلِ بسته: {ltf_data.get('last_bar_utc', '—')} UTC"
-              if ltf_data.get("last_bar_utc") else "")))
+        if forming_now:
+            _row_detail = forming_reason + (
+                f" · کندلِ آخر: {ltf_data.get('last_bar_utc', '—')} UTC (هنوز باز)"
+                if ltf_data.get("last_bar_utc") else "")
+        else:
+            _row_detail = ltf_data.get("reason", "بازار بسته است") + (
+                f" · آخرین کندلِ بسته: {ltf_data.get('last_bar_utc', '—')} UTC"
+                if ltf_data.get("last_bar_utc") else "")
+        row("تازگیِ داده و باز بودنِ بازار", False, 1.0, _row_detail)
     else:
         row("تازگیِ داده و باز بودنِ بازار", None, 1.0, "وضعیتِ داده در پاسخ نیست")
 
@@ -477,11 +490,14 @@ def score(symbol, tfs, d=None):
         grade = "بدونِ معامله"
         verdict = "بایاس نامشخص است؛ منتظرِ ساختارِ واضح بمان."
     elif market_closed:
-        # گیتِ صداقت: روی بازارِ بسته هیچ‌چیز «قابلِ اجرا» نیست — پلن برای سشنِ بعدی
-        # آماده می‌شود. پیش‌تر اپ روی دادهٔ بستهٔ جمعه هم درجهٔ قابلِ اجرا می‌داد.
+        # گیتِ صداقت: روی بازارِ بسته — یا روی کندلِ هنوز-بسته‌نشده — هیچ‌چیز «قابلِ
+        # اجرا» نیست؛ پلن برای سشنِ بعدی/کندلِ بستهٔ بعدی آماده می‌شود. پیش‌تر اپ روی
+        # دادهٔ بستهٔ جمعه هم درجهٔ قابلِ اجرا می‌داد، و رِپینتِ کندلِ ناقص هم بی‌صدا
+        # می‌گذشت.
         grade = "C"
-        verdict = ("⏸ بازار بسته است — " + ltf_data.get("reason", "داده تازه نیست") + ". "
-                   "این تحلیل «آماده‌سازیِ سناریو» است، نه سیگنالِ ورود: پلنِ زیر برای "
+        verdict = (("⏳ کندلِ در حالِ تشکیل — " if forming_now else "⏸ بازار بسته است — ")
+                   + (forming_reason if forming_now else ltf_data.get("reason", "داده تازه نیست"))
+                   + ". این تحلیل «آماده‌سازیِ سناریو» است، نه سیگنالِ ورود: پلنِ زیر برای "
                    "سشنِ بعدی است. نزدیکِ بازشدن دوباره تحلیل کن و منتظرِ کندلِ تازه بمان.")
     elif location_bad:
         # قیمت در محلِ اشتباه است — حتی با ساختارِ خوب، ورودِ الان ممنوع
@@ -519,7 +535,8 @@ def score(symbol, tfs, d=None):
     if plan:
         plan["executable_now"] = bool(dstate == "open")
         if dstate != "open":
-            plan["blocked_reason"] = ltf_data.get("reason") or "بازار بسته یا داده کهنه"
+            plan["blocked_reason"] = ((forming_reason if forming_now
+                                       else ltf_data.get("reason")) or "بازار بسته یا داده کهنه")
 
     return {
         "symbol": symbol,
@@ -546,7 +563,9 @@ def score(symbol, tfs, d=None):
                                     ltf_disp, ltf_choch, fresh_sweep, conflict,
                                     wrong_zone,
                                     market_ok=not market_closed,
-                                    market_reason=(ltf_data.get("reason") if market_closed else None)),
+                                    market_reason=((forming_reason if forming_now
+                                                    else ltf_data.get("reason"))
+                                                   if market_closed else None)),
     }
 
 
