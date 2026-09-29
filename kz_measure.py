@@ -5,8 +5,8 @@
 می‌سنجیم: به‌ازای هر ساعتِ ET، میانگینِ رِنجِ کندلِ ۱m، میانگینِ بدنه،
 و اینکه های/لوِ روز چند بار در آن ساعت شکل می‌گیرد. داده، نه حدس.
 """
-import sys, datetime, collections
-sys.path.insert(0, "/Users/valiazadi/.hermes/skills/trading/smc-ict-analysis/scripts")
+import sys, os, datetime, collections
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import smc_engine as E
 
 SYM = sys.argv[1] if len(sys.argv) > 1 else "PAXGUSDT"
