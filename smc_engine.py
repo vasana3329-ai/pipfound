@@ -194,18 +194,59 @@ def fetch_yahoo(sym, tf, limit):
         if None in (o,h,l,c): continue
         out.append({"t":int(t),"o":float(o),"h":float(h),"l":float(l),
                     "c":float(c),"v":float(q.get("volume",[0]*len(ts))[i] or 0)})
-    # resample to 4h if requested (yahoo gives 1h)
-    if tf=="4h": out=resample(out,4)
+    # resample to 4h if requested (yahoo gives 1h) — با طولِ واقعیِ ۴ساعته تا سبد
+    # روی مرزِ UTC بنشیند (فیکس D3/P0-3)، نه روی «شروعِ آرایه».
+    if tf=="4h": out=resample(out,4,tf_sec=TF_SECONDS["4h"])
     return out[-limit:]
 
-def resample(bars,n):
-    out=[]
-    for i in range(0,len(bars)-len(bars)%n,n):
-        grp=bars[i:i+n]
-        if len(grp)<n: break
-        out.append({"t":grp[0]["t"],"o":grp[0]["o"],"h":max(x["h"] for x in grp),
-                    "l":min(x["l"] for x in grp),"c":grp[-1]["c"],
-                    "v":sum(x["v"] for x in grp)})
+def _fold_group(grp,t):
+    """یک سبدِ کندلِ ریزتر را به یک کندلِ تایم‌فریمِ بالاتر جمع می‌زند.
+    open = اولین، close = آخرین، high/low = بیشینه/کمینه، volume = مجموع؛
+    و `t` = **زمانِ بازشدنِ سبد** (مرزِ تایم‌فریم)، نه زمانِ اولین کندلِ موجود.
+    """
+    return {"t":t,"o":grp[0]["o"],"h":max(x["h"] for x in grp),
+            "l":min(x["l"] for x in grp),"c":grp[-1]["c"],
+            "v":sum(x.get("v",0) for x in grp)}
+
+def resample(bars,n,tf_sec=None):
+    """تجمیعِ کندل‌های ریزتر به یک تایم‌فریمِ بزرگ‌تر، **هم‌تراز با مرزهای واقعی**.
+
+    فیکس D3/P0-3 («برشِ ۴ساعته بر پایه‌ی t // 14400»): پیاده‌سازیِ قبلی آرایه را از
+    **ابتدای خودش** دسته‌دسته می‌کرد (`range(0, len(bars)-len(bars)%n, n)`)؛ یعنی
+    مرزِ سبدها به این گره می‌خورد که منبع از کجا شروع کرده باشد. Yahoo برای ۴ساعته
+    دادهٔ ۱ساعته می‌دهد و اولین کندلش لزوماً روی مرزِ ۴ساعته نیست (مثلاً ۰۱:۰۰)؛
+    نتیجه: کندل‌های «۴ساعته»ی اپ روی ۰۱:۰۰–۰۵:۰۰ می‌نشستند در حالی که چارتِ کارگزار
+    سبدِ ۰۰:۰۰–۰۴:۰۰ را نشان می‌دهد. آن یک‌ساعت جابه‌جایی، سوینگ/FVG/اُردربلاک و
+    مهم‌تر از همه PD/OTE را روی رِنجِ غلط می‌نشاند → پلنِ اپ و چارتِ کارگزار «بی‌صدا»
+    فرق می‌کردند (ریشه‌ی همان شکایتِ «سطوح روی چارتِ من نیست»).
+
+    حالا هر کندل با `t // tf_sec * tf_sec` گره می‌خورد؛ پس مرزها دقیقاً همان چیزی
+    است که یک فیدِ واقعیِ ۴ساعته می‌دهد و «زمانِ بازشدنِ» کندلِ خروجی همان مرز است.
+
+    `tf_sec` = طولِ تایم‌فریمِ مقصد به ثانیه (۴ساعته: ۱۴۴۰۰). اگر None باشد از میانهٔ
+    فاصله‌های زمانیِ ورودی حدس زده می‌شود (×n) تا فراخوانِ بدونِ آرگومان هم نشکند.
+
+    فقط سبدهای **کامل** (دقیقاً n کندلِ منبع) منتشر می‌شوند: سبدِ ناقصِ ابتدا/میانه
+    (حفرهٔ داده) و سبدِ ناقصِ انتها (کندلِ ۴ساعته‌ای که هنوز باز است) می‌افتند —
+    هم‌راستا با فلسفهٔ `drop_unclosed`: هیچ پنجره‌ی ناقصی خودش را جای کندلِ بستهٔ
+    کامل جا نزند و تایم‌استمپِ غلط نگیرد.
+    """
+    if not bars:
+        return []
+    if tf_sec is None:
+        gaps=sorted(bars[i+1]["t"]-bars[i]["t"] for i in range(len(bars)-1))
+        src=gaps[len(gaps)//2] if gaps else 3600
+        tf_sec=(src or 3600)*n
+    out=[]; key=None; grp=[]
+    for b in bars:
+        k=(b["t"]//tf_sec)*tf_sec
+        if key is None:
+            key=k
+        if k!=key:
+            if len(grp)==n: out.append(_fold_group(grp,key))
+            key=k; grp=[]
+        grp.append(b)
+    if key is not None and len(grp)==n: out.append(_fold_group(grp,key))
     return out
 
 def fetch(symbol, tf, limit, unclosed=False):
