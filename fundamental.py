@@ -18,6 +18,7 @@
     قیمت‌گذاری‌شده باشد واکنش خنثی می‌شود. دورِ ±۱۵ تا ۳۰ دقیقه‌ی خبرِ پرتأثیر ورودِ تازه ممنوع.
 """
 import datetime
+import re
 import macro_context as M
 
 ET = datetime.timezone(datetime.timedelta(hours=-4))          # New York (طبقِ macro_context)
@@ -236,12 +237,105 @@ def build_feed(hours=180, min_impact="Medium"):
     return out
 
 
-def archive(hours=6):
-    """آرشیوِ اخبارِ اعلام‌شده در `hours` ساعتِ گذشته (High/Medium) + جهتِ موردانتظار.
+# رقم‌های حرفی که «بهتر/بدتر» عددی معنا ندارند (کنترلِ صداقتِ حکم).
+_VERDICT_SKIP_TOKENS = ("—", "-", "n/a", "na", "tbd")
 
-    نکته: تقویمِ ForexFactory در این خروجی عددِ «اعلام‌شده» را نمی‌دهد؛ پس آنچه
-    می‌آید خودِ رویداد + ساعتِ اعلام + تحلیلِ اثرِ بهتر/بدتر از پیش‌بینی است.
-    """
+
+def _num(v):
+    """«3.6%»/«15.2%»/«1,234K» → شماره؛ نشدن → None (بدونِ حدس)."""
+    s = (v or "").replace(",", "").replace("%", "").strip().lower()
+    if not s or any(tok in s for tok in _VERDICT_SKIP_TOKENS):
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _verdict(actual, forecast, previous, mode):
+    """حکمِ قطعیِ «نتیجه» از عددِ اعلام‌شده — نه گزاره‌ی شرطی.
+
+    برمی‌گرداند: found (عددِ اعلام‌شده در دسترس است)، dir (قوی‌تر/ضعیف‌ترِ ارز)،
+    outcome (صعودی/نزولی برای همان ارز)، and beat (بالاتر/پایین‌تر از انتظار).
+    مقایسه فقط با پیش‌بینیِ عددی است؛ اگر پیش‌بینی یا اعلام‌شده عدد نبود، حکمِ
+    «نامعلوم» صادر می‌شود (هرگز حدس نمی‌زنیم)."""
+    a, f, p = _num(actual), _num(forecast), _num(previous)
+    if a is None:
+        return {"found": False, "outcome": "", "dir": "", "beat": ""}
+    res = {"found": True, "actual": (actual or "").strip()}
+    if f is None:
+        # عدد اعلام شده ولی انتظارِ عددی نبوده: جهت را نمی‌سازیم (حدس ممنوع).
+        res["beat"] = "انتظارِ عددی ثبت نشده بود"
+        res["dir"] = ""
+        res["outcome"] = ""
+    else:
+        if a > f:
+            res["beat"] = "بالاتر از انتظار"
+            res["dir"] = "ضعیف‌تر" if mode == "inverse" else "قوی‌تر"
+        elif a < f:
+            res["beat"] = "پایین‌تر از انتظار"
+            res["dir"] = "قوی‌تر" if mode == "inverse" else "ضعیف‌تر"
+        else:
+            res["beat"] = "دقیقاً طبقِ انتظار"
+            res["dir"] = "طبقِ انتظار"
+        res["outcome"] = ("صعودی" if res["dir"] == "قوی‌تر"
+                          else "نزولی" if res["dir"] == "ضعیف‌تر" else "خنثی")
+    res["forecast"] = (forecast or "").strip()
+    res["previous"] = (previous or "").strip()
+    return res
+
+
+def _attach_verdicts(events):
+    """تزریقِ «حکمِ قطعی» به هر رویدادِ گذشته: تطبیقِ FF×TE روی (کشور، تاریخِ GMT،
+    دقیقه‌ی GMT ±۱۰)؛ عددِ اعلام‌شده فقط از منبعِ ستونِ Actual می‌آید و اگر منبع
+    در دسترس نبود، حکمِ «منبعِ اعلام‌شده در دسترس نبود» می‌مانَد — نه گزاره‌ی شرطی."""
+    try:
+        rows = M.get_actuals() or []
+    except Exception:
+        rows = []
+    src_ok = bool(rows)
+    for ev in events:
+        try:
+            dt = datetime.datetime.fromisoformat(ev["iso"])
+        except Exception:
+            continue
+        utc = dt.astimezone(datetime.timezone.utc)
+        minute = utc.hour * 60 + utc.minute
+        v = {"found": False, "outcome": "", "dir": "", "beat": "",
+             "actual": "", "forecast": "", "previous": ""}
+        for r in rows:
+            if (r.get("ccy") != ev.get("country") or r.get("date") != utc.date().isoformat()
+                    or r.get("minute") is None or abs(r["minute"] - minute) > 10):
+                continue
+            if r.get("event") and ev.get("title") and not _titles_match(r["event"], ev["title"]):
+                continue  # چند خبر در همان دقیقه؛ نام نزدیک‌ترین است
+            an = _analysis(ev.get("title"), ev.get("country"))
+            # مقایسه با پیش‌بینیِ «همان تقویمی که کاربر دیده» (FF)؛ TE فقط عددِ Actual.
+            v = _verdict(r.get("actual"), (ev.get("forecast") or "").strip(),
+                         (ev.get("previous") or "").strip(),
+                         (an.get("cat") and an.get("mode")) or "normal")
+            break
+        ev["verdict"] = v
+    return src_ok
+
+
+def _titles_match(te_name, ff_title):
+    """نامِ کوتاهِ TE («ppi yoy») با عنوانِ FF («Manufacturing PPI y/y») هم‌خوان شمرده شود.
+    تطبیقِ واژه‌محور؛ فقط برای ردِّ نامشابه‌ها، نه برای ساختنِ حکم."""
+    te = set(re.findall(r"[a-z0-9]+", (te_name or "").lower()))
+    ff = set(re.findall(r"[a-z0-9]+", (ff_title or "").lower()))
+    if not te or not ff:
+        return True  # نبودِ نام ⇒ صرفِ زمان/کشور
+    return bool(te & ff)
+
+
+def archive(hours=6):
+    """آرشیوِ اخبارِ اعلام‌شده در `hours` ساعتِ گذشته — با **حکمِ قطعیِ نتیجه**.
+
+    هر رویدادِ گذشته‌ای که عددِ اعلام‌شده‌اش (Actual) از منبعِ مکمل درآمده باشد،
+    «عدد + بالاتر/پایین‌تر از انتظار + صعودی/نزولی (قوی/ضعیف‌شدنِ ارز)» می‌گیرد؛
+    چون خبر اعلام شده، دیگر حدس و گزاره‌ی شرطی در کار نیست. اگر منبعِ اعلام‌شده
+    در دسترس نباشد، همان حالتِ شفافِ «نامعلوم» برمی‌گردد (هرگز حدس نمی‌زنیم)."""
     cal = M.get_calendar()
     now = datetime.datetime.now(datetime.timezone.utc)
     start = now - datetime.timedelta(hours=max(1, int(hours)))
@@ -273,15 +367,19 @@ def archive(hours=6):
             "analysis": _analysis(e.get("title"), ccy),
         })
     out.sort(key=lambda x: x["iso"], reverse=True)
+    src_ok = _attach_verdicts(out)
     now_teh = datetime.datetime.now(TEHRAN)
     return {
         "ok": True,
         "hours": int(hours),
         "generated_tehran": f"{_FA_DAYS[now_teh.weekday()]} {now_teh.strftime('%Y-%m-%d %H:%M')} تهران",
         "count": len(out),
+        "verdicts": sum(1 for e in out if (e.get("verdict") or {}).get("found")),
+        "source_ok": src_ok,
         "events": out,
-        "note": ("جهت‌ها «اثرِ موردانتظار»اند (عددِ بهتر یا بدتر از پیش‌بینی). "
-                 "محرکِ واقعیِ بازار انحرافِ عددِ اعلام‌شده از پیش‌بینی است."),
+        "note": ("حکمِ هر خبر «نتیجه‌ی قطعیِ اعلام‌شده» است (عددِ Actual + صعودی/نزولی)، "
+                 "نه گزاره‌ی شرطی؛ چون خبر اعلام شده. اگر عددِ اعلام‌شده در دسترس نباشد، "
+                 "همان خبر نامعلوم اعلام می‌شود."),
     }
 
 

@@ -1686,6 +1686,12 @@ tr.on td{background:rgba(34,197,94,.05)}
 .arc-t .arc-en{color:var(--muted);font-size:12px;font-weight:600;margin-inline-start:6px}
 .arc-m{color:var(--muted);font-size:12.5px;margin-top:4px}
 .arc-d{margin-top:6px;color:var(--accent2);font-size:13px}
+.arc-v{margin-top:7px;font-size:13px;font-weight:800;padding:7px 10px;border-radius:9px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.arc-v.v-up{background:rgba(46,204,113,.14);color:#2ecc71;border:1px solid rgba(46,204,113,.35)}
+.arc-v.v-dn{background:rgba(231,76,60,.14);color:#e74c3c;border:1px solid rgba(231,76,60,.35)}
+.arc-v.v-fl{background:rgba(149,165,166,.14);color:#95a5a6;border:1px solid rgba(149,165,166,.35)}
+.arc-v .arc-num{font-size:15px}
+.arc-v .arc-vnote{font-weight:600;font-size:11.5px;color:var(--muted)}
 .arc-note{color:var(--muted);font-size:12px;border-top:1px dashed var(--line);
   padding-top:10px;margin-top:8px;line-height:1.9}
 .arc-empty{color:var(--muted);text-align:center;padding:18px;font-size:13px}
@@ -2978,16 +2984,28 @@ if(archiveBtn){
       const evs=data.events||[];
       const gold=x=>(x&&x[0]?` · ${x[0]}: ${x[1]}`:"");
       const rows = evs.length ? evs.map(e=>{
-        const a=e.analysis||{}, b=a.beat||{}, m=a.miss||{};
+        const a=e.analysis||{}, b=a.beat||{}, m=a.miss||{}, v=e.verdict||{};
+        let vd="";
+        if(v.found){
+          const cls = v.outcome==="صعودی"?"v-up":(v.outcome==="نزولی"?"v-dn":"v-fl");
+          const arr = v.outcome==="صعودی"?"▲":(v.outcome==="نزولی"?"▼":"◆");
+          const dd = v.outcome==="صعودی"?"صعودی":(v.outcome==="نزولی"?"نزولی":"خنثی");
+          const ff = v.beat?` · ${v.beat}`:"";
+          const dd2 = v.dir?` · ${e.country_fa||e.country||""} ${v.dir}`:"";
+          vd = `<div class="arc-v ${cls}"><span>${arr}</span><span>نتیجه: <span class="arc-num">${v.actual}</span></span><span>${dd}${ff}${dd2}</span></div>`;
+        }else if(data.source_ok===false){
+          vd = `<div class="arc-v v-fl">◇ نتیجهٔ اعلام‌شده در دسترس نبود (منبعِ پاسخ نداد)</div>`;
+        }
         return `<div class="arc-ev">
           <div class="arc-t">${a.icon||""} ${e.title_fa||e.title||""}<span class="arc-en">${e.title||""}</span></div>
           <div class="arc-m">${e.country_fa||e.country||""} · ${e.when_fa||""}${e.minutes_ago!=null?` · ${e.minutes_ago} دقیقه پیش`:""} · ${e.impact==="High"?"پرتأثیر":"متوسط"}</div>
+          ${vd}
           <div class="arc-d">⬆ ${b.label||""}: ${b.ccy_dir||""}${gold(b.gold)}</div>
           <div class="arc-d">⬇ ${m.label||""}: ${m.ccy_dir||""}${gold(m.gold)}</div>
         </div>`;
       }).join("") : `<div class="arc-empty">در ۶ ساعتِ گذشته خبرِ پرتأثیری در تقویم نبود.</div>`;
       openModal(`📁 آرشیو اقتصادی — ۶ ساعتِ اخیر (${data.count||0} خبر)`,
-        rows + `<div class="arc-note">این جهت‌ها «اثرِ موردانتظار»اند (عددِ بهتر یا بدتر از پیش‌بینی)؛ تقویمِ ForexFactory عددِ اعلام‌شدهٔ واقعی را در این خروجی نمی‌دهد و محرکِ واقعیِ بازار انحرافِ عدد از پیش‌بینی است.</div>`);
+        rows + `<div class="arc-note">خطِ «نتیجه» قطعی است — عددِ اعلام‌شدهٔ واقعی (Actual) + صعودی/نزولی‌بودنش برای ارز؛ چون خبر اعلام شده و حدسی در کار نیست. اگر عددی نیاید یعنی منبعِ اعلام‌شده در دسترس نبوده یا این خبر عددی نداشته (سخنرانی و …). جهت‌های ⬆/⬇ تحلیلِ «اثرِ موردانتظارِ» انحراف از پیش‌بینی‌اند برای تصمیمِ پیش از خبر.</div>`);
     }catch(err){
       openModal("📁 آرشیو اقتصادی", `<div class="arc-empty">ارتباط ناموفق: ${err}</div>`);
     }finally{
