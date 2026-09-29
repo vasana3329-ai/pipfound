@@ -137,7 +137,10 @@ async function waitFor(fn, ms, what) {
       throw new Error(`پورتِ ${PORT} آزاد نشد (سرورِ قبلی روی آن مانده)`);
     const out = fs.openSync(srvLog, "w");
     server = spawn(PY, ["-u", "app.py", "--port", String(PORT), "--no-autorestart"],
-      { cwd: app, env: { ...process.env, HOME: home }, stdio: ["ignore", out, out] });
+      // PIPFOUND_NOTIFY="0": سرورِ آزمایشیِ این هارنس هم سرِ بوت آلارمِ فاندمنتال
+      // را می‌سنجد؛ بدونِ این کلید روی دسکتاپِ کاربر نوتیفِ واقعی می‌زند.
+      { cwd: app, env: { ...process.env, HOME: home, PIPFOUND_NOTIFY: "0" },
+        stdio: ["ignore", out, out] });
     const s = server;
     srvDied = null;
     s.once("exit", (code, sig) => { srvDied = `code=${code} signal=${sig || "-"}`; });

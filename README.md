@@ -76,6 +76,7 @@ python3 engine_golden_test.py   # مقادیرِ عددیِ موتور روی س
 python3 h4_alignment_test.py    # هم‌ترازیِ تجمیعِ ۴ساعته روی مرزهای UTC
 python3 data_freshness_test.py  # کندلِ بسته، سنِ داده، باز/بسته‌ی بازار، ضدِ نگاه به آینده
 python3 partial_candle_test.py  # موتور روی کندلِ ناقص سیگنال نمی‌سازد
+python3 notify_mute_test.py     # تست‌ها روی دسکتاپِ تو نوتیف نمی‌فرستند (shimِ osascript)
 python3 risk_test.py            # سایزِ پوزیشن، سقفِ ضرر، هم‌بستگی
 python3 correlation_test.py     # ضرایبِ مرجع و تذکرِ تخلفِ کاربر
 python3 smt_test.py             # واگراییِ SMT
@@ -90,7 +91,7 @@ python3 autorestart_test.py     # ری‌استارتِ خودکارِ کدِ ک
 python3 selfcheck_watcher_test.py  # نگهبانِ بازگشتِ خودکار (سندباکسی)
 ```
 
-CI روی گیت‌هاب (`.github/workflows/selfcheck.yml`) روی هر PR و روی هر پوش به `main` اجرا می‌شود و **۲۰ گامِ آزمون در ۶ لایه** را می‌گذراند: چکِ استاتیک و جهش‌آزمایی‌ها · اسموک‌تستِ سرورِ واقعی · تستِ مرورگریِ headless (رندر، سیم‌کشی، PWA و ارتقای ایمنِ نسخه) · و ده‌ها تستِ آفلاینِ عددی و رفت‌وبرگشتی.
+CI روی گیت‌هاب (`.github/workflows/selfcheck.yml`) روی هر PR و روی هر پوش به `main` اجرا می‌شود و **۲۱ گامِ آزمون در ۶ لایه** را می‌گذراند: چکِ استاتیک و جهش‌آزمایی‌ها · اسموک‌تستِ سرورِ واقعی · تستِ مرورگریِ headless (رندر، سیم‌کشی، PWA و ارتقای ایمنِ نسخه) · و ده‌ها تستِ آفلاینِ عددی و رفت‌وبرگشتی.
 
 سه لایه محافظت از `main`: هوکِ پیش‌کامیت روی همین دستگاه، ورک‌فلوی CI روی گیت‌هاب، و بازگردانیِ خودکارِ سرور/کد با `selfcheck --guard` و `selfcheck_watcher.py`.
 
@@ -109,6 +110,7 @@ CI روی گیت‌هاب (`.github/workflows/selfcheck.yml`) روی هر PR و 
 | `PIPFOUND_AUTOBACKUP_FILE` / `PIPFOUND_BACKUP_DIR` / `PIPFOUND_AUTOBACKUP_STATE` | تنظیمات، پوشهٔ نسخه‌ها و حالتِ پشتیبانِ خودکار |
 | `PIPFOUND_AUTORESTART` · `_INTERVAL` · `_SETTLE` · `_MAXWAIT` | رفتارِ ری‌استارتِ خودکارِ کدِ کهنه |
 | `PIPFOUND_WATCH_*` | آستانه‌ها و حالتِ نگهبانِ بازگشتِ خودکار |
+| `PIPFOUND_NOTIFY` | `0`/`off` ⇒ نوتیفیکیشنِ نیتیوِ مک خفه می‌شود (پیش‌فرض روشن؛ تست‌ها/CI با `0` بالا می‌آیند) |
 | `PIPFOUND_SKIP_SELFCHECK` | رد کردنِ نگهبانِ سلامت هنگامِ کامیت (فقط اضطراری) |
 
 ---

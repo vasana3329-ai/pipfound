@@ -55,6 +55,8 @@ def start_app(home, extra_env=None, port=None):
     """یک نمونه‌ی اپ را با HOME و env کنترل‌شده بالا می‌آورد و (proc, url, logpath) می‌دهد."""
     env = dict(os.environ)
     env["HOME"] = home
+    # نوتیفیکیشنِ مک خفه (قاعدهٔ نگهبان: selfcheck.notify_problems).
+    env["PIPFOUND_NOTIFY"] = "0"
     env.pop("PIPFOUND_JOURNAL_CSV", None)
     env.pop("PIPFOUND_JOURNAL_DIR", None)
     if extra_env:

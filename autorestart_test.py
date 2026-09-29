@@ -76,6 +76,9 @@ def copy_tree():
 def start(app_dir, home, env_extra=None):
     env = dict(os.environ)
     env["HOME"] = home
+    # نوتیفیکیشنِ مک خفه — هر execvِ ری‌استارت هم دوباره بالاش نمی‌آورد
+    # (قاعدهٔ نگهبان: selfcheck.notify_problems).
+    env["PIPFOUND_NOTIFY"] = "0"
     env.pop("PIPFOUND_JOURNAL_DIR", None)
     env["PIPFOUND_JOURNAL_CSV"] = os.path.join(home, "journal.csv")
     env.update(FAST)
