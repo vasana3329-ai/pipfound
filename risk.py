@@ -571,6 +571,167 @@ def _factor_label(k):
     return k
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  ضرایبِ هم‌بستگیِ مرجع — لایهٔ *عددی* (روی لایهٔ فاکتوریِ بالا)
+# ═══════════════════════════════════════════════════════════════════
+# لایهٔ فاکتوری می‌گوید «هر دو روی دلار جمع شده‌اند» (هم‌ارزیِ ارزی)؛ این لایه
+# می‌گوید «این دو نماد با ضریبِ ‎+۰٫۸۵ هم‌بسته‌اند، پس ریسکِ مؤثرِ تو ۱٫۸۵ برابرِ
+# یک پوزیشن است» — عددی که کاربر می‌بیند و بر اساسش سایز را کم می‌کند.
+#
+# علامت = هم‌بستگیِ *قیمتِ* دو نمادِ قابلِ‌معامله؛ مقدار = ضریبِ تقریبیِ بازار
+# (میانگینِ ~۹۰ روزهٔ ۲۰۲۳–۲۰۲۶، گردشده به دو رقم). عمداً ثابت و آفلاین است
+# (محاسبهٔ زندهٔ هم‌بستگی بدونِ شبکه/دادهٔ تاریخی ممکن نیست) و فقط برای *هشدارِ
+# ریسک* به کار می‌رود، نه برای پیش‌بینیِ قیمت.
+#
+# نکتهٔ علامت — همان‌جایی که در بازار هم اشتباه می‌شود:
+#   • طلا و دلارِ کانادا (CAD) هم‌بستگیِ **مثبت** دارند (کانادا صادرکنندهٔ طلا و
+#     نفت است)؛ ولی نمادِ قابلِ‌معامله «USDCAD» است که وارونهٔ CAD تعریف می‌شود،
+#     پس ضریبِ جدول برای XAUUSD↔USDCAD **منفی** درمی‌آید. همین منطق برای AUD
+#     (صادرکنندهٔ طلا) و برای نفت↔CAD هم برقرار است.
+#   • طلا↔دلار منفی (DXY)، یورو↔دلار این‌دکس به‌شدت منفی، ین↔دلار مثبت.
+CORRELATION_WARN_MIN = 0.5      # ‎|ضریب| ≥ این ⇒ هشدارِ صریح
+CORRELATION_NOTE_MIN = 0.3      # ‎۰٫۳ تا ۰٫۵ ⇒ فقط یادداشتِ ملایم (هشدار بی‌اثر نشود)
+
+CORRELATION_COEFS = [
+    # (الف، ب، ضریب، توضیحِ فارسیِ منطقِ بازار)
+    ("BTCUSDT", "ETHUSDT", 0.85, "کریپتوی بزرگ — آلت‌کوین‌ها با «ریسک‌آن» مشترک هم‌جهتند"),
+    ("BTCUSDT", "SOLUSDT", 0.78, "آلت‌کوینِ بتا-بالا: هم‌جهت با بیت‌کوین، با نوسانِ بیشتر"),
+    ("ETHUSDT", "SOLUSDT", 0.80, "دو آلت‌کوینِ شاخص — عملاً یک شرط روی کریپتو"),
+    ("BTCUSDT", "NAS100", 0.55, "کریپتو و شاخصِ تکنولوژی هر دو داراییِ ریسک‌آن‌اند"),
+    ("BTCUSDT", "XAUUSD", 0.20, "هر دو در برابرِ دلار ضعیف بالا می‌روند، ولی پیوندشان ضعیف است"),
+    ("XAUUSD", "XAGUSD", 0.82, "طلا و نقره — یک فاکتورِ فلزاتِ گران‌بها"),
+    ("XAUUSD", "DXY", -0.85, "طلا وارونهٔ دلار است (دلارِ قوی‌تر = طلای گران‌تر برای بقیهٔ دنیا)"),
+    ("XAUUSD", "USDCAD", -0.55, "طلا با دلارِ کانادا مثبت است (صادرکنندهٔ طلا/نفت)؛ USDCAD وارونه ⇒ منفی"),
+    ("XAUUSD", "AUDUSD", 0.45, "استرالیا صادرکنندهٔ طلاست — اثرِ ملایم"),
+    ("WTI", "USDCAD", -0.45, "نفت و دلارِ کانادا مثبت‌اند؛ USDCAD وارونه ⇒ منفی"),
+    ("EURUSD", "GBPUSD", 0.75, "دو ارزِ اصلیِ اروپایی در برابرِ دلار"),
+    ("EURUSD", "AUDUSD", 0.65, "هر دو «دلارِ ضعیف» را معامله می‌کنند"),
+    ("AUDUSD", "NZDUSD", 0.88, "کامودال‌های آینه‌ای — نزدیک‌ترین جفتِ هم‌بستهٔ فارکس"),
+    ("EURUSD", "DXY", -0.96, "یورو ~۵۷٪ سبدِ دلار است — تقریباً وارونهٔ یکدیگر"),
+    ("USDCHF", "EURUSD", -0.90, "فرانکِ سوئیس جفتِ آینه‌ایِ یورو در بازارِ ارز"),
+    ("USDJPY", "DXY", 0.90, "ین ارزِ فاندینگ است — USDJPY و شاخصِ دلار هم‌جهت‌اند"),
+    ("SPX500", "NAS100", 0.94, "دو شاخصِ آمریکا — عملاً یک شرط روی وال‌استریت"),
+    ("US30", "SPX500", 0.92, "شاخص‌های آمریکا با هم بالا/پایین می‌روند"),
+    ("GER40", "SPX500", 0.60, "هم‌بستگیِ متوسطِ شاخصِ اروپا با آمریکا"),
+]
+
+_COEF_MAP = {}
+for _ca, _cb, _cc, _cn in CORRELATION_COEFS:
+    _COEF_MAP[frozenset((_ca, _cb))] = (_cc, _cn)
+
+
+def _sym_key(symbol):
+    """نمادِ کانونیک: از همان `instrument` (نام‌های جایگزین/حذفِ اسلش)، با پشتوانهٔ متنِ خام."""
+    spec = instrument(symbol)
+    if spec:
+        return spec["symbol"]
+    return (symbol or "").upper().replace("/", "").replace("-", "").strip()
+
+
+def pair_coef(a, b):
+    """ضریبِ هم‌بستگیِ مرجعِ دو نماد (متقارن؛ `known=False` = در جدول نیست).
+
+    هم‌بستگیِ قیمت-قیمت متقارن است، پس جای دو آرگومان علامت را عوض نمی‌کند
+    (برخلافِ بتا که جهت‌دار است). نمادِ ناشناخته/یکسان ⇒ صفر و بی‌هشدار.
+    """
+    na, nb = _sym_key(a), _sym_key(b)
+    out = {"coef": 0.0, "known": False, "a": na, "b": nb, "note": ""}
+    if not na or not nb or na == nb:
+        return out
+    hit = _COEF_MAP.get(frozenset((na, nb)))
+    if not hit:
+        return out
+    out["coef"], out["note"] = hit[0], hit[1]
+    out["known"] = True
+    return out
+
+
+def _stack_msgs(rows):
+    """پیام‌های فارسیِ «ریسکِ تکراری روی یک فاکتور» برای یک فهرستِ (برچسب، خالص، جهت).
+
+    جدا شد تا فهرستِ خام (فاکتوری) و فهرستِ نمایشی (بعد از حذفِ تکرارِ لایهٔ
+    عددی) یک متنِ واحد داشته باشند، نه دو جای متفاوت.
+    """
+    out = []
+    for lbl, v, same in rows[:2]:
+        out.append(
+            f"هشدارِ هم‌بستگی: این معامله در فاکتورِ «{lbl}» {same} با پوزیشن‌های "
+            f"بازِ تو جمع می‌شود (خالصِ فاکتور {v:+d}) — ریسکِ تکراری است، "
+            f"نه یک معامله‌ی مستقل")
+    if len(rows) > 2:
+        extra = "، ".join(f"{lbl} {v:+d}" for lbl, v, _ in rows[2:])
+        out.append(
+            f"و در {len(rows) - 2} فاکتورِ دیگر هم همین تمرکز تکرار می‌شود ({extra})")
+    return out
+
+
+def coef_layer(symbol, sign, open_positions):
+    """لایهٔ عددیِ هم‌بستگی: تک‌تکِ پوزیشن‌های باز را با *ضریب* می‌سنجد.
+
+    سه حالت (همه با عددِ ضریب در متنِ هشدار):
+      ۱) هم‌جهت روی ضریبِ مثبت  → ریسکِ تکراری: ریسکِ مؤثر > یک پوزیشن.
+      ۲) هم‌جهت روی ضریبِ منفی  → تضادِ منطقی: دو سناریوی متضاد روی یک سرمایه.
+      ۳) خلافِ‌جهت روی ضریبِ مثبت → هجِ ناخواسته: خنثی‌سازی + سوزاندنِ هزینه.
+    """
+    out = {"pairs": [], "warnings": [], "notes": [],
+           "effective": {"multiple": 1.0, "offset": 0.0,
+                         "stacked_count": 0, "hedged_count": 0, "count": 0}}
+    if sign not in (1, -1):
+        return out
+    ca = _sym_key(symbol)
+    if not ca:
+        return out
+    add, off = 0.0, 0.0
+    for p in (open_positions or []):
+        if not isinstance(p, dict):
+            continue
+        psym, psgn = p.get("symbol"), p.get("sign")
+        if psgn not in (1, -1) or not psym:
+            continue
+        info = pair_coef(ca, psym)
+        if not info["known"] or abs(info["coef"]) < CORRELATION_NOTE_MIN:
+            continue
+        c = info["coef"]
+        b = info["b"]
+        pos_fa = "خرید" if psgn == 1 else "فروش"
+        rec = {"a": ca, "b": b, "coef": c, "note": info["note"],
+               "open_sign": psgn, "aligned": bool(sign * psgn * c > 0)}
+        out["pairs"].append(rec)
+        if abs(c) < CORRELATION_WARN_MIN:
+            out["notes"].append(
+                f"هم‌بستگیِ ملایم (ضریبِ {c:+.2f}): «{ca}» و «{b}» در جدولِ ما هم‌جهتِ "
+                f"ملایم‌اند ({info['note']}) — به‌تنهایی دلیلِ ردکردنِ معامله نیست، "
+                f"فقط سایز را به همان نسبت (≈{abs(c):.2f}) در نظر بگیر")
+            continue
+        if rec["aligned"]:
+            add += abs(c)
+            out["effective"]["stacked_count"] += 1
+            out["warnings"].append(
+                f"ریسکِ هم‌بسته (ضریبِ {c:+.2f}): این معامله روی «{ca}» با پوزیشنِ "
+                f"بازِ «{b}» ({pos_fa}) هم‌جهتِ همان شرط است — {info['note']}. "
+                f"دو معامله در عمل یک شرط‌اند، نه دو شرطِ مستقل؛ ریسکِ مؤثر ≈{1.0 + add:.2f}"
+                f"× یک پوزیشن می‌شود. سایزِ این ورود را به همان نسبت کم کن یا یکی را انتخاب کن")
+        elif sign == psgn:
+            out["effective"]["hedged_count"] += 1
+            out["warnings"].append(
+                f"تضادِ هم‌بستگی (ضریبِ {c:+.2f}): «{ca}» و «{b}» هم‌بستگیِ **منفی** "
+                f"دارند ({info['note']}) ولی هر دو در یک جهت معامله شده‌اند — دو سناریوی "
+                f"متضاد روی یک سرمایه. نتیجه تقریباً یکدیگر را می‌خورند و تو دو بار هزینه "
+                f"می‌دهی؛ یکی را انتخاب کن")
+        else:
+            off += abs(c)
+            out["effective"]["hedged_count"] += 1
+            out["warnings"].append(
+                f"هجِ ناخواسته (ضریبِ {c:+.2f}): پوزیشنِ بازِ «{b}» ({pos_fa}) با این "
+                f"معامله روی «{ca}» خلافِ جهت است، در حالی که این دو با ضریبِ {c:+.2f} "
+                f"هم‌جهت حرکت می‌کنند ({info['note']}) — یعنی ~{abs(c):.0%} از ریسکِ هم را "
+                f"خنثی می‌کنی و فقط اسپرد/کمیسیون می‌سوزد. اگر عمداً هج نیست، یکی را ببند")
+    out["effective"]["multiple"] = round(1.0 + add, 2)
+    out["effective"]["offset"] = round(off, 2)
+    out["effective"]["count"] = len(out["pairs"])
+    return out
+
+
 def correlation(symbol, sign, open_positions):
     """هشدارِ تمرکز/هم‌بستگی: آیا این معامله با پوزیشن‌های باز روی یک فاکتور جمع می‌شود؟
 
@@ -585,6 +746,34 @@ def correlation(symbol, sign, open_positions):
         if ps in (1, -1) and psy:
             for k, v in exposures(psy, ps).items():
                 net[k] = net.get(k, 0) + v
+    # لایهٔ عددیِ هم‌بستگی (ضرایبِ مرجع) — همین‌جا حساب می‌شود تا هم dedupe و
+    # هم فهرستِ نمایشی از آن استفاده کنند.
+    cl = coef_layer(symbol, sign, open_positions)
+    covered = {r["b"] for r in cl["pairs"] if abs(r["coef"]) >= CORRELATION_WARN_MIN}
+
+    def _factor_covered(k, same_sign=True):
+        """آیا همهٔ پوزیشن‌های بازِ سازندهٔ این فاکتور را لایهٔ عددی هم صدا زده است؟
+
+        اگر بله، پیامِ کیفیِ فاکتور تکرارِ همان واقعیت است (مثلِ BTC+ETH: هم
+        فاکتورِ «کریپتو» و هم ضریبِ ‎+۰٫۸۵). برای پیامِ «خلافِ‌جهت» عکسِ این
+        سنجیده می‌شود: پوزیشن‌های هم‌راستا با این معامله گفته می‌شوند، پوزیشن‌های
+        مخالف (که همین‌ها ریسک را خنثی می‌کنند).
+        """
+        cv = cand.get(k, 0)
+        if not cv or not covered:
+            return False
+        hits = []
+        for p in (open_positions or []):
+            if not isinstance(p, dict):
+                continue
+            psym, psgn = p.get("symbol"), p.get("sign")
+            if psgn not in (1, -1) or not psym:
+                continue
+            pv = exposures(psym, psgn).get(k, 0)
+            if pv and ((pv > 0) == (cv > 0)) == bool(same_sign):
+                hits.append(_sym_key(psym))
+        return bool(hits) and all(h in covered for h in hits)
+
     stacked = {k: v for k, v in net.items() if abs(v) >= 2}
     # هم‌جمعی (|خالص| ≥ ۲) = ریسکِ تکراری؛ اما وقتی معامله‌ی جدید روی یک فاکتور
     # **خلافِ** پوزیشن‌های بازِ موجود جمع شود (مثلِ خریدِ USDJPY در حالی که
@@ -601,7 +790,7 @@ def correlation(symbol, sign, open_positions):
             stacked_against[k] = net.get(k, 0)
     ordered = sorted(stacked.items(), key=lambda kv: -abs(kv[1]))
     against = sorted(stacked_against.items(), key=lambda kv: -abs(kv[1]))
-    mine, pre, opp = [], [], []
+    mine, mine_k, pre, opp = [], [], [], []
     for k, v in ordered:
         lbl = _factor_label(k)
         # جهت را از سهمِ **خودِ این معامله** روی همان فاکتور می‌سنجیم، نه از جهتِ
@@ -610,6 +799,7 @@ def correlation(symbol, sign, open_positions):
         if own:
             same = "هم‌راستا" if (own > 0) == (v > 0) else "در جهتِ مخالف"
             mine.append((lbl, v, same))
+            mine_k.append(k)
         else:
             # این معامله به این فاکتور دست نمی‌زند؛ تمرکز از خودِ پوزیشن‌های باز است.
             # جدا گزارش می‌شود تا به‌اشتباه به این ستاپ نسبت داده نشود.
@@ -618,16 +808,12 @@ def correlation(symbol, sign, open_positions):
         opp.append(_factor_label(k))
     # یک معاملهٔ تکراری (مثلِ طلا) هم روی «فلزات» و هم روی «دلار» جمع می‌شود؛
     # دو موردِ نخست را می‌گوییم و بقیه را در یک سطر جمع می‌کنیم تا بنر خوانا بماند.
-    trade_msgs = []
-    for lbl, v, same in mine[:2]:
-        trade_msgs.append(
-            f"هشدارِ هم‌بستگی: این معامله در فاکتورِ «{lbl}» {same} با پوزیشن‌های "
-            f"بازِ تو جمع می‌شود (خالصِ فاکتور {v:+d}) — ریسکِ تکراری است، "
-            f"نه یک معامله‌ی مستقل")
-    if len(mine) > 2:
-        extra = "، ".join(f"{lbl} {v:+d}" for lbl, v, _ in mine[2:])
-        trade_msgs.append(
-            f"و در {len(mine) - 2} فاکتورِ دیگر هم همین تمرکز تکرار می‌شود ({extra})")
+    # فهرستِ خام (فاکتوری) برای API می‌ماند؛ فهرستِ *نمایشی* تکرارِ لایهٔ عددی را
+    # حذف می‌کند تا یک واقعیت دو بار به کاربر گفته نشود.
+    mine_shown = [(lbl, v, same) for (lbl, v, same), k in zip(mine, mine_k)
+                  if not _factor_covered(k)]
+    trade_msgs = _stack_msgs(mine)
+    shown_trade = _stack_msgs(mine_shown)
     # هشدارِ «خلافِ جهت روی جفتِ همبسته» — اولویتش بالاتر از تمرکز است چون خطای
     # منطقی است نه فقط تکرارِ ریسک: دو ستاپِ تو خواسته‌ی متضاد از بازار دارند.
     # صداقت: اگر خالصِ فاکتور صفر شده باشد می‌گوییم «خنثی می‌کند»؛ اگر فقط کم
@@ -636,7 +822,10 @@ def correlation(symbol, sign, open_positions):
     # فقط یکی از فاکتورهای متضاد را می‌گوییم: برای هجِ همان نماد (مثلِ فروشِ طلا
     # در حالی که طلا خریدی) هم «فلزات» و هم «دلار» متضاد می‌شوند و هر دو یک
     # واقعیت را توصیف می‌کنند — دو سطرِ تکراریِ هشدار، شلوغیِ بی‌دلیل است.
-    if against:
+    # همان حذفِ تکرارِ نمایشی برای پیامِ «تریدِ خلافِ جهت روی فاکتورِ مشترک»:
+    # اگر لایهٔ عددی همین پوزیشن‌ها را با ضریبِ منفی صدا زده باشد، همین واقعیت
+    # دو بار گفته می‌شود.
+    if against and not _factor_covered(against[0][0], same_sign=False):
         k = against[0][0]
         lbl = _factor_label(k)
         own_v = cand.get(k, 0)
@@ -657,10 +846,18 @@ def correlation(symbol, sign, open_positions):
     return {
         # `warnings` همان چیزی که رابط نشان می‌دهد — ترتیب: هشدارِ خلافِ جهتِ
         # هم (خطایِ منطقی، مهم‌تر)، بعد تکرارِ ریسکِ هم‌راستا، بعد تمرکزِ موجود.
-        "warnings": opp_msgs + trade_msgs + conc,
+        # ترتیب: هشدارِ عددیِ هم‌بستگی (با ضریب) → خلافِ‌جهت روی فاکتورِ مشترک →
+        # تکرارِ ریسکِ هم‌راستا → یادداشت‌های ملایم → تمرکزِ موجود.
+        "warnings": cl["warnings"] + opp_msgs + shown_trade + cl["notes"] + conc,
         "trade_warnings": trade_msgs,
         "opposite_warnings": opp_msgs,
         "open_concentration": conc,
+        # لایهٔ عددیِ هم‌بستگی — جدا از لایهٔ فاکتوری نگه داشته می‌شود تا
+        # `trade_warnings` (فاکتورِ مشترک) معنای قبلی‌اش را از دست ندهد.
+        "coef_warnings": cl["warnings"],
+        "coef_notes": cl["notes"],
+        "coef_pairs": cl["pairs"],
+        "effective": cl["effective"],
         "stacked": {k: v for k, v in stacked.items()},
         "stacked_opposite": {k: v for k, v in stacked_against.items()},
         "net": {k: v for k, v in net.items() if v},

@@ -2445,10 +2445,22 @@ function render(d){
   if(rk){
     const warns = rk.warnings || [];
     const day = rk.daily || {};
+    // ضرایبِ هم‌بستگیِ به‌کاررفته — کاربر باید عددی که بر اساسش هشدار داده
+    // شده را *ببیند* (BTC↔ETH ‎+۰٫۸۵، طلا↔دلارِکانادا ‎−۰٫۵۵، …).
+    const corr = rk.correlation || {};
+    const cp = corr.coef_pairs || [];
+    const eff = corr.effective || {};
+    const coefLine = cp.length
+      ? `<div class="datanote-why">🧮 ضرایبِ هم‌بستگی: `
+        + cp.map(x=>`${x.a}↔${x.b} ${x.coef>0?"+":""}${x.coef}`).join(" · ")
+        + (eff.multiple>1?` — ریسکِ مؤثرِ این ورود ≈${eff.multiple}× یک پوزیشن`:"")
+        + (eff.offset>0?` — ‎${eff.offset} از ریسک به‌خاطرِ هجِ هم‌بسته هدر می‌رود`:"")
+        + `</div>`
+      : "";
     if(warns.length){
       riskHtml = `<div class="riskwarn${rk.blocked?"":" caution"}">
         <b>${rk.blocked?"⛔ محدودیتِ ریسک — ورودِ جدید مجاز نیست":"⚠ هشدارِ ریسک"}</b>
-        <ul>${warns.map(w=>`<li>${w}</li>`).join("")}</ul>
+        <ul>${warns.map(w=>`<li>${w}</li>`).join("")}</ul>${coefLine}
       </div>`;
     } else if(day.closed_today || day.open_count){
       riskHtml = `<div class="riskwarn quiet">
@@ -2997,7 +3009,18 @@ async function saveJournal(){
     });
     const j = await r.json();
     if(j.error){jmsg.textContent = "خطا: "+j.error; jmsg.className="jmsg bad"; jb.disabled=false;}
-    else{jmsg.textContent = `✅ ثبت شد — معامله‌ی #${j.added} (${j.symbol})`; jmsg.className="jmsg good";}
+    else{
+      // هشدارِ هم‌بستگی *در لحظهٔ ثبت* — اگر پوزیشن‌های باز با این معامله
+      // هم‌بسته باشند (یا خلافِ جهتشان باشد) همان‌جا گوشزد می‌شود.
+      const cw = (j.correlation && j.correlation.warnings) || [];
+      if(cw.length){
+        jmsg.textContent = `⚠ ثبت شد — معامله‌ی #${j.added} (${j.symbol}) · تذکرِ هم‌بستگی: ` + cw.join(" · ");
+        jmsg.className="jmsg bad";
+      }else{
+        jmsg.textContent = `✅ ثبت شد — معامله‌ی #${j.added} (${j.symbol}) · تضادِ هم‌بستگی ندیدم`;
+        jmsg.className="jmsg good";
+      }
+    }
   }catch(err){
     jmsg.textContent = "ارتباط ناموفق: "+err; jmsg.className="jmsg bad"; jb.disabled=false;
   }
@@ -4365,6 +4388,18 @@ class Handler(BaseHTTPRequestHandler):
             if not p:
                 return self._send(200, json.dumps(
                     {"error": "پلنی برای ثبت نیست"}, ensure_ascii=False))
+            # هشدارِ هم‌بستگی *پیش از* افزودن حساب می‌شود تا پوزیشنِ تازه با خودش
+            # مقایسه نشود (جدولِ ضرایب در risk.py). خرابیِ این مرحله هرگز نباید
+            # ثبتِ معامله را بشکند؛ پس در try/except و بی‌اثر روی مسیرِ اصلی.
+            corr_before = None
+            if RK is not None:
+                try:
+                    _sign = RK.dir_sign(p.get("direction"))
+                    _day = RK.daily_state(_journal_rows(_JR_FILE) or [], _risk_settings())
+                    corr_before = RK.correlation(str(d.get("symbol", "")), _sign,
+                                                _day.get("open_positions"))
+                except Exception:
+                    corr_before = None
             # ساختِ آرگومان‌ها مثل namespace برای journal.cmd_add
             bias = d.get("bias_by_tf") or {}
             bias_txt = " · ".join(f"{k}={v}" for k, v in bias.items())
@@ -4400,6 +4435,10 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 sys.stdout = old
             out = json.loads(buf.getvalue().strip() or "{}")
+            if corr_before is not None and not out.get("error"):
+                # همین حالا که معامله ثبت شد، اگر با پوزیشن‌های بازِ قبلی
+                # هم‌بسته/متضاد باشد گوشزد می‌شود (نشان در رابط).
+                out["correlation"] = corr_before
             return self._send(200, json.dumps(out, ensure_ascii=False))
         except Exception as e:
             traceback.print_exc()
