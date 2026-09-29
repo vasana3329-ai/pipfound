@@ -53,7 +53,10 @@ def check(name, cond, detail=""):
 # باشد، وگرنه نگهبان «وعده‌ی بی‌فایل» می‌بیند و شمارِ خطاهای کاذب بالا می‌رود.
 # `backup.py`/`autobackup.py` هم لازم‌اند، وگرنه قاعده‌های «انتقالِ داده» و
 # «پشتیبانِ خودکار» در سندباکس خطای کاذب («ماژولِ … خوانده نشد») می‌سازند.
-COMPANIONS = ("app.py", "backup.py", "autobackup.py", "sw.js", "manifest.webmanifest",
+# `macro_context.py`/`fundamental.py` هم لازم‌اند، وگرنه قاعده‌ی «آرشیو»
+# خطای کاذبِ «macro_context.py خوانده نشد» می‌سازد (لایه‌ی ۴.۱۶).
+COMPANIONS = ("app.py", "backup.py", "autobackup.py", "macro_context.py",
+              "fundamental.py", "sw.js", "manifest.webmanifest",
               "icon-180.png", "icon-192.png", "icon-192-mask.png",
               "icon-512.png", "icon-512-mask.png")
 

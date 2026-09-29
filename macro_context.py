@@ -8,7 +8,7 @@ Usage:
   python3 macro_context.py --symbol XAUUSD # filter events by currencies that move this symbol
   python3 macro_context.py --json
 """
-import sys, json, urllib.request, argparse, datetime, ssl
+import sys, json, urllib.request, argparse, datetime, ssl, re, html
 
 UA={"User-Agent":"Mozilla/5.0"}
 def _ctx():
@@ -54,6 +54,69 @@ def get_calendar():
         with open(CACHE) as f: return json.load(f)
     except Exception: pass
     raise RuntimeError(f"calendar fetch failed: {last}")
+
+# ── ستونِ «اعلام‌شده» (Actual) — مکملِ تقویمِ FF ──────────────────────────
+# فیدِ ForexFactory (json/xml) اصلاً فیلدِ actual ندارد (حتی برای رویدادهای
+# گذشته — راستی‌آزمایی‌شده)؛ ولی صفحه‌ی تقویمِ Trading Economics ستونِ Actual
+# را برای رویدادهای اعلام‌شده‌ی امروز دارد و زمان‌هایش GMT است (تطبیق‌شده با
+# تقویمِ FF روی نمونه‌های واقعی). پس آرشیوِ «نتیجه‌ی قطعی» از همین‌جا می‌آید.
+TE_URL="https://tradingeconomics.com/calendar"
+TE_UA={"User-Agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36","Accept":"text/html"}
+TE_CACHE=os.path.join(os.path.dirname(os.path.abspath(__file__)),".te_actuals.json")
+ISO2CCY={"US":"USD","EU":"EUR","GB":"GBP","JP":"JPY","AU":"AUD","NZ":"NZD","CA":"CAD","CH":"CHF","CN":"CNY"}
+
+def _te_minutes(hhmm, ampm):
+    """ساعتِ ۱۲ساعته‌ی صفحه → دقیقه‌ی روز (GMT)."""
+    try: h, m = map(int, hhmm.split(":"))
+    except Exception: return None
+    if ampm == "PM" and h != 12: h += 12
+    if ampm == "AM" and h == 12: h = 0
+    return h * 60 + m
+
+def _parse_te_calendar(page):
+    """ردیف‌های تقویمِ TE → [{ccy,date(GMT),minute,event,actual,forecast}]."""
+    rows=[]
+    starts=[m.start() for m in re.finditer(r'<tr [^>]*data-url=', page or "")]
+    for a,b in zip(starts, starts[1:]+[len(page or "")]):
+        seg=page[a:b]
+        d=re.search(r"class=' (\d{4}-\d{2}-\d{2})'", seg)
+        t=re.search(r'calendar-date-\d+">\s*(\d{1,2}:\d{2})\s*(AM|PM)', seg)
+        iso=re.search(r'calendar-iso">([A-Z]{2})<', seg)
+        ev=re.search(r'data-event="([^"]*)"', seg)
+        act=re.search(r"<span id='actual'>([^<]*)</span>", seg)
+        fc=re.search(r"<a id='forecast'[^>]*>([^<]*)</a>", seg)
+        if not (d and t and iso): continue
+        minute=_te_minutes(t.group(1), t.group(2))
+        if minute is None: continue
+        rows.append({"ccy":ISO2CCY.get(iso.group(1), iso.group(1)),
+                     "date":d.group(1), "minute":minute,
+                     "event":html.unescape(ev.group(1)) if ev else "",
+                     "actual":(act.group(1).strip() if act else ""),
+                     "forecast":(fc.group(1).strip() if fc else "")})
+    return rows
+
+def get_actuals(max_age=3600):
+    """اعدادِ «اعلام‌شده» (Actual) از Trading Economics؛ [] اگر شبکه/منبع نبود.
+
+    آرشیوِ اقتصادی برای «حکمِ قطعی» به این عدد نیاز دارد (FF نمی‌دهد). کشِ ۱ساعته
+    تا به 429/بلاک نخوریم؛ خرابیِ شبکه همیشه به [] می‌رسد (اپ نباید بشکند)."""
+    try:
+        if os.path.exists(TE_CACHE) and time.time()-os.path.getmtime(TE_CACHE)<max_age:
+            with open(TE_CACHE) as f: return json.load(f).get("rows") or []
+    except Exception: pass
+    try:
+        req=urllib.request.Request(TE_URL,headers=TE_UA)
+        with urllib.request.urlopen(req,timeout=25,context=CTX) as r:
+            page=r.read().decode("utf-8","replace")
+        rows=_parse_te_calendar(page)
+        try:
+            with open(TE_CACHE,"w") as f: json.dump({"at":time.time(),"rows":rows},f)
+        except Exception: pass
+        return rows
+    except Exception:
+        try:
+            with open(TE_CACHE) as f: return json.load(f).get("rows") or []
+        except Exception: return []
 
 # which currencies drive a symbol
 def symbol_ccys(sym):

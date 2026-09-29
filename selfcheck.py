@@ -1792,6 +1792,69 @@ def notify_problems(root, pages=None):
     return probs, stats
 
 
+# ═══ قاعدهٔ «آرشیو: نتیجهٔ قطعی، نه گزارهٔ شرطی» ═══
+# تقاضای کاربر: آرشیو باید **نتیجه‌ی اعلام‌شده** را مطلق بگوید (عددِ Actual +
+# صعودی/نزولی)، نه «اگر بالاتر شد → …». این قاعده زنجیره‌ی سه‌گانه را قفل می‌کند:
+# گیرنده‌ی Actual (macro_context) → تزریقِ حکم (fundamental) → رندرِ مطلق (app.py).
+_TE_ACTUAL_SPAN = "<span id='actual'>"   # الگوی پارسر — با «in» سنجیده می‌شود، نه regex
+_ACTUALS_KEY_RE = re.compile(r"def get_actuals\s*\(")
+_VERDICT_CALL_RE = re.compile(r"=\s*_attach_verdicts\s*\(")   # جایِ صدا زدن، نه def
+_VERDICT_FN_RE = re.compile(r"def _verdict\s*\(")
+_ARC_VERDICT_RE = re.compile(r"v\.found")
+_ARC_OUTCOME_RE = re.compile(r"v\.outcome===\"(صعودی|نزولی)\"")
+_ARC_ACTUAL_NUM_RE = re.compile(r'arc-num">\$\{v\.actual\}')
+_ARC_ABSENT_RE = re.compile(r"منبعِ پاسخ نداد")
+_ARCHIVE_NOTE_RE = re.compile(r"نتیجه")
+
+
+def archive_problems(root, pages=None):
+    """قراردادِ «نتیجهٔ قطعی در آرشیو»: زنجیرهٔ Actual → حکم → رندرِ مطلق سالم بماند."""
+    probs = []
+    stats = {"actuals": False, "verdict": False, "render": False,
+             "outcomes": 0, "note": False}
+    msrc = read_text(os.path.join(root, "macro_context.py")) or ""
+    fsrc = read_text(os.path.join(root, "fundamental.py")) or ""
+    page = (pages or {}).get("HTML") or ""
+    if not msrc:
+        probs.append("macro_context.py خوانده نشد — ستونِ Actual بی‌منبع می‌مانَد")
+        return probs, stats
+    if not _ACTUALS_KEY_RE.search(msrc):
+        probs.append("macro_context.py · گیرنده‌ی Actual (get_actuals) حذف شده — "
+                     "آرشیو به گزاره‌ی شرطی برمی‌گردد")
+    elif _TE_ACTUAL_SPAN not in msrc:
+        probs.append("macro_context.py · الگوی ستونِ Actual (id='actual') در پارسر نیست — "
+                     "اعداد خوانده نمی‌شوند")
+    else:
+        stats["actuals"] = True
+        if _VERDICT_CALL_RE.search(fsrc) and _VERDICT_FN_RE.search(fsrc) \
+                and ("صعودی" in fsrc and "نزولی" in fsrc):
+            stats["verdict"] = True
+        if _VERDICT_CALL_RE.search(fsrc) is None:
+            probs.append("fundamental.py · archive دیگر _attach_verdicts را صدا نمی‌زند — "
+                         "حکمِ قطعی به رویدادها تزریق نمی‌شود")
+        if _VERDICT_FN_RE.search(fsrc) is None:
+            probs.append("fundamental.py · تابعِ حکم (_verdict) حذف شده")
+    if not page:
+        probs.append("app.py → متنِ APP_PAGE خوانده نشد — رندرِ حکم سنجیده نمی‌شود")
+    else:
+        if _ARC_VERDICT_RE.search(page) is None:
+            probs.append("app.py · آرشیو دیگر v.found را نمی‌سنجد — حکمِ مطلق رندر نمی‌شود")
+        if _ARC_OUTCOME_RE.search(page) is None:
+            probs.append("app.py · آرشیو صعودی/نزولی را نشان نمی‌دهد — "
+                         "خواسته‌ی کاربر («مطلق باشد») نیمه‌کاره می‌مانَد")
+        if _ARC_ACTUAL_NUM_RE.search(page) is None:
+            probs.append("app.py · عددِ اعلام‌شده (v.actual) در رندر نیست")
+        if _ARC_ABSENT_RE.search(page) is None:
+            probs.append("app.py · پیامِ شفافِ «منبع در دسترس نبود» حذف شده — "
+                         "کاربر حدس به‌جای حکم می‌بیند")
+        if _ARC_VERDICT_RE.search(page) and _ARC_OUTCOME_RE.search(page) \
+                and _ARC_ACTUAL_NUM_RE.search(page) and _ARC_ABSENT_RE.search(page):
+            stats["render"] = True
+        stats["outcomes"] = len(re.findall(r"صعودی|نزولی", page))
+        stats["note"] = bool(_ARCHIVE_NOTE_RE.search(page))
+    return probs, stats
+
+
 def read_baseline(root=None):
     """مبنای «نسخه‌ی سالم» → (inventory, منبع).
     اول اسنپ‌شاتِ همین ماشین (~/pipfound/good)، بعد فایلِ نسخه‌بندی‌شده‌ی
@@ -1912,6 +1975,13 @@ def run_checks(root, live=False, enforce_contract=True, accept_removals=False):
     ntp, ntstats = notify_problems(root, pages)
     rep["notify"] = ntstats
     rep["problems"] += [f"نوتیفیکیشنِ تست‌ها → {p}" for p in ntp]
+
+    # ── چکِ استاتیکِ «آرشیو: نتیجهٔ قطعی، نه گزارهٔ شرطی» ──
+    # تقاضای کاربر: بعد از اعلامِ خبر، آرشیو باید عددِ Actual و صعودی/نزولی را
+    # مطلق بگوید؛ اگر گیرنده/حکم/رندر شکسته شود، بی‌صدا به شرطیِ قدیمی برمی‌گردد.
+    arp, arstats = archive_problems(root, pages)
+    rep["archive"] = arstats
+    rep["problems"] += [f"آرشیوِ اقتصادی → {p}" for p in arp]
 
     inv = inventory(pages)
     inv["routes"] = routes_of(root)
@@ -2069,6 +2139,13 @@ def _human(rep):
             f" · نوشتنِ اتمیکِ اسنپ‌شات: {'✓' if ab.get('atomic') else '✗'}"
             f" · زمان‌بندِ زنده: {'✓' if ab.get('scheduler') else '✗'}"
             f" · کنترل‌های رابط: {'✓' if ab.get('controls') else '✗'}")
+    ar = rep.get("archive") or {}
+    if ar:
+        lines.append(
+            f"   آرشیوِ اقتصادی: گیرندهٔ Actual: {'✓' if ar.get('actuals') else '✗'}"
+            f" · حکمِ قطعی: {'✓' if ar.get('verdict') else '✗'}"
+            f" · رندرِ مطلق: {'✓' if ar.get('render') else '✗'}"
+            f" · صعودی/نزولی در صفحه: {ar.get('outcomes', 0)}")
     nt = rep.get("notify") or {}
     if nt:
         lines.append(
