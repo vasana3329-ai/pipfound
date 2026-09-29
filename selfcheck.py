@@ -1628,6 +1628,170 @@ def autobackup_problems(root, pages=None):
     return probs, stats
 
 
+# ────────── چکِ استاتیکِ «تست‌ها نوتیفِ دسکتاپِ کاربر را نمی‌زنند» ──────────
+# چرا این قاعده لازم است: کارگرِ آلارمِ فاندمنتال (و آلارمِ قیمت) **سرِ بوت** و در
+# همان اولین دورِ خود نوتیفِ *واقعیِ مک* می‌فرستد. هر تست/هارنسی که اپ را با HOMEِ
+# تازه بالا می‌آورد یعنی «فایلِ dedupe وجود ندارد» ⇒ نوتیف می‌رود، و هر execvِ
+# ری‌استارت هم دوباره. نتیجه: تست‌ها بی‌آنکه کسی بفهمد روی دسکتاپِ کاربر
+# پشتِ‌سرِهم نوتیف می‌فرستادند — همان شکایتِ واقعیِ کاربر («پشتِ‌سرِهم نوتیف
+# می‌دهد»). این قاعده دو چیز را قفل می‌کند: (۱) خودِ `_notify_mac` **پیش از**
+# هر `osascript` دروازهٔ `PIPFOUND_NOTIFY` را می‌بیند (و خودِ دروازه آن کلید را
+# می‌خواند)؛ (۲) هیچ فایلِ تست/هارنس/گامِ CI اپ را بدونِ آن کلید پرتاب نمی‌کند.
+_LAUNCH_VERB_RE = re.compile(
+    r"subprocess\.(?:Popen|run|call|check_output)\s*\(|"
+    r"\b(?:Popen|spawn|spawnSync|execFile)\s*\(")
+_MUTE_KEY = "PIPFOUND_NOTIFY"
+# شکلِ موردِانتظار: کلید **به‌صورتِ صریح روی حالتِ خاموش** ست شده باشد
+# (`env["PIPFOUND_NOTIFY"] = "0"` / `PIPFOUND_NOTIFY="0"` / `PIPFOUND_NOTIFY: "0"`).
+# بودِنِ کلید با مقدارِ روشن ("1") کیفت نمی‌کند — همان روی دسکتاپ نوتیف می‌دهد.
+_MUTE_OK_RE = re.compile(r"PIPFOUND_NOTIFY[\s\"'\)\]]{0,4}[:=][\s\"']{0,3}(?:0|off|false|no)\b",
+                         re.IGNORECASE)
+_MUTE_OFF_SET_RE = re.compile(r"_NOTIFY_OFF_VALUES\s*=\s*\{[^}]*[\"']0[\"']")
+_NOTIFY_TEST_SUFFIX = "_test.py"
+_NOTIFY_HARNESS_SUFFIX = ".cjs"
+_NOTIFY_CI_SUFFIXES = (".yml", ".yaml")
+
+
+# کامنتِ نود/برگهٔ CI باید از *کدِ* سنجیده‌شده کنار برود، وگرنه یک یادداشتِ
+# ساده که نامِ کلید را بگوید، قاعده را سبزِ دروغ می‌کند (همین تله در جهش‌آزماییِ
+# همین قاعده لو رفت). در نود `//`ِ داخلِ `http://` کامنت نیست، پس نگاهِ عقب لازم است.
+_CJS_COMMENT_RE = re.compile(r"/\*.*?\*/|(?<!:)//[^\n]*", re.S)
+_YAML_COMMENT_RE = re.compile(r"#[^\n]*")
+
+
+def _probe_of(name, text):
+    """متنِ *کد* برای سنجشِ کلیدِ خفه‌کردن (بدونِ کامنت/docstring)."""
+    if name.endswith(_NOTIFY_TEST_SUFFIX):
+        return _code_only(text)
+    if name.endswith(_NOTIFY_HARNESS_SUFFIX):
+        return _CJS_COMMENT_RE.sub(lambda m: "\n" * m.group(0).count("\n") or " ", text or "")
+    return _YAML_COMMENT_RE.sub("", text or "")
+
+
+def _app_launch_lines(text, name):
+    """شمارهٔ خط‌های «پرتابِ اپ» در یک فایلِ تست/هارنس/CI.
+
+    معیار در کدِ پایتون/نود: خطی که به `app.py` اشاره می‌کند و در فاصلهٔ ±۳ خط
+    یک فعلِ پرتاب (`subprocess.Popen(`/`spawn(`/…) دارد — چون خودِ فراخوانی و
+    آرگومان‌هایش در چند خط می‌آیند و `app.py` روی خطِ دیگری می‌نشیند.
+    برگه‌های CI (`.yml`) هر خطی که `app.py` داشته باشد پرتاب شمرده می‌شود، چون
+    آن‌جا فقط دستورِ اجرا نوشته می‌شود (نه خواندنِ فایل).
+    """
+    lines = (text or "").splitlines()
+    if name.endswith(_NOTIFY_CI_SUFFIXES):
+        return [i + 1 for i, ln in enumerate(lines) if "app.py" in ln]
+    # نامِ متغیرهایی که همین فایل به `app.py` گره زده (`APP = os.path.join(…, "app.py")`)
+    # تا پرتابی که با آن متغیر انجام می‌شود هم دیده شود (نه فقط اشارهٔ مستقیم).
+    aliases = set()
+    for ln in lines:
+        if "app.py" in ln:
+            m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", ln)
+            if m:
+                aliases.add(m.group(1))
+    hits = []
+    for i, ln in enumerate(lines):
+        if "app.py" in ln:
+            if _LAUNCH_VERB_RE.search("\n".join(lines[max(0, i - 3):i + 4])):
+                hits.append(i + 1)
+            continue
+        if _LAUNCH_VERB_RE.search(ln) and any(
+                re.search(r"\b%s\b" % re.escape(a), ln) for a in aliases):
+            hits.append(i + 1)
+    return hits
+
+
+def notify_problems(root, pages=None):
+    """قراردادِ «خفه‌بودنِ نوتیفیکیشن در تست‌ها»: دروازهٔ اپ + خفه‌بودنِ هر پرتاب."""
+    probs = []
+    stats = {"gate": False, "sites": 0, "muted": 0,
+             "ci_sites": 0, "ci_muted": 0, "files": []}
+    # کدِ بدونِ توضیحات/docstring: قاعده باید *کد* را بسنجد، نه نامی که در متنِ
+    # توضیحی آمده (همین تله یک بار در جهش‌آزماییِ پشتیبانِ خودکار لو رفته بود).
+    code = _code_only(read_text(os.path.join(root, "app.py")) or "")
+
+    fblk = _py_block(code, re.compile(r"^def _notify_mac\("))
+    hblk = _py_block(code, re.compile(r"^def _notify_muted\("))
+    gate_call = re.search(r"\b_notify_muted\s*\(\s*\)", fblk or "")
+    os_at = (fblk or "").find("osascript")
+    if fblk is None:
+        probs.append("app.py · تابعِ _notify_mac پیدا نشد — نوتیفیکیشن بی‌دروازه می‌مانَد")
+    elif os_at == -1:
+        probs.append("app.py · _notify_mac دیگر osascript را صدا نمی‌زند «؟»")
+    elif gate_call is None:
+        probs.append("app.py · _notify_mac دروازهٔ _notify_muted() را صدا نمی‌زند — "
+                     "هر تستی که اپ را بالا بیاورد روی دسکتاپِ کاربر نوتیف می‌فرستد")
+    elif gate_call.start() > os_at:
+        probs.append("app.py · دروازهٔ خفه‌کردن **بعد از** osascript سنجیده می‌شود — "
+                     "نوتیف همان‌جا رفته است")
+    if hblk is None:
+        probs.append("app.py · تابعِ _notify_muted پیدا نشد — دروازهٔ خفه‌کردن بی‌هسته است")
+    elif _MUTE_KEY not in hblk:
+        probs.append("app.py · _notify_muted کلیدِ %s را نمی‌خواند — دروازه همیشه باز است"
+                     % _MUTE_KEY)
+    elif "environ" not in hblk and "getenv" not in hblk:
+        probs.append("app.py · _notify_muted کلیدِ %s را از محیط نمی‌خواند" % _MUTE_KEY)
+    elif "return" not in hblk:
+        probs.append("app.py · _notify_muted هیچ مقداری برنمی‌گرداند (return ندارد)")
+    elif _MUTE_OFF_SET_RE.search(code) is None:
+        probs.append("app.py · فهرستِ مقادیرِ خاموش (_NOTIFY_OFF_VALUES) «۰» را ندارد — "
+                     "PIPFOUND_NOTIFY=0 دیگر خفه نمی‌کند")
+    else:
+        stats["gate"] = (fblk is not None and os_at != -1 and gate_call is not None
+                         and gate_call.start() <= os_at)
+
+    # هر فایلِ تست/هارنسی که اپ را پرتاب می‌کند باید کلیدِ خفه‌کردن را داشته باشد.
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        names = []
+    for name in names:
+        if not (name.endswith(_NOTIFY_TEST_SUFFIX) or name.endswith(_NOTIFY_HARNESS_SUFFIX)):
+            continue
+        path = os.path.join(root, name)
+        if not os.path.isfile(path):
+            continue
+        text = read_text(path) or ""
+        hits = _app_launch_lines(text, name)
+        if not hits:
+            continue
+        stats["sites"] += 1
+        stats["files"].append(name)
+        # در پایتون فقط کدِ واقعی سنجیده می‌شود تا کامنتِ حاویِ نام کافی نباشد.
+        probe = _probe_of(name, text)
+        if _MUTE_OK_RE.search(probe):
+            stats["muted"] += 1
+        else:
+            probs.append("%s اپ را پرتاب می‌کند (خطِ %d) بی‌آن‌که %s=0 (روی حالتِ خاموش) "
+                         "بگذارد — همین تست روی دسکتاپِ کاربر نوتیف می‌فرستد"
+                         % (name, hits[0], _MUTE_KEY))
+
+    # گام‌های CI هم اپ را بالا می‌آورند؛ همان قرارداد آن‌جا هم لازم است.
+    wdir = os.path.join(root, ".github", "workflows")
+    try:
+        wnames = sorted(os.listdir(wdir))
+    except OSError:
+        wnames = []
+    for name in wnames:
+        if not name.endswith(_NOTIFY_CI_SUFFIXES):
+            continue
+        path = os.path.join(wdir, name)
+        if not os.path.isfile(path):
+            continue
+        text = read_text(path) or ""
+        hits = _app_launch_lines(text, name)
+        if not hits:
+            continue
+        stats["ci_sites"] += 1
+        stats["files"].append(".github/workflows/" + name)
+        if _MUTE_OK_RE.search(_probe_of(name, text)):
+            stats["ci_muted"] += 1
+        else:
+            probs.append("گامِ CI «.github/workflows/%s» اپ را پرتاب می‌کند (خطِ %d) "
+                         "بی‌آن‌که %s=0 بخفه‌اش کند"
+                         % (name, hits[0], _MUTE_KEY))
+    return probs, stats
+
+
 def read_baseline(root=None):
     """مبنای «نسخه‌ی سالم» → (inventory, منبع).
     اول اسنپ‌شاتِ همین ماشین (~/pipfound/good)، بعد فایلِ نسخه‌بندی‌شده‌ی
@@ -1741,6 +1905,13 @@ def run_checks(root, live=False, enforce_contract=True, accept_removals=False):
     abp, abstats = autobackup_problems(root, pages)
     rep["autobackup"] = abstats
     rep["problems"] += [f"پشتیبانِ خودکار → {p}" for p in abp]
+
+    # ── چکِ استاتیکِ «خفه‌بودنِ نوتیفیکیشن در تست‌ها و CI» ──
+    # اپ سرِ بوت آلارمِ فاندمنتال را می‌سنجد؛ بدونِ این قاعده هر تست/هارنس/گامِ
+    # تازه‌ای که آن را بالا بیاورد بی‌صدا روی دسکتاپِ کاربر نوتیف می‌فرستد.
+    ntp, ntstats = notify_problems(root, pages)
+    rep["notify"] = ntstats
+    rep["problems"] += [f"نوتیفیکیشنِ تست‌ها → {p}" for p in ntp]
 
     inv = inventory(pages)
     inv["routes"] = routes_of(root)
@@ -1898,6 +2069,12 @@ def _human(rep):
             f" · نوشتنِ اتمیکِ اسنپ‌شات: {'✓' if ab.get('atomic') else '✗'}"
             f" · زمان‌بندِ زنده: {'✓' if ab.get('scheduler') else '✗'}"
             f" · کنترل‌های رابط: {'✓' if ab.get('controls') else '✗'}")
+    nt = rep.get("notify") or {}
+    if nt:
+        lines.append(
+            f"   نوتیفیکیشنِ تست‌ها: دروازه: {'✓' if nt.get('gate') else '✗'}"
+            f" · تست/هارنسِ خفه: {nt.get('muted', 0)}/{nt.get('sites', 0)}"
+            f" · گامِ CIِ خفه: {nt.get('ci_muted', 0)}/{nt.get('ci_sites', 0)}")
     for p in rep.get("problems") or []:
         lines.append(f"   ✗ {p}")
     for w in rep.get("warnings") or []:

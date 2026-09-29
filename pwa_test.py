@@ -103,7 +103,10 @@ def free_port():
 
 PORT = free_port()
 HOME_DIR = tempfile.mkdtemp(prefix="pf_pwa_")
-env = dict(os.environ, HOME=HOME_DIR, PIPFOUND_TOKEN="pwatest-token")
+# PIPFOUND_NOTIFY=0: اپ سرِ بوت آلارمِ فاندمنتال را می‌سنجد و روی دسکتاپِ
+# کاربر نوتیفِ واقعی می‌زند (قاعدهٔ نگهبان: selfcheck.notify_problems).
+env = dict(os.environ, HOME=HOME_DIR, PIPFOUND_TOKEN="pwatest-token",
+           PIPFOUND_NOTIFY="0")
 env.pop("PIPFOUND_PORT", None)
 proc = subprocess.Popen(
     [sys.executable, "-u", "app.py", "--port", str(PORT)],

@@ -61,6 +61,9 @@ def start_app(home, extra_env=None):
     """نمونهٔ اپ با HOME/env کنترل‌شده → (proc, url, logpath)."""
     env = dict(os.environ)
     env["HOME"] = home
+    # نوتیفیکیشنِ مک خفه — اپ سرِ بوت آلارمِ فاندمنتال را می‌سنجد و روی دسکتاپِ
+    # کاربر نوتیفِ واقعی می‌زند (قاعدهٔ نگهبان: selfcheck.notify_problems).
+    env["PIPFOUND_NOTIFY"] = "0"
     for k in ("PIPFOUND_JOURNAL_CSV", "PIPFOUND_JOURNAL_DIR", "PIPFOUND_RISK_FILE",
               "PIPFOUND_TOKEN", "PIPFOUND_HOST", "PIPFOUND_PORT"):
         env.pop(k, None)

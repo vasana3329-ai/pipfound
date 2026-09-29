@@ -712,8 +712,32 @@ def compute_ote_for(symbol, style):
     }
 
 
+# ── دروازهٔ «خفه‌کردنِ نوتیفیکیشن» — چرا لازم شد ─────────────────────────────
+# کارگرِ آلارمِ فاندمنتال **سرِ بوت و در همان اولین دور** خبرِ ۲۳–۲۵ ساعتِ آینده را
+# می‌بیند و نوتیفِ *واقعیِ مک* می‌فرستد. هر نمونهٔ تستی که با HOMEِ تازه بالا می‌آید
+# یعنی «فایلِ dedupe وجود ندارد» ⇒ هر تست و هر ری‌استارتِ execv دوباره نوتیف می‌زند،
+# یعنی تست‌ها روی دسکتاپِ کاربر پشتِ‌سرِهم نوتیف می‌فرستادند (شکایتِ واقعیِ کاربر).
+# قرارداد: پیش‌فرض روشن است؛ فقط با `PIPFOUND_NOTIFY=0` (یا off/false/no) خفه می‌شود
+# و اپِ زنده دست‌نخورده می‌مانَد. قاعدهٔ نگهبان (selfcheck.notify_problems) هم قفل
+# می‌کند که هیچ مسیرِ تستی/هارنسی این کلید را جا نگذارد.
+_NOTIFY_OFF_VALUES = {"0", "off", "false", "no", "خاموش"}
+
+
+def _notify_muted():
+    """آیا نوتیفیکیشنِ نیتیوِ مک خفه شده است؟ (پیش‌فرض: روشن/فعال)."""
+    try:
+        return (os.environ.get("PIPFOUND_NOTIFY") or "").strip().lower() in _NOTIFY_OFF_VALUES
+    except Exception:
+        return False
+
+
 def _notify_mac(title, message):
-    """نوتیفیکیشنِ نیتیوِ مک (بدونِ وابستگی)."""
+    """نوتیفیکیشنِ نیتیوِ مک (بدونِ وابستگی).
+
+    اگر `PIPFOUND_NOTIFY` خاموش باشد، هیچ فرایندی spawn نمی‌شود (تست‌ها/هارنس‌ها).
+    """
+    if _notify_muted():
+        return
     try:
         import subprocess
         t = title.replace('"', "'")
@@ -4543,6 +4567,8 @@ def main():
     print("   نمادها: XAUUSD, XAGUSD, EURUSD, BTCUSDT, ... — Ctrl+C برای توقف.")
     print("   🔔 موتورِ آلارم فعال شد (بررسیِ هر ۹۰ ثانیه).")
     print("   📰 آلارمِ فاندمنتال فعال شد (هشدارِ ~۲۴ ساعت پیش از هر خبرِ پرتأثیر).")
+    if _notify_muted():
+        print("   🔕 نوتیفیکیشنِ دسکتاپ خفه است (PIPFOUND_NOTIFY=0) — حالتِ تست/هارنس.")
     if AB is not None:
         _abc = AB.load_settings()
         if _abc.get("enabled"):
