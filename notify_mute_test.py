@@ -20,7 +20,8 @@
      با `PIPFOUND_NOTIFY=0` خفه‌شده می‌شمارد.
   ۲) **جهش‌آزماییِ خودِ قاعده:** برداشتنِ دروازه، جابه‌جاییِ دروازه به بعد از
      `osascript`، نجوشیدنِ کلید از محیط، خالی‌کردنِ فهرستِ مقادیرِ خاموش،
-     برداشتنِ کلید از **هر یک از ۷ نقطهٔ پرتاب**، و «کلید هست ولی روی روشن»
+     برداشتنِ کلید از **هر یک از ۸ نقطهٔ پرتابِ** اپ (۷ فایلِ تست/هارنس — شاملِ
+     خودِ همین تست — + گامِ CI)، و «کلید هست ولی روی روشن»
      باید قاعده را **قرمز** کنند (و علت را نام ببرند)؛ جهش‌های بی‌گناه سبز بمانند.
   ۳) **اثباتِ رفتاریِ سرتاسری (بدونِ نوتیفِ واقعی):** یک `osascript`ِ جعلی روی
      PATH می‌نشیند و یک تقویمِ ثابتِ آفلاین (خبرِ High دقیقاً ۲۴ ساعتِ آینده)
@@ -71,12 +72,24 @@ import selfcheck as SC       # noqa: E402
 
 SOURCE = io.open(os.path.join(HERE, "app.py"), encoding="utf-8").read()
 MUTE = "PIPFOUND_NOTIFY"
+# خودِ این تست هم اپ را پرتاب می‌کند (سه نمونه: الف/ب/ج)، پس قاعدهٔ نگهبان آن را
+# هم می‌شمارد و اعلامِ **صریحِ** خاموش در کدِ همین فایل لازم است (نه فقط ارجاعِ
+# متغیر و نه کامنت) — وگرنه دوباره همان تلهٔ «سبزِ تصادفی» برمی‌گردد.
+MUTED = {"PIPFOUND_NOTIFY": "0"}
+# قاعده در *کلِ کدِ* فایل دنبالِ «کلیدِ خفه» می‌گردد؛ پس لنگرِ جهش و هر رشتهٔ
+# کمکی باید از MUTE ساخته شوند تا تنها هم‌خوانیِ کلِ فایل، اعلانِ MUTED در
+# سطرِ بالا بمانَد — وگرنه برداشتنِ MUTED هرگز قرمز نمی‌شود (سبزِ تصادفیِ
+# خودارجاع؛ همین تله در اجرای نخستِ جهشِ MUTED → {} لو رفت).
+MUTED_NEEDLE = "MUTED = {" + '"' + MUTE + '": "0"}'
+MUTED_OFF = "MUTED = {" + '"' + MUTE + '": "off"}'
+CI_LAUNCH = MUTE + "=0 python3 app.py"
+COMMENT_ONLY = "    # " + MUTE + "=0 — فقط یادداشت، بدونِ کد\n"
 # دو تکّهٔ لنگرِ یکتا در app.py (شمارشِ needle صریح چک می‌شود تا جهشِ بی‌اثر
 # به‌جای «سبزِ خاموش»، خطا بدهد).
 GATE = '    if _notify_muted():\n        return\n'
 OSA_TAIL = ('             f\'display notification "{m}" with title "{t}" '
             'sound name "Glass"\'],\n            capture_output=True, timeout=5)')
-ENV_LINE = '    env["PIPFOUND_NOTIFY"] = "0"\n'
+ENV_LINE = '    env["%s"] = "0"\n' % MUTE
 OFF_SET = '_NOTIFY_OFF_VALUES = {"0", "off", "false", "no", "خاموش"}'
 
 EXPECTED = ("autobackup_test.py", "autorestart_test.py", "backup_test.py",
@@ -181,6 +194,11 @@ check("قاعده: هر پرتابِ تست/هارنس خفه است (%d/%d)"
       % (s0.get("muted", 0), s0.get("sites", 0)),
       s0.get("sites") == s0.get("muted") and s0.get("sites", 0) >= len(present),
       str(s0))
+# خودِ این تست هم پرتاب‌کننده است و اعلامِ صریحِ خاموش دارد — قاعده باید آن را
+# هم ببیند (وگرنه دلیلِ سبزبودنش تصادفی می‌شد، مثلِ آن‌که فقط در رشتهٔ جهش
+# کلید دیده شود).
+check("قاعده: خودِ این تست را هم به‌عنوانِ پرتاب‌کنندهٔ خفه می‌شمارد",
+      "notify_mute_test.py" in (s0.get("files") or []), str(s0.get("files")))
 check("قاعده: گامِ CIِ app.py هم خفه است",
       s0.get("ci_sites", 0) >= 1 and s0.get("ci_sites") == s0.get("ci_muted")
       and CI_FILE in (s0.get("files") or []), str(s0))
@@ -252,22 +270,25 @@ if not NO_MUT:
         lambda d: edit(d, "journal_roundtrip_test.py", ENV_LINE, ""))
     red("تستِ خودِ app.py بی‌کلید (pwa)",
         "pwa_test.py",
-        lambda d: edit(d, "pwa_test.py", ',\n           PIPFOUND_NOTIFY="0")', ")"))
+        lambda d: edit(d, "pwa_test.py", ',\n           %s="0")' % MUTE, ")"))
     red("هارنسِ نود بی‌کلید (sw_upgrade_check)",
         "sw_upgrade_check.cjs",
-        lambda d: edit(d, "sw_upgrade_check.cjs", ', PIPFOUND_NOTIFY: "0"', ""))
-    red("گامِ CI بی‌کلید",
-        CI_FILE,
-        lambda d: edit(d, CI_FILE, "PIPFOUND_NOTIFY=0 python3 app.py", "python3 app.py"))
+        lambda d: edit(d, "sw_upgrade_check.cjs", ', %s: "0"' % MUTE, ""))
+    red("گامِ CI بی‌کلید", CI_FILE,
+        lambda d: edit(d, CI_FILE, CI_LAUNCH, "python3 app.py"))
     red("کلید هست ولی روی حالتِ روشن (\"1\")",
         "روی حالتِ خاموش",
-        lambda d: edit(d, "pwa_test.py", 'PIPFOUND_NOTIFY="0"',
-                       'PIPFOUND_NOTIFY="1"'))
+        lambda d: edit(d, "pwa_test.py", '%s="0"' % MUTE,
+                       '%s="1"' % MUTE))
     # کامنتِ حاویِ کلید نباید کافی باشد: کلید برداشته می‌شود و فقط کامنت می‌ماند.
     red("کلید برداشته شد و فقط کامنتِ درستش ماند (کامنت کافی نیست)",
         "backup_test.py",
-        lambda d: edit(d, "backup_test.py", ENV_LINE,
-                       "    # PIPFOUND_NOTIFY=0 — فقط یادداشت، بدونِ کد\n"))
+        lambda d: edit(d, "backup_test.py", ENV_LINE, COMMENT_ONLY))
+    # خودِ این تست هم پرتاب‌کننده است: علامتِ صریحِ خاموش در کدِ همین فایل باید
+    # بمانَد، وگرنه قاعده (درست) قرمز می‌شود — پس این هم یک قفلِ واقعی است.
+    red("برداشتنِ علامتِ صریحِ خاموش از خودِ این تست (MUTED → {})",
+        "notify_mute_test.py",
+        lambda d: edit(d, "notify_mute_test.py", MUTED_NEEDLE, "MUTED = {}"))
 
     green("کامنتِ بی‌گناه در app.py",
           lambda d: edit(d, "app.py", GATE, "    # یادداشتِ بی‌گناه\n" + GATE))
@@ -276,12 +297,13 @@ if not NO_MUT:
                          '_NOTIFY_OFF_VALUES = {"0", "off", "false", "no", "خاموش", "nah"}'))
     green("سبکِ متفاوتِ ست‌کردنِ کلید در تست (env.update)",
           lambda d: edit(d, "journal_roundtrip_test.py", ENV_LINE,
-                         '    env.update({"PIPFOUND_NOTIFY": "0"})\n'))
+                         '    env.update({"%s": "0"})\n' % MUTE))
     green("افزودنِ envِ بی‌ربط به یک تست",
           lambda d: edit(d, "backup_test.py", ENV_LINE, ENV_LINE + '    env["PF_X"] = "1"\n'))
     green("کامنتِ بی‌گناه در گامِ CI",
-          lambda d: edit(d, CI_FILE, "PIPFOUND_NOTIFY=0 python3 app.py",
-                         "PIPFOUND_NOTIFY=0 python3 app.py  # یادداشتِ بی‌گناه"))
+          lambda d: edit(d, CI_FILE, CI_LAUNCH, CI_LAUNCH + "  # یادداشتِ بی‌گناه"))
+    green("سبکِ دیگرِ مقدارِ خاموش در خودِ این تست (off)",
+          lambda d: edit(d, "notify_mute_test.py", MUTED_NEEDLE, MUTED_OFF))
 
 
 # ═══════════════════════ ۳) اثباتِ رفتاریِ سرتاسری ═══════════════════════
@@ -393,7 +415,7 @@ check("الف: همان خبرِ فردا اطلاع داده شد",
       bool(got_a) and "فردا" in got_a[0] and "PCE" in got_a[0], str(got_a)[:200])
 
 # (ب) با کلیدِ خفه: کارگر اجرا می‌شود ولی هیچ نوتیفی نمی‌رود.
-got_b, boot_b, _ = run_case("ب (%s=0)" % MUTE, {MUTE: "0"})
+got_b, boot_b, _ = run_case("ب (%s=0)" % MUTE, MUTED)
 check("ب: اپ حالتِ خفه را اعلام کرد", "🔕" in boot_b, boot_b[-400:])
 check("ب: صفر نوتیفِ واقعی (هارنسِ جعلی یک بار هم صدا زده نشد)", got_b == [],
       str(got_b)[:200])
@@ -406,7 +428,7 @@ if not NO_MUT:
     GATE_BODY = ('        return (os.environ.get("%s") or "").strip().lower() '
                  "in _NOTIFY_OFF_VALUES" % MUTE)
     got_c, _, probs_c = run_case(
-        "ج (دروازهٔ بی‌اثرشده + کلیدِ خفه)", {MUTE: "0"},
+        "ج (دروازهٔ بی‌اثرشده + کلیدِ خفه)", MUTED,
         mutate=lambda d: edit(d, "app.py", GATE_BODY, GATE_BODY.replace("in _NOTIFY_OFF_VALUES",
                                                                        "in set()")))
     check("ج: کنترلِ منفی — قاعدهٔ استاتیک روی این کپی سبز است", probs_c == [],
@@ -428,6 +450,6 @@ if FAILS:
     print("\n❌ تستِ خفه‌بودنِ نوتیفیکیشن رد شد — %d از %d بررسی شکست خورد"
           % (len(FAILS), len(CHECKS)))
     sys.exit(1)
-print("✅ تستِ خفه‌بودنِ نوتیفیکیشن پاس شد — دروازهٔ اپ، خفه‌بودنِ هر ۷ نقطهٔ "
+print("✅ تستِ خفه‌بودنِ نوتیفیکیشن پاس شد — دروازهٔ اپ، خفه‌بودنِ هر ۸ نقطهٔ "
       "پرتاب، جهش‌آزماییِ قاعده، و اثباتِ رفتاریِ «تست‌ها روی دسکتاپِ کاربر "
       "نوتیف نمی‌زنند»")
