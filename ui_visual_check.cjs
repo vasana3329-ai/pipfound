@@ -1133,6 +1133,18 @@ function loadPuppeteer() {
      واقعاً کلیک‌پذیر می‌شود (رویش چیزی نمی‌افتد)؛ (۳) کلیکِ دوباره می‌بندد.
      این رفتارِ رندرشده را هیچ چکِ متنی نمی‌بیند. */
   try {
+    // پیش از سنجش، یادِ حافظهٔ محلیِ همین مرورگر پاک و صفحه دوباره بارگذاری می‌شود تا
+    // «در بارگذاری بسته است» قطعی باشد (پروفایلِ مرورگر ممکن است از اجرای قبلی
+    // وضعیتِ باز را نگه داشته باشد). در پایانِ همین بند هم دوباره پاک می‌شود.
+    const clearFolds = () => page.evaluate(() => {
+      try {
+        Object.keys(localStorage)
+          .filter((k) => k.indexOf("pf-folds") === 0)
+          .forEach((k) => localStorage.removeItem(k));
+      } catch (e) { /* حافظهٔ خاموشِ مرورگر */ }
+    });
+    await clearFolds();
+    await page.reload({ waitUntil: "load", timeout: 30000 });
     const FOLDS = [
       { box: "alarmsDock", toggle: "alarmsToggle", body: "alarmsBody", inner: "alarmsList" },
       { box: "btPanel", toggle: "btToggle", body: "btBody", inner: "btFrom" },
@@ -1197,6 +1209,52 @@ function loadPuppeteer() {
     notes.push(`کرکره‌های نمای اصلی (${ok.length}/${FOLDS.length}): `
       + ok.map((r) => r.box + (r.atLoad.summary ? ` (${r.atLoad.summary})` : "")).join(" · ")
       + " — همه بسته در بارگذاری، باز/بسته با یک کلیک و کنترلِ کلیک‌پذیر ✓");
+
+    // ── یادِ وضعیتِ بینِ بازدیدها (خواستهٔ کاربر: «هر بخش همان‌طور که کاربر
+    // گذاشته بماند»). سنجشِ واقعی: حافظهٔ پاک → یک بخش باز/بسته می‌شود → صفحه
+    // دوباره بارگذاری می‌شود و باید همان وضعیت بماند. در پایان پاک‌سازی تا
+    // پیش‌فرضِ تمیز (همه بسته) برگردد و سنجشِ بعدی از حالتِ پاک شروع کند.
+    const memBefore = problems.length;
+    const memSpec = FOLDS[0];
+    const readMem = () => page.evaluate((s) => {
+      const bx = document.getElementById(s.box), tg = document.getElementById(s.toggle),
+            bd = document.getElementById(s.body);
+      return { open: bx.classList.contains("open"), aria: tg.getAttribute("aria-expanded"),
+               display: getComputedStyle(bd).display };
+    }, memSpec);
+    const clickMem = () => page.evaluate((s) => {
+      document.getElementById(s.toggle).click();
+    }, memSpec);
+    await clearFolds();
+    await page.reload({ waitUntil: "load", timeout: 30000 });
+    const m0 = await readMem();
+    await clickMem();
+    await new Promise((r) => setTimeout(r, 150));
+    const m1 = await readMem();
+    await page.reload({ waitUntil: "load", timeout: 30000 });
+    const m2 = await readMem();
+    await clickMem();
+    await new Promise((r) => setTimeout(r, 150));
+    await page.reload({ waitUntil: "load", timeout: 30000 });
+    const m3 = await readMem();
+    await clearFolds();
+    await page.reload({ waitUntil: "load", timeout: 30000 });
+    const m4 = await readMem();
+    if (m0.open)
+      fail(`کرکرهٔ «${memSpec.box}» با حافظهٔ پاک هم در بارگذاری باز است`);
+    if (!m1.open || m1.aria !== "true")
+      fail(`پیش‌نیازِ سنجشِ یاد برقرار نشد: کلیک، کرکرهٔ «${memSpec.box}» را باز نکرد`);
+    if (!m2.open || m2.aria !== "true" || m2.display === "none")
+      fail(`بخشِ بازِ «${memSpec.box}» بعد از بارگذاریِ دوباره باز نماند `
+        + `— باز/بسته‌بودنِ بینِ بازدیدها یاد نمی‌مانَد`);
+    if (m3.open)
+      fail(`بخشِ بستهٔ «${memSpec.box}» بعد از بارگذاریِ دوباره باز برگشت `
+        + `— بستنِ کاربر یاد نمی‌مانَد`);
+    if (m4.open)
+      fail("پاک‌کردنِ حافظه، پیش‌فرضِ تمیزِ (همه بسته) را برنگرداند");
+    if (problems.length === memBefore)
+      notes.push(`یادِ وضعیتِ کرکره‌ها («${memSpec.box}»): باز ماندنِ بخشِ باز و بسته `
+        + "ماندنِ بخشِ بسته بعد از بارگذاریِ دوباره ✓ · پاک‌سازی = پیش‌فرضِ تمیز ✓");
   } catch (e) {
     fail("بررسیِ کرکره‌های نمای اصلی ممکن نشد: " + e.message);
   }

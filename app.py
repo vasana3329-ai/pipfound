@@ -3335,16 +3335,38 @@ async function pfImportData(){
 // خواستهٔ کاربر: هیچ‌کدام از این بخش‌های «نگهداری» در نمای اصلی همیشه‌باز نباشد؛
 // نوار کلیدپذیر است و بدنه فقط با کلیک باز می‌شود. وضعیتِ هر بخش هم به‌شکلِ خلاصه
 // روی همان نوار می‌آید تا جمع‌بودن به‌معنای «بی‌خبری» نباشد.
+// خواستهٔ دومِ کاربر: هر بخش «همان‌طور که کاربر گذاشته» بماند — یعنی باز/بسته‌بودن
+// بینِ بازدیدها یاد می‌ماند. عمداً localStorage است (نه sessionStorage) چون این یاد
+// باید از بارگذاریِ بعدی هم بماند. خواندن/نوشتنِ حافظه داخلِ try است: در حالتِ
+// حریمِخصوصی localStorage می‌پرت‌د و خرابیِ حافظه هرگز نباید صفحه یا کلید را ببرد.
+// برعکس: نبودِ یاد = پیش‌فرضِ تمیز (همه بسته)، پس تمیزبودنِ نمای اول برنمی‌گردد
+// مگر خودِ کاربر یک بخش را باز بگذارد.
+const PF_FOLD_KEY="pf-folds-v1";
+function pfFoldsRead(){
+  try{
+    const m=JSON.parse(window.localStorage.getItem(PF_FOLD_KEY)||"null");
+    return (m && typeof m==="object")?m:{};
+  }catch(e){ return {}; }
+}
+function pfFoldsWrite(m){
+  try{ window.localStorage.setItem(PF_FOLD_KEY, JSON.stringify(m)); }catch(e){}
+}
 function pfFold(boxId, toggleId, bodyId){
   const box=document.getElementById(boxId), tgl=document.getElementById(toggleId),
         body=document.getElementById(bodyId);
   if(!box||!tgl||!body) return false;
+  // یادِ بازدیدِ قبل: فقط «بازِ صریح» برمی‌گردد؛ هر مقدارِ دیگر یعنی بسته.
+  if(pfFoldsRead()[boxId]===true) box.classList.add("open");
   const paint=()=>{
     const open=box.classList.contains("open");
     tgl.setAttribute("aria-expanded", open?"true":"false");
     body.setAttribute("aria-hidden", open?"false":"true");
   };
-  tgl.onclick=()=>{ box.classList.toggle("open"); paint(); };
+  tgl.onclick=()=>{
+    box.classList.toggle("open");
+    const m=pfFoldsRead(); m[boxId]=box.classList.contains("open"); pfFoldsWrite(m);
+    paint();
+  };
   paint();
   return true;
 }

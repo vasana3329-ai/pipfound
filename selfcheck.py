@@ -1845,6 +1845,9 @@ _FOLD_BODY_CLASS_RE = re.compile(r'class="fold-body\s+([A-Za-z][A-Za-z0-9_-]*)"'
 _FOLD_BODY_CLASSES = ("alarms-body", "bt-body", "risk-body", "bk-body")
 _FOLD_STYLE_RE = re.compile(r'<style[^>]*>(.*?)</style>', re.S)
 _FOLD_RULE_RE = re.compile(r'([^{}]+)\{([^{}]*)\}', re.S)
+# یادِ وضعیتِ باز/بستهٔ کرکره‌ها بینِ بازدیدها (خواستهٔ کاربر).
+_FOLD_MEM_KEY_RE = re.compile(r'const\s+PF_FOLD_KEY\s*=\s*"pf-folds[^"]*"')
+_FOLD_MEM_SAVE_RE = re.compile(r'tgl\.onclick\s*=\s*\(\)\s*=>\s*\{[^}]*pfFoldsWrite\(')
 _FOLD_JS_INIT_RE = re.compile(r'function\s+pfFold\s*\(')
 _FOLD_JS_ARIA_RE = re.compile(r'setAttribute\("aria-expanded"\s*,')
 _FOLD_JS_CALL_RE = re.compile(
@@ -1886,13 +1889,53 @@ def _fold_display_overrides(page, hide_at):
     return sorted(set(hits))
 
 
+def _fold_fn_body(page, name):
+    """تنهٔ یک تابعِ سطح‌بالا (توابعِ همین صفحه در ستونِ ۰ شروع می‌شوند)."""
+    at = page.find("function %s(" % name)
+    if at < 0:
+        return ""
+    end = page.find("\n}", at)
+    return page[at:end] if end > at else page[at:]
+
+
+def _fold_memory_problems(page):
+    """یادِ باز/بسته‌بودنِ کرکره‌ها بینِ بازدیدها: خواندن/نوشتنِ حافظهٔ محلی باید
+    داخلِ `try` باشد (حالتِ حریمِخصوصی `localStorage` را می‌پرتاند)، وضعیتِ یادمانده
+    باید در `pfFold` پیش از رسم برگردد، و در همان هندلرِ کلیک ذخیره شود.
+    عمداً `localStorage` است نه `sessionStorage`: این یاد باید از بازدیدِ بعدی هم بماند.
+    """
+    probs = []
+    rd = _fold_fn_body(page, "pfFoldsRead")
+    wr = _fold_fn_body(page, "pfFoldsWrite")
+    fb = _fold_fn_body(page, "pfFold")
+    if _FOLD_MEM_KEY_RE.search(page) is None:
+        probs.append("app.py · کلیدِ حافظهٔ کرکره‌ها (PF_FOLD_KEY) نیست — باز/بسته‌بودنِ "
+                     "بخش‌ها بینِ بازدیدها یاد نمی‌ماند")
+    if not rd or "localStorage" not in rd or "try" not in rd:
+        probs.append("app.py · خواندنِ حافظهٔ کرکره‌ها بدونِ try/localStorage است — "
+                     "صفحه در حریمِخصوصی می‌شکند")
+    if not wr or "localStorage" not in wr or "try" not in wr:
+        probs.append("app.py · نوشتنِ حافظهٔ کرکره‌ها بدونِ try/localStorage است — "
+                     "کلید در حریمِخصوصی خطا می‌دهد")
+    if not fb or 'classList.add("open")' not in fb:
+        probs.append("app.py · کرکره‌ها وضعیتِ یادماندهٔ خودشان را برنمی‌گردانند — هر بخش "
+                     "با هر بازدید جمع می‌شود")
+    elif fb.find('classList.add("open")') > fb.find("tgl.onclick"):
+        probs.append("app.py · بازگردانیِ وضعیت بعد از سیم‌کشی/رسم انجام می‌شود — "
+                     "بدنه و aria با یادِ قبلی هم‌گام نمی‌شوند")
+    if _FOLD_MEM_SAVE_RE.search(fb) is None:
+        probs.append("app.py · کلیکِ کاربر در حافظه ذخیره نمی‌شود (بیرونِ هندلرِ کلیک) — "
+                     "باز گذاشتنِ یک بخش تا بازدیدِ بعد نمی‌ماند")
+    return (not probs), probs
+
+
 def fold_panels_problems(root, pages=None):
     """قراردادِ «کرکره‌های جمعِ پیش‌فرض»: بخش‌های نگهداریِ نمای اصلی (آلارم‌ها،
     تنظیماتِ بک‌تست، مدیریتِ ریسک و پشتیبانِ داده) یک نوارِ کلیدپذیر داشته باشند،
     بدنه‌شان پیش‌فرض بسته بماند، و وضعیتشان روی همان نوار دیده شود."""
     probs = []
     stats = {"panels": 0, "collapsed": False, "wired": False,
-             "options_inside": False, "state": False}
+             "options_inside": False, "state": False, "memory": False}
     page = (pages or {}).get("HTML") or ""
     if not page:
         probs.append("app.py → متنِ APP_PAGE خوانده نشد — کرکره‌های نمای اصلی سنجیده نمی‌شوند")
@@ -1951,6 +1994,10 @@ def fold_panels_problems(root, pages=None):
         folded += 1
         if box_id == "bkDock":
             bk_body_at = body_at
+
+    mem_ok, mem_probs = _fold_memory_problems(page)
+    probs += mem_probs
+    stats["memory"] = mem_ok
 
     if _FOLD_JS_ARIA_RE.search(page) is None:
         probs.append("app.py · نوارهای کرکره وضعیتِ خودشان را به صفحه‌خوان نمی‌گویند "
@@ -2397,7 +2444,8 @@ def _human(rep):
             f"{bk.get('panels', 0)}/{len(_FOLD_PANELS)}"
             f" · نوارِ کلیدپذیر: {'✓' if bk.get('wired') else '✗'}"
             f" · گزینه‌های پشتیبان داخلِ بدنه: {'✓' if bk.get('options_inside') else '✗'}"
-            f" · خلاصهٔ وضعیت روی نوار: {'✓' if bk.get('state') else '✗'}")
+            f" · خلاصهٔ وضعیت روی نوار: {'✓' if bk.get('state') else '✗'}"
+            f" · یادِ وضعیت بینِ بازدیدها: {'✓' if bk.get('memory') else '✗'}")
     nt = rep.get("notify") or {}
     if nt:
         lines.append(
