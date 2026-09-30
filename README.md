@@ -77,7 +77,7 @@ python3 h4_alignment_test.py    # هم‌ترازیِ تجمیعِ ۴ساعته 
 python3 data_freshness_test.py  # کندلِ بسته، سنِ داده، باز/بسته‌ی بازار، ضدِ نگاه به آینده
 python3 partial_candle_test.py  # موتور روی کندلِ ناقص سیگنال نمی‌سازد
 python3 notify_mute_test.py     # تست‌ها روی دسکتاپِ تو نوتیف نمی‌فرستند (shimِ osascript)
-python3 archive_actual_test.py  # نتیجه‌ی قطعیِ آرشیو: عددِ Actual + صعودی/نزولی (نه شرطی)
+python3 archive_actual_test.py  # آرشیو: فقط نتیجهٔ قطعی + تأثیرِ همان نتیجه (نه گزارهٔ شرطی)
 python3 button_alive_test.py    # کلیدِ بی‌واکنش نداریم: تورِ ایمنیِ فاندمنتال + واکنشِ دیدنیِ بروزرسانی
 python3 dock_collapse_test.py   # آلارم‌ها/بک‌تست/ریسک/پشتیبان جمع‌اند، نه بلوکِ همیشه‌باز
 python3 fold_memory_test.py     # باز/بستهٔ کرکره‌ها بینِ بازدیدها یاد می‌مانَد (پیش‌فرضِ تمیز)

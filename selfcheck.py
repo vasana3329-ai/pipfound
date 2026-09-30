@@ -1805,6 +1805,15 @@ _ARC_OUTCOME_RE = re.compile(r"v\.outcome===\"(صعودی|نزولی)\"")
 _ARC_ACTUAL_NUM_RE = re.compile(r'arc-num">\$\{v\.actual\}')
 _ARC_ABSENT_RE = re.compile(r"منبعِ پاسخ نداد")
 _ARCHIVE_NOTE_RE = re.compile(r"نتیجه")
+# خواستهٔ کاربر: «توو آرشیو اقتصادی فقط نتیجه بیاد به‌علاوهٔ تأثیرش، نه گزارهٔ شرطی».
+# فیدِ خبرهای پیش‌رو عمداً دو سناریوی بدبینانه/خوش‌بینانه دارد؛ این دو regex فقط
+# داخلِ *منطقهٔ هندلرِ آرشیو* سنجیده می‌شوند تا آن دو با هم قاطی نشوند.
+_ARC_COND_RE = re.compile(r"a\.beat|a\.miss")
+_ARC_IMPACT_RE = re.compile(r'arc-i">تأثیر')
+# ردیفِ خبرِ بی‌عدد باید صادق باشد، نه خالی (متنِ رندر، نه کامنتِ همان خط).
+_ARC_PERROW_RE = re.compile(r"◇ این خبر عددِ اعلام‌شده ندارد")
+_ARC_EFFECT_FN_RE = re.compile(r"def _realized_effect\s*\(")
+_VERDICT_EFFECT_RE = re.compile(r'res\["effect"\]\s*=\s*_realized_effect\s*\(')
 
 # ── قراردادِ «کلیدِ بی‌واکنش نداریم» (لایهٔ ۴.۱۷) ───────────────────────────
 # شکایتِ واقعیِ کاربر: «چک کن خیلی از کلیدا رو از کار انداختی — مثلاً فاندمنتال و
@@ -2029,11 +2038,33 @@ def fold_panels_problems(root, pages=None):
     return probs, stats
 
 
+def _py_region(src, start_marker, end_marker):
+    """تکهٔ متنِ پایتونی از `start_marker` تا `end_marker` (خالی یعنی پیدا نشد)."""
+    i = src.find(start_marker)
+    if i < 0:
+        return ""
+    j = src.find(end_marker, i)
+    return src[i:j] if j > i else src[i:]
+
+
+def _archive_region(page):
+    """متنِ هندلرِ «آرشیو اقتصادی» — تا سنجشِ «گزارهٔ شرطی» فقط همین پنجره را ببیند
+    (فیدِ خبرهای پیش‌رو عمداً گزارهٔ شرطی دارد و نباید با آرشیو اشتباه شود)."""
+    i = page.find("const archiveBtn=")
+    if i < 0:
+        return ""
+    j = page.find("async function setOteAlarm", i)
+    return page[i:j] if j > i else page[i:i + 6000]
+
+
 def archive_problems(root, pages=None):
-    """قراردادِ «نتیجهٔ قطعی در آرشیو»: زنجیرهٔ Actual → حکم → رندرِ مطلق سالم بماند."""
+    """قراردادِ «نتیجه + تأثیر در آرشیو، بی‌گزارهٔ شرطی»: زنجیرهٔ
+    Actual → حکم (با اثرِ محقَق) → رندرِ مطلقِ بی‌شرط سالم بماند."""
     probs = []
     stats = {"actuals": False, "verdict": False, "render": False,
-             "outcomes": 0, "note": False}
+             "outcomes": 0, "note": False, "effect": False,
+             "conditional": False, "impact": False, "lean": False,
+             "perrow": False}
     msrc = read_text(os.path.join(root, "macro_context.py")) or ""
     fsrc = read_text(os.path.join(root, "fundamental.py")) or ""
     page = (pages or {}).get("HTML") or ""
@@ -2056,6 +2087,22 @@ def archive_problems(root, pages=None):
                          "حکمِ قطعی به رویدادها تزریق نمی‌شود")
         if _VERDICT_FN_RE.search(fsrc) is None:
             probs.append("fundamental.py · تابعِ حکم (_verdict) حذف شده")
+        if _ARC_EFFECT_FN_RE.search(fsrc) and _VERDICT_EFFECT_RE.search(fsrc):
+            stats["effect"] = True
+        elif _ARC_EFFECT_FN_RE.search(fsrc) is None:
+            probs.append("fundamental.py · سازندهٔ تأثیرِ محقَق (_realized_effect) حذف شده — "
+                         "آرشیو نمی‌تواند تأثیرِ نتیجه را نشان بدهد")
+        else:
+            probs.append("fundamental.py · حکم دیگر تأثیرِ خودش را نمی‌سازد "
+                         "(res[\"effect\"] = _realized_effect(…)) — تأثیرِ آرشیو خالی می‌مانَد")
+        areg = _py_region(fsrc, "def archive(hours=6):", "\ndef build(hours=180):")
+        if not areg:
+            probs.append("fundamental.py · تابعِ archive پیدا نشد — بارِ آرشیو سنجیده نمی‌شود")
+        else:
+            if '"analysis"' in areg:
+                probs.append("fundamental.py · بارِ آرشیو باز هم شاخهٔ شرطی (analysis) را می‌فرستد — "
+                             "«فقط نتیجه بیاد، نه گزارهٔ شرطی» نیمه‌کاره می‌مانَد")
+            stats["lean"] = '"analysis"' not in areg
     if not page:
         probs.append("app.py → متنِ APP_PAGE خوانده نشد — رندرِ حکم سنجیده نمی‌شود")
     else:
@@ -2074,6 +2121,24 @@ def archive_problems(root, pages=None):
             stats["render"] = True
         stats["outcomes"] = len(re.findall(r"صعودی|نزولی", page))
         stats["note"] = bool(_ARCHIVE_NOTE_RE.search(page))
+        # «فقط نتیجه + تأثیرش، نه گزارهٔ شرطی» — سنجیده‌شده فقط داخلِ خودِ آرشیو.
+        region = _archive_region(page)
+        if not region:
+            probs.append("app.py · هندلرِ آرشیوِ اقتصادی (archiveBtn) پیدا نشد — "
+                         "پنجرهٔ «نتیجه + تأثیر» سنجیده نمی‌شود")
+        else:
+            if _ARC_COND_RE.search(region):
+                probs.append("app.py · آرشیو باز هم گزارهٔ شرطی (beat/miss) را رندر می‌کند — "
+                             "خواستهٔ کاربر («فقط نتیجه بیاد بعلاوهٔ تأثیرش، نه گزارهٔ شرطی») نقض شده")
+            stats["conditional"] = _ARC_COND_RE.search(region) is None
+            if _ARC_PERROW_RE.search(region) is None:
+                probs.append("app.py · خبرِ بدونِ عددِ اعلام‌شده، ردیفِ خالی می‌دهد — "
+                             "کاربر فکر می‌کند اپ یادش رفته")
+            stats["perrow"] = _ARC_PERROW_RE.search(region) is not None
+            if _ARC_IMPACT_RE.search(region) is None:
+                probs.append("app.py · آرشیو «تأثیرِ همین نتیجه» را نشان نمی‌دهد — "
+                             "نتیجه بی‌تأثیر می‌مانَد")
+            stats["impact"] = _ARC_IMPACT_RE.search(region) is not None
     return probs, stats
 
 
@@ -2429,6 +2494,9 @@ def _human(rep):
             f"   آرشیوِ اقتصادی: گیرندهٔ Actual: {'✓' if ar.get('actuals') else '✗'}"
             f" · حکمِ قطعی: {'✓' if ar.get('verdict') else '✗'}"
             f" · رندرِ مطلق: {'✓' if ar.get('render') else '✗'}"
+            f" · تأثیرِ نتیجه: {'✓' if ar.get('effect') and ar.get('impact') else '✗'}"
+            f" · بی‌گزارهٔ شرطی: {'✓' if ar.get('conditional') and ar.get('lean') else '✗'}"
+            f" · ردیفِ بی‌عدد صادق: {'✓' if ar.get('perrow') else '✗'}"
             f" · صعودی/نزولی در صفحه: {ar.get('outcomes', 0)}")
     ba = rep.get("buttons") or {}
     if ba:

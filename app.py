@@ -1689,7 +1689,7 @@ tr.on td{background:rgba(34,197,94,.05)}
 .arc-t{font-weight:800;font-size:14.5px}
 .arc-t .arc-en{color:var(--muted);font-size:12px;font-weight:600;margin-inline-start:6px}
 .arc-m{color:var(--muted);font-size:12.5px;margin-top:4px}
-.arc-d{margin-top:6px;color:var(--accent2);font-size:13px}
+.arc-i{margin-top:6px;color:var(--muted);font-size:12.5px}
 .arc-v{margin-top:7px;font-size:13px;font-weight:800;padding:7px 10px;border-radius:9px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .arc-v.v-up{background:rgba(46,204,113,.14);color:#2ecc71;border:1px solid rgba(46,204,113,.35)}
 .arc-v.v-dn{background:rgba(231,76,60,.14);color:#e74c3c;border:1px solid rgba(231,76,60,.35)}
@@ -1877,7 +1877,7 @@ input.abnum{flex:0 0 86px;min-width:86px;text-align:center;direction:ltr;
         <span class="rf-lbl">بروزرسانی</span>
         <span class="rf-live" role="status" aria-live="polite"></span>
       </button>
-      <button id="archiveBtn" class="ab-btn" title="اخبارِ اقتصادیِ پرتأثیرِ ۶ ساعتِ گذشته — هر خبر با ارز، ساعتِ اعلام و جهتِ موردانتظارش روی جفت‌ارزها و طلا/نقره؛ در همین صفحه به‌شکلِ پنجره باز می‌شود.">📁 آرشیو اقتصادی</button>
+      <button id="archiveBtn" class="ab-btn" title="اخبارِ اقتصادیِ پرتأثیرِ ۶ ساعتِ گذشته — هر خبر با ارز، ساعتِ اعلام، نتیجهٔ قطعیِ اعلام‌شده (عددِ Actual + صعودی/نزولی) و تأثیرِ همین نتیجه روی جفت‌ارزها و طلا/نقره؛ در همین صفحه به‌شکلِ پنجره باز می‌شود.">📁 آرشیو اقتصادی</button>
       <button id="installBtn" class="ab-btn" title="همین اپ را به‌شکلِ آیکونِ مستقل روی گوشی/تبلت/کامپیوتر نصب کن — آدرسِ قابل‌اشتراک و راهنمای هر دستگاه.">📲 نصب روی دستگاه</button>
     </div>
     <div id="setupsPanel" class="setups-panel">
@@ -3070,9 +3070,8 @@ if(archiveBtn){
         return;
       }
       const evs=data.events||[];
-      const gold=x=>(x&&x[0]?` · ${x[0]}: ${x[1]}`:"");
       const rows = evs.length ? evs.map(e=>{
-        const a=e.analysis||{}, b=a.beat||{}, m=a.miss||{}, v=e.verdict||{};
+        const v=e.verdict||{}, ef=v.effect||{};
         let vd="";
         if(v.found){
           const cls = v.outcome==="صعودی"?"v-up":(v.outcome==="نزولی"?"v-dn":"v-fl");
@@ -3081,19 +3080,26 @@ if(archiveBtn){
           const ff = v.beat?` · ${v.beat}`:"";
           const dd2 = v.dir?` · ${e.country_fa||e.country||""} ${v.dir}`:"";
           vd = `<div class="arc-v ${cls}"><span>${arr}</span><span>نتیجه: <span class="arc-num">${v.actual}</span></span><span>${dd}${ff}${dd2}</span></div>`;
+          // تأثیرِ همین نتیجه — نه دو گزارهٔ شرطیِ «اگر بالا/پایین شد»
+          const arw = x=>String(x||"").replace("صعود","").replace("نزول","").trim();
+          const pr = (ef.pairs||[]).map(x=>`${x[0]} ${arw(x[1])}`).join(" · ");
+          const gd = ef.gold?`${ef.gold[0]} ${arw(ef.gold[1])}`:"";
+          const imp = [pr, gd].filter(Boolean).join(" · ");
+          if(imp){ vd += `<div class="arc-i">تأثیرِ همین نتیجه: ${imp}</div>`; }
         }else if(data.source_ok===false){
           vd = `<div class="arc-v v-fl">◇ نتیجهٔ اعلام‌شده در دسترس نبود (منبعِ پاسخ نداد)</div>`;
+        }else{
+          // سکوت بدترین حالت است: خبرِ بی‌عدد (سخنرانی/…)
+          vd = `<div class="arc-v v-fl">◇ این خبر عددِ اعلام‌شده ندارد — نتیجه و تأثیری برای گفتن نیست</div>`;
         }
         return `<div class="arc-ev">
-          <div class="arc-t">${a.icon||""} ${e.title_fa||e.title||""}<span class="arc-en">${e.title||""}</span></div>
+          <div class="arc-t">${e.icon||""} ${e.title_fa||e.title||""}<span class="arc-en">${e.title||""}</span></div>
           <div class="arc-m">${e.country_fa||e.country||""} · ${e.when_fa||""}${e.minutes_ago!=null?` · ${e.minutes_ago} دقیقه پیش`:""} · ${e.impact==="High"?"پرتأثیر":"متوسط"}</div>
           ${vd}
-          <div class="arc-d">⬆ ${b.label||""}: ${b.ccy_dir||""}${gold(b.gold)}</div>
-          <div class="arc-d">⬇ ${m.label||""}: ${m.ccy_dir||""}${gold(m.gold)}</div>
         </div>`;
       }).join("") : `<div class="arc-empty">در ۶ ساعتِ گذشته خبرِ پرتأثیری در تقویم نبود.</div>`;
       openModal(`📁 آرشیو اقتصادی — ۶ ساعتِ اخیر (${data.count||0} خبر)`,
-        rows + `<div class="arc-note">خطِ «نتیجه» قطعی است — عددِ اعلام‌شدهٔ واقعی (Actual) + صعودی/نزولی‌بودنش برای ارز؛ چون خبر اعلام شده و حدسی در کار نیست. اگر عددی نیاید یعنی منبعِ اعلام‌شده در دسترس نبوده یا این خبر عددی نداشته (سخنرانی و …). جهت‌های ⬆/⬇ تحلیلِ «اثرِ موردانتظارِ» انحراف از پیش‌بینی‌اند برای تصمیمِ پیش از خبر.</div>`);
+        rows + `<div class="arc-note">در این پنجره فقط «نتیجه» می‌آید: عددِ اعلام‌شدهٔ واقعی (Actual) + جهتِ آن برای ارز، و بعد «تأثیرِ همین نتیجه» روی جفت‌ارزها/طلا — چون خبر اعلام شده، گزارهٔ شرطیِ «اگر بالاتر از انتظار شد → …» این‌جا جایی ندارد. اگر عددی نیاید یعنی منبعِ اعلام‌شده در دسترس نبوده یا این خبر عددی نداشته (سخنرانی و …).</div>`);
     }catch(err){
       openModal("📁 آرشیو اقتصادی", `<div class="arc-empty">ارتباط ناموفق: ${err}</div>`);
     }finally{

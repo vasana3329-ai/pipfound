@@ -1259,6 +1259,62 @@ function loadPuppeteer() {
     fail("بررسیِ کرکره‌های نمای اصلی ممکن نشد: " + e.message);
   }
 
+  /* ۶.۱۰) آرشیوِ اقتصادی در مرورگرِ واقعی: «فقط نتیجه + تأثیر»، بی‌گزارهٔ شرطی —
+     خواسته‌ی کاربر: «می‌خوام توو آرشیو اقتصادی فقط نتیجه بیاد بعلاوهٔ تأثیرش، نه
+     گزارهٔ شرطی». چکِ متنی می‌تواند بگوید متنِ کد عوض شده؛ فقط رندرِ واقعی نشان
+     می‌دهد که هیچ ردیفِ شرطی‌ای در DOM نیست و خطِ تأثیر زیرِ خطِ نتیجه نشسته است.
+     اگر در آن ۶ ساعت خبری نباشد، بند با ادعای بی‌ربط سبز نمی‌شود: فقط «رکوردِ
+     خالی» یادداشت می‌شود و ادعاها روی حالتِ «خبر داریم» اجرا می‌شوند. */
+  try {
+    const arch = await page.evaluate(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const btn = document.getElementById("archiveBtn");
+      if (!btn) return { missing: true };
+      btn.click();
+      for (let i = 0; i < 40 && !document.getElementById("pipModal"); i++) await wait(250);
+      for (let i = 0; i < 40; i++) {
+        const m = document.getElementById("pipModal");
+        if (m && (m.querySelector(".arc-ev") || m.querySelector(".arc-empty"))) break;
+        await wait(250);
+      }
+      const m = document.getElementById("pipModal");
+      const out = {
+        modal: !!m,
+        events: m ? m.querySelectorAll(".arc-ev").length : -1,
+        rows: m ? m.querySelectorAll(".arc-d").length : -1,
+        impacts: m ? m.querySelectorAll(".arc-i").length : -1,
+        verdicts: m ? m.querySelectorAll(".arc-v").length : -1,
+        impactText: m && m.querySelector(".arc-i") ? m.querySelector(".arc-i").textContent.trim() : "",
+        note: m && m.querySelector(".arc-note") ? m.querySelector(".arc-note").textContent : "",
+        text: m ? m.textContent : "",
+      };
+      if (m) { const c = m.querySelector(".modal-close"); if (c) c.click(); }
+      return out;
+    });
+    const before = problems.length;
+    if (arch.missing) fail("کلیدِ 📁 آرشیو اقتصادی در صفحه نیست");
+    else if (!arch.modal) fail("پنجرهٔ آرشیوِ اقتصادی با کلیک باز نشد");
+    else {
+      if (arch.rows !== 0)
+        fail(`پنجرهٔ آرشیو ${arch.rows} ردیفِ گزارهٔ شرطی (⬆/⬇) نشان می‌دهد `
+          + "— خواستهٔ «فقط نتیجه + تأثیرش، نه گزارهٔ شرطی» نقض شده");
+      if (arch.verdicts > 0 && arch.impacts === 0)
+        fail("خطِ «تأثیرِ همین نتیجه» در پنجرهٔ آرشیو رندر نشد");
+      if (arch.impacts > arch.verdicts)
+        fail("خطِ تأثیر از خطِ نتیجه بیشتر است (ردیفِ بی‌نتیجه تأثیر گرفته)");
+      if (!/تأثیرِ همین نتیجه/.test(arch.note) && !/گزارهٔ شرطی/.test(arch.note))
+        fail("یادداشتِ پنجرهٔ آرشیو قراردادِ «نتیجه + تأثیر، بی‌گزارهٔ شرطی» را توضیح نمی‌دهد");
+      if (/⬆|⬇/.test(arch.text))
+        fail("فلشِ گزارهٔ شرطی (⬆/⬇) هنوز در متنِ پنجرهٔ آرشیو دیده می‌شود");
+      if (problems.length === before)
+        notes.push(`آرشیوِ اقتصادی (${arch.events} خبر، ${arch.verdicts} نتیجه): `
+          + "ردیفِ شرطی: ۰ · خطِ تأثیر زیرِ خطِ نتیجه ✓"
+          + (arch.impactText ? ` — نمونه: ${arch.impactText.slice(0, 90)}` : ""));
+    }
+  } catch (e) {
+    fail("بررسیِ پنجرهٔ آرشیوِ اقتصادی ممکن نشد: " + e.message);
+  }
+
   /* ۱۰) اسکرین‌شات برای بازبینیِ انسانی. */
   try {
     await page.screenshot({ path: SHOT });

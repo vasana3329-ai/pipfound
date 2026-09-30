@@ -252,16 +252,30 @@ def _num(v):
         return None
 
 
-def _verdict(actual, forecast, previous, mode):
+def _realized_effect(ccy, direction):
+    """تأثیرِ **محقق** روی جفت‌ارزها/طلا — فقط وقتی جهت قطعی است و ارز معلوم.
+
+    چرا جدا: آرشیو باید «نتیجه + تأثیرِ همان نتیجه» را نشان دهد، نه دو
+    سناریوی فرضیِ بالا/پایین. این تابع برخلافِ `_analysis` (که دو شاخهٔ شرطی
+    می‌سازد) فقط یک اثر می‌دهد: اثری که با عددِ اعلام‌شده واقعاً رخ داده."""
+    if not ccy or direction not in ("قوی‌تر", "ضعیف‌تر"):
+        return {"pairs": [], "gold": None}  # جهت نامعلوم ⇒ اثر نمی‌سازیم (حدس ممنوع)
+    pairs, gold = _pair_effect(ccy, strong=(direction == "قوی‌تر"))
+    return {"pairs": pairs, "gold": gold}
+
+
+def _verdict(actual, forecast, previous, mode, ccy=None):
     """حکمِ قطعیِ «نتیجه» از عددِ اعلام‌شده — نه گزاره‌ی شرطی.
 
     برمی‌گرداند: found (عددِ اعلام‌شده در دسترس است)، dir (قوی‌تر/ضعیف‌ترِ ارز)،
-    outcome (صعودی/نزولی برای همان ارز)، and beat (بالاتر/پایین‌تر از انتظار).
+    outcome (صعودی/نزولی برای همان ارز)، beat (بالاتر/پایین‌تر از انتظار)، و
+    effect: **تأثیرِ همان نتیجه** روی جفت‌ارزهای آن ارز و طلا/نقره.
     مقایسه فقط با پیش‌بینیِ عددی است؛ اگر پیش‌بینی یا اعلام‌شده عدد نبود، حکمِ
     «نامعلوم» صادر می‌شود (هرگز حدس نمی‌زنیم)."""
     a, f, p = _num(actual), _num(forecast), _num(previous)
     if a is None:
-        return {"found": False, "outcome": "", "dir": "", "beat": ""}
+        return {"found": False, "outcome": "", "dir": "", "beat": "",
+                "effect": {"pairs": [], "gold": None}}
     res = {"found": True, "actual": (actual or "").strip()}
     if f is None:
         # عدد اعلام شده ولی انتظارِ عددی نبوده: جهت را نمی‌سازیم (حدس ممنوع).
@@ -282,13 +296,16 @@ def _verdict(actual, forecast, previous, mode):
                           else "نزولی" if res["dir"] == "ضعیف‌تر" else "خنثی")
     res["forecast"] = (forecast or "").strip()
     res["previous"] = (previous or "").strip()
+    res["effect"] = _realized_effect(ccy, res.get("dir") or "")
     return res
 
 
 def _attach_verdicts(events):
     """تزریقِ «حکمِ قطعی» به هر رویدادِ گذشته: تطبیقِ FF×TE روی (کشور، تاریخِ GMT،
     دقیقه‌ی GMT ±۱۰)؛ عددِ اعلام‌شده فقط از منبعِ ستونِ Actual می‌آید و اگر منبع
-    در دسترس نبود، حکمِ «منبعِ اعلام‌شده در دسترس نبود» می‌مانَد — نه گزاره‌ی شرطی."""
+    در دسترس نبود، حکمِ «منبعِ اعلام‌شده در دسترس نبود» می‌مانَد — نه گزاره‌ی شرطی.
+    حکم شاملِ **تأثیرِ همان نتیجه** هم هست (`effect`)، پس آرشیو هیچ گزاره‌ی
+    «اگر بالاتر/پایین‌تر شد → …»ی نشان نمی‌دهد."""
     try:
         rows = M.get_actuals() or []
     except Exception:
@@ -302,18 +319,19 @@ def _attach_verdicts(events):
         utc = dt.astimezone(datetime.timezone.utc)
         minute = utc.hour * 60 + utc.minute
         v = {"found": False, "outcome": "", "dir": "", "beat": "",
-             "actual": "", "forecast": "", "previous": ""}
+             "actual": "", "forecast": "", "previous": "",
+             "effect": {"pairs": [], "gold": None}}
         for r in rows:
             if (r.get("ccy") != ev.get("country") or r.get("date") != utc.date().isoformat()
                     or r.get("minute") is None or abs(r["minute"] - minute) > 10):
                 continue
             if r.get("event") and ev.get("title") and not _titles_match(r["event"], ev["title"]):
                 continue  # چند خبر در همان دقیقه؛ نام نزدیک‌ترین است
-            an = _analysis(ev.get("title"), ev.get("country"))
+            _cat, _icon, mode, _why = _classify(ev.get("title"), ev.get("country"))
             # مقایسه با پیش‌بینیِ «همان تقویمی که کاربر دیده» (FF)؛ TE فقط عددِ Actual.
             v = _verdict(r.get("actual"), (ev.get("forecast") or "").strip(),
-                         (ev.get("previous") or "").strip(),
-                         (an.get("cat") and an.get("mode")) or "normal")
+                         (ev.get("previous") or "").strip(), mode or "normal",
+                         ev.get("country"))
             break
         ev["verdict"] = v
     return src_ok
@@ -333,9 +351,10 @@ def archive(hours=6):
     """آرشیوِ اخبارِ اعلام‌شده در `hours` ساعتِ گذشته — با **حکمِ قطعیِ نتیجه**.
 
     هر رویدادِ گذشته‌ای که عددِ اعلام‌شده‌اش (Actual) از منبعِ مکمل درآمده باشد،
-    «عدد + بالاتر/پایین‌تر از انتظار + صعودی/نزولی (قوی/ضعیف‌شدنِ ارز)» می‌گیرد؛
-    چون خبر اعلام شده، دیگر حدس و گزاره‌ی شرطی در کار نیست. اگر منبعِ اعلام‌شده
-    در دسترس نباشد، همان حالتِ شفافِ «نامعلوم» برمی‌گردد (هرگز حدس نمی‌زنیم)."""
+    «عدد + بالاتر/پایین‌تر از انتظار + صعودی/نزولی (قوی/ضعیف‌شدنِ ارز) + تأثیرِ
+    همین نتیجه روی جفت‌ارزها/طلا» می‌گیرد؛ چون خبر اعلام شده، دیگر حدس و گزاره‌ی
+    شرطی در کار نیست (نه شاخهٔ «اگر بالاتر شد» و نه «اگر پایین‌تر شد»). اگر منبعِ
+    اعلام‌شده در دسترس نباشد، همان حالتِ شفافِ «نامعلوم» برمی‌گردد (هرگز حدس نمی‌زنیم)."""
     cal = M.get_calendar()
     now = datetime.datetime.now(datetime.timezone.utc)
     start = now - datetime.timedelta(hours=max(1, int(hours)))
@@ -353,18 +372,23 @@ def archive(hours=6):
             continue
         teh = dt.astimezone(TEHRAN)
         ccy = e.get("country")
+        # عمداً `analysis`ِ دو‌شاخه‌ای (beat/miss = «اگر بالا/پایین شد») اینجا نیست:
+        # پنجرهٔ آرشیو بعد از اعلامِ خبر است، پس فقط آیکن/شاخهٔ دسته را می‌فرستیم و
+        # «نتیجه + تأثیرِ محقق» از `verdict` می‌آید. خبرهای **پیش‌رو** (build_feed)
+        # همچنان همان دو سناریو را دارند، چون عددشان هنوز اعلام نشده.
+        _cat, icon, _mode, _why = _classify(e.get("title"), ccy)
         out.append({
             "iso": dt.isoformat(),
             "title": e.get("title"),
             "title_fa": _title_fa(e.get("title")),
             "country": ccy,
             "country_fa": _ccy_fa(ccy),
+            "icon": icon,
             "impact": e.get("impact"),
             "forecast": (e.get("forecast") or "").strip(),
             "previous": (e.get("previous") or "").strip(),
             "when_fa": f"{_FA_DAYS[teh.weekday()]} {teh.strftime('%H:%M')} به‌وقتِ تهران",
             "minutes_ago": round((now - dt).total_seconds() / 60),
-            "analysis": _analysis(e.get("title"), ccy),
         })
     out.sort(key=lambda x: x["iso"], reverse=True)
     src_ok = _attach_verdicts(out)
@@ -377,9 +401,10 @@ def archive(hours=6):
         "verdicts": sum(1 for e in out if (e.get("verdict") or {}).get("found")),
         "source_ok": src_ok,
         "events": out,
-        "note": ("حکمِ هر خبر «نتیجه‌ی قطعیِ اعلام‌شده» است (عددِ Actual + صعودی/نزولی)، "
-                 "نه گزاره‌ی شرطی؛ چون خبر اعلام شده. اگر عددِ اعلام‌شده در دسترس نباشد، "
-                 "همان خبر نامعلوم اعلام می‌شود."),
+        "note": ("هر خبر فقط «نتیجه‌ی قطعیِ اعلام‌شده» + «تأثیرِ همان نتیجه» را دارد "
+                 "(عددِ Actual + صعودی/نزولی + اثرش روی جفت‌ارزها/طلا)؛ چون خبر اعلام "
+                 "شده، گزاره‌ی شرطی («اگر بالاتر شد → …») در این پنجره جایی ندارد. اگر "
+                 "عددِ اعلام‌شده در دسترس نباشد، همان خبر نامعلوم اعلام می‌شود."),
     }
 
 
