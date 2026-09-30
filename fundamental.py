@@ -196,13 +196,49 @@ def _countdown_fa(td):
     return " و ".join(parts[:2])
 
 
-def build_feed(hours=180, min_impact="Medium"):
-    """فهرستِ رویدادهای High (+ Medium) در افقِ زمانی، مرتب بر زمان، همراهِ تحلیل."""
+def _feed_past_event(e, dt, now, ccy):
+    """رویدادِ گذشتهٔ فید (عددش اعلام شده یا دارد می‌شود) — بی‌`analysis`ِ دوشاخه‌ای.
+
+    چرا جدا: فید تا لحظهٔ اعلامِ خبر دو سناریوی شرطی («اگر بالاتر… / اگر پایین‌تر…»)
+    نشان می‌دهد؛ از لحظهٔ اعلام باید خودکار به «نتیجهٔ قطعی + تأثیرِ همان نتیجه»
+    سوییچ کند. با نساختنِ beat/miss در بار، رابط فیزیکاً نمی‌تواند گزارهٔ شرطی را
+    برای این رویداد رندر کند (همان الگوی آرشیو). حکم (`verdict`) بعداً با
+    `_attach_verdicts` تزریق می‌شود."""
+    et = dt.astimezone(ET)
+    teh = dt.astimezone(TEHRAN)
+    cat, icon, _mode, _why = _classify(e.get("title"), ccy)
+    return {
+        "iso": dt.isoformat(),
+        "title": e.get("title"),
+        "title_fa": _title_fa(e.get("title")),
+        "country": ccy,
+        "country_fa": _ccy_fa(ccy),
+        "icon": icon,
+        "cat": cat,
+        "impact": e.get("impact"),
+        "forecast": (e.get("forecast") or "").strip(),
+        "previous": (e.get("previous") or "").strip(),
+        "et": f"{_FA_DAYS[et.weekday()]} {et.strftime('%H:%M')} به‌وقتِ نیویورک",
+        "tehran": f"{_FA_DAYS[teh.weekday()]} {teh.strftime('%Y-%m-%d %H:%M')} به‌وقتِ تهران",
+        "tehran_short": teh.strftime("%m-%d %H:%M"),
+        "passed": True,
+        "minutes_ago": round((now - dt).total_seconds() / 60),
+    }
+
+
+def build_feed(hours=180, min_impact="Medium", past_hours=6):
+    """فهرستِ رویدادها از `past_hours` ساعتِ گذشته تا افقِ زمانی، مرتب بر زمان.
+
+    رویدادهای **پیشِ رو**: دو سناریوی شرطی (`analysis`) — عدد هنوز اعلام نشده.
+    رویدادهای **گذشته**: `passed=True` + حکمِ قطعی (`verdict`) با «نتیجه + تأثیرِ
+    محقق» و **بی‌`analysis`** — فید بعد از اعلام، خودکار سوییچ می‌کند؛ نه دو
+    سناریوی همیشگی."""
     cal = M.get_calendar()
     now = datetime.datetime.now(datetime.timezone.utc)
     horizon = now + datetime.timedelta(hours=hours)
+    floor = now - datetime.timedelta(hours=max(0, int(past_hours)))
     want = {"High"} if min_impact == "High" else {"High", "Medium"}
-    out = []
+    out, past = [], []
     for e in cal:
         if e.get("impact") not in want:
             continue
@@ -212,11 +248,14 @@ def build_feed(hours=180, min_impact="Medium"):
             continue
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=ET)
-        if not (now <= dt <= horizon):
+        if not (floor <= dt <= horizon):
+            continue
+        ccy = e.get("country")
+        if dt < now:
+            past.append(_feed_past_event(e, dt, now, ccy))
             continue
         et = dt.astimezone(ET)
         teh = dt.astimezone(TEHRAN)
-        ccy = e.get("country")
         out.append({
             "iso": dt.isoformat(),
             "title": e.get("title"),
@@ -231,8 +270,12 @@ def build_feed(hours=180, min_impact="Medium"):
             "tehran_short": teh.strftime("%m-%d %H:%M"),
             "in_hours": round((dt - now).total_seconds() / 3600, 1),
             "countdown": _countdown_fa(dt - now),
+            "passed": False,
             "analysis": _analysis(e.get("title"), ccy),
         })
+    if past:
+        _attach_verdicts(past)  # «نتیجه + تأثیرِ محقق» برای رویدادهای اعلام‌شده
+        out.extend(past)
     out.sort(key=lambda x: x["iso"])
     return out
 
@@ -408,18 +451,30 @@ def archive(hours=6):
     }
 
 
-def build(hours=180):
-    feed = build_feed(hours=hours)
-    highs = [e for e in feed if e["impact"] == "High"]
+def build(hours=180, past_hours=6):
+    feed = build_feed(hours=hours, past_hours=past_hours)
+    # «نزدیک‌ترین خبرِ پرتأثیر» فقط از میانِ رویدادهای پیشِ‌رو است؛ رویدادِ
+    # اعلام‌شده دیگر «نزدیک‌ترین» نیست — نتیجه‌اش گرفته شده و در فهرست می‌مانَد.
+    highs = [e for e in feed if e["impact"] == "High" and not e.get("passed")]
+    passed = [e for e in feed if e.get("passed")]
+    src_ok = None
+    if passed:
+        try:
+            src_ok = bool(M.get_actuals() or [])
+        except Exception:
+            src_ok = False
     now_teh = datetime.datetime.now(TEHRAN)
     return {
         "generated_tehran": f"{_FA_DAYS[now_teh.weekday()]} {now_teh.strftime('%Y-%m-%d %H:%M')} تهران",
         "count": len(feed),
+        "count_past": len(passed),
         "count_high": len(highs),
         "next_high": highs[0] if highs else None,
+        "source_ok": src_ok,
         "events": feed,
         "note": ("آنچه بازار را تکان می‌دهد «انحراف از پیش‌بینی» است، نه خودِ عدد. دورِ "
-                 "±۱۵ تا ۳۰ دقیقه‌ی هر خبرِ پرتأثیر، ورودِ تازه ممنوع؛ اجازه بده فِیک‌اوتِ اولیه پاک شود."),
+                 "±۱۵ تا ۳۰ دقیقه‌ی هر خبرِ پرتأثیر، ورودِ تازه ممنوع؛ اجازه بده فِیک‌اوتِ اولیه پاک شود. "
+                 "خبری که عددش اعلام شده، از دو سناریو به «نتیجه + تأثیرِ محقق» سوییچ می‌کند."),
     }
 
 
