@@ -1806,6 +1806,23 @@ _ARC_ACTUAL_NUM_RE = re.compile(r'arc-num">\$\{v\.actual\}')
 _ARC_ABSENT_RE = re.compile(r"منبعِ پاسخ نداد")
 _ARCHIVE_NOTE_RE = re.compile(r"نتیجه")
 
+# ── قراردادِ «کلیدِ بی‌واکنش نداریم» (لایهٔ ۴.۱۷) ───────────────────────────
+# شکایتِ واقعیِ کاربر: «چک کن خیلی از کلیدا رو از کار انداختی — مثلاً فاندمنتال و
+# روزرسانی». راستی‌آزماییِ زندهٔ اپ نشان داد دو بی‌صداییِ **واقعی** وجود دارد:
+#  (۱) کلیدِ فاندمنتال تنها جایی است که `window.open` می‌زند؛ در نصبِ PWA
+#      (display-mode: standalone) یا با پاپ‌آپ‌بلاکر NULL برمی‌گرداند و کلید
+#      بی‌صدا می‌مُرد (نه تبی، نه پیامی) ⇒ تورِ ایمنیِ «همین‌تب» اجباری است.
+#  (۲) پیامِ «چیزی برای بروزرسانی نیست» داخلِ `.rf-live` می‌رفت که عمداً sr-only
+#      است (width:1px برای صفحه‌خوان) ⇒ روی نمایشگر دیده نمی‌شد.
+_FUND_HANDLER_RE = re.compile(r"fundBtn\.onclick\s*=\s*\(\)\s*=>\s*\{(.*?)\n\s*\};", re.S)
+_FUND_ARROW_RE = re.compile(r"(fundBtn\.onclick\s*=\s*\(\)\s*=>\s*\{.*?\n\s*\};)", re.S)
+_NEWTAB_OPEN_RE = re.compile(r"window\.open\s*\(")
+_FUND_NULL_GUARD_RE = re.compile(r"if\s*\(\s*!\s*[A-Za-z_$][\w$]*\s*\)")
+_FUND_SAME_TAB_RE = re.compile(r"location\.assign\(\s*[\"']/fundamental[\"']\s*\)")
+_RF_HINT_DOM_RE = re.compile(r"rf-hint")
+_RF_NEED_JS_RE = re.compile(r"classList\.add\(\s*[\"']need[\"']\s*\)")
+_RF_NEED_CSS_RE = re.compile(r"\.rf-btn\.need\s*\{")
+
 
 def archive_problems(root, pages=None):
     """قراردادِ «نتیجهٔ قطعی در آرشیو»: زنجیرهٔ Actual → حکم → رندرِ مطلق سالم بماند."""
@@ -1852,6 +1869,52 @@ def archive_problems(root, pages=None):
             stats["render"] = True
         stats["outcomes"] = len(re.findall(r"صعودی|نزولی", page))
         stats["note"] = bool(_ARCHIVE_NOTE_RE.search(page))
+    return probs, stats
+
+
+def button_alive_problems(root, pages=None):
+    """قراردادِ «کلیدِ بی‌واکنش نداریم»: هر کلیدی که تبِ نو باز می‌کند تورِ ایمنیِ
+    «همین‌تب» داشته باشد، و پیامِ «کاری نبود» فقط sr-only نباشد."""
+    probs = []
+    stats = {"newtab": 0, "fund_guard": False, "fund_fallback": False,
+             "rf_visible": False, "rf_flash": False}
+    page = (pages or {}).get("HTML") or ""
+    if not page:
+        probs.append("app.py → متنِ APP_PAGE خوانده نشد — کلیدها سنجیده نمی‌شوند")
+        return probs, stats
+
+    stats["newtab"] = len(_NEWTAB_OPEN_RE.findall(page))
+    m = _FUND_HANDLER_RE.search(page)
+    if m is None:
+        probs.append("app.py · کلیدِ فاندمنتال (fundBtn) اصلاً هندلر ندارد — "
+                     "کلیک هیچ کاری نمی‌کند")
+    else:
+        blk = m.group(1)
+        has_newtab = _NEWTAB_OPEN_RE.search(blk) is not None
+        if not has_newtab and _FUND_SAME_TAB_RE.search(blk) is None:
+            probs.append("app.py · هندلرِ فاندمنتال هیچ ناوبری‌ای به صفحهٔ فاندمنتال "
+                         "ندارد — کلید بی‌اثر است")
+        if has_newtab and _FUND_NULL_GUARD_RE.search(blk) is None:
+            probs.append("app.py · هندلرِ فاندمنتال نتیجهٔ window.open را نمی‌سنجد — "
+                         "با پاپ‌آپ‌بلاکر یا نصبِ PWA کلید بی‌صدا می‌مُرد")
+        elif has_newtab:
+            stats["fund_guard"] = True
+        if _FUND_SAME_TAB_RE.search(blk) is None:
+            probs.append("app.py · کلیدِ فاندمنتال تورِ ایمنیِ «همین‌تب» ندارد "
+                         "(location.assign(\"/fundamental\")) — در نصبِ PWA کلید از کار می‌افتد")
+        else:
+            stats["fund_fallback"] = True
+
+    if _RF_HINT_DOM_RE.search(page) is None:
+        probs.append("app.py · پیامِ دیدنیِ «چیزی برای بروزرسانی نیست» (rf-hint) حذف شده — "
+                     "کلید در این حالت بی‌واکنش به‌نظر می‌رسد")
+    else:
+        stats["rf_visible"] = True
+    if _RF_NEED_JS_RE.search(page) is None or _RF_NEED_CSS_RE.search(page) is None:
+        probs.append("app.py · کلیدِ بروزرسانی در حالتِ «کاری نبود» هیچ واکنشِ دیدنی‌ای روی "
+                     "خودش ندارد (کلاسِ need در JS/CSS) — کلیک بی‌پاسخ می‌مانَد")
+    else:
+        stats["rf_flash"] = True
     return probs, stats
 
 
@@ -1982,6 +2045,14 @@ def run_checks(root, live=False, enforce_contract=True, accept_removals=False):
     arp, arstats = archive_problems(root, pages)
     rep["archive"] = arstats
     rep["problems"] += [f"آرشیوِ اقتصادی → {p}" for p in arp]
+
+    # ── چکِ استاتیکِ «کلیدِ بی‌واکنش نداریم» ──
+    # شکایتِ کاربر («کلیدا از کار افتادن»): کلیدِ تبِ نو و پیامِ sr-only دو
+    # بی‌صداییِ واقعی‌اند؛ اگر کسی تورِ ایمنی/واکنشِ دیدنی را بردارد این قاعده
+    # همان‌جا می‌گیرد (نه روزی که کاربر دوباره بگوید «کلیک می‌کنم هیچی نمی‌شود»).
+    bap, bastats = button_alive_problems(root, pages)
+    rep["buttons"] = bastats
+    rep["problems"] += [f"کلیدهای بی‌واکنش → {p}" for p in bap]
 
     inv = inventory(pages)
     inv["routes"] = routes_of(root)
@@ -2146,6 +2217,13 @@ def _human(rep):
             f" · حکمِ قطعی: {'✓' if ar.get('verdict') else '✗'}"
             f" · رندرِ مطلق: {'✓' if ar.get('render') else '✗'}"
             f" · صعودی/نزولی در صفحه: {ar.get('outcomes', 0)}")
+    ba = rep.get("buttons") or {}
+    if ba:
+        lines.append(
+            f"   کلیدِ بی‌واکنش نداریم: تورِ ایمنیِ فاندمنتال: "
+            f"{'✓' if ba.get('fund_fallback') and ba.get('fund_guard') else '✗'}"
+            f" · واکنشِ دیدنیِ بروزرسانی: {'✓' if ba.get('rf_visible') and ba.get('rf_flash') else '✗'}"
+            f" · کلیدهای تبِ نو: {ba.get('newtab', 0)}")
     nt = rep.get("notify") or {}
     if nt:
         lines.append(

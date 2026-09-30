@@ -1656,6 +1656,11 @@ tr.on td{background:rgba(34,197,94,.05)}
 .rf-btn.ok .rf-spin{opacity:0;transform:scale(.72)}
 .rf-btn.ok .rf-check{opacity:1;transform:none}
 .rf-btn.ok .rf-check svg path{stroke-dasharray:24;stroke-dashoffset:24;animation:rfdraw .36s cubic-bezier(.2,.9,.3,1) .04s forwards}
+/* «چیزی برای بروزرسانی نیست»: کلید لحظه‌ای نارنجی می‌شود تا کلیکِ بی‌واکنش بی‌پاسخ نمانَد */
+.rf-btn.need{border-color:var(--warn);color:var(--warn);
+  background:linear-gradient(180deg,rgba(245,158,11,.16),rgba(245,158,11,.05));
+  box-shadow:0 0 0 1px rgba(245,158,11,.2),0 6px 20px rgba(245,158,11,.14)}
+.rf-btn.need .rf-lbl{opacity:.95}
 @keyframes rfrot{to{transform:rotate(360deg)}}
 @keyframes rfdash{0%{stroke-dasharray:8 49;stroke-dashoffset:8}
   50%{stroke-dasharray:30 27;stroke-dashoffset:-8}
@@ -2188,11 +2193,24 @@ if(refreshBtn){
   // (قبلاً دکمه disabled بود و کلیک هیچ واکنشی نداشت — به‌نظرِ «دکمهٔ خراب» می‌آمد.)
   // هیچ پنجره/فوکوسی را نمی‌قاپد: فقط پیام می‌دهد. (بازکردنِ فهرستِ نمادها روی کلیکِ
   // «بروزرسانی» خودِ تجربه را خراب می‌کرد — خواستهٔ کاربر: دکمه باید خودش کار کند.)
+  // ⚠ اینجا یک بی‌صداییِ واقعی رفع شد: `.rf-live` عمداً sr-only است
+  // (`width:1px` برای صفحه‌خوان)، پس پیامِ «چیزی برای بروزرسانی نیست» روی
+  // نمایشگر *دیده نمی‌شد* — و در مسیری که کادرِ نتیجه از قبل محتوا داشت، هیچ
+  // واکنشِ دیدنی‌ای نمی‌ماند و کلید «خراب» به‌نظر می‌رسید. الان پیامِ دیدنی
+  // همیشه بالای کادرِ نتیجه می‌نشیند و خودِ کلید هم لحظه‌ای رنگِ هشدار می‌گیرد.
   const rfTell=()=>{
-    if(res && !res.innerHTML.trim())
-      res.innerHTML='<div class="status">چیزی برای بروزرسانی نیست: در این صفحه هنوز تحلیلی ثبت نشده و کادرِ نماد هم خالی است. یک نماد را در کادرِ بالا بنویس (یا از فهرست انتخاب کن) و بعد همین دکمه را بزن.</div>';
+    const msg='چیزی برای بروزرسانی نیست: در این صفحه هنوز تحلیلی ثبت نشده و کادرِ نماد هم خالی است. یک نماد را در کادرِ بالا بنویس (یا از فهرست انتخاب کن) و بعد همین دکمه را بزن.';
+    if(res){
+      const prev=res.querySelector(".rf-hint"); if(prev) prev.remove();
+      const st=document.createElement("div"); st.className="status rf-hint"; st.textContent=msg;
+      res.insertBefore(st, res.firstChild);        // پیامِ دیدنی، بالای هر محتوای قبلی
+      if(res.scrollIntoView) res.scrollIntoView({block:"nearest"});
+    }
     rfSay("چیزی برای بروزرسانی نیست — اول یک نماد را انتخاب یا تحلیل کن.");
     refreshBtn.title="هنوز چیزی برای بروزرسانی نیست؛ اول یک نماد را تحلیل کن.";
+    // پاسخِ دیدنی روی خودِ کلید (وگرنه کلیک بی‌واکنش به‌نظر می‌رسد)
+    refreshBtn.classList.add("need");
+    setTimeout(()=>refreshBtn.classList.remove("need"), 2200);
   };
   // اگر این صفحه تحلیلی ندارد، از حافظه‌ی سرور استفاده کن: آخرین تحلیلِ ثبت‌شده (حتی
   // از نشستِ قبلی) — پس «بروزرسانی» روی اپِ تازه‌باز هم کاری برای انجام دارد.
@@ -2759,8 +2777,18 @@ if(setupsBtn && setupsPanel){
 renderSetups(null);
 
 // دکمه‌ی فاندمنتال — صفحه‌ی جداگانه‌ی اخبارِ اقتصادی را در تبِ نو باز می‌کند
+// ⚠ تورِ ایمنیِ لازم (شکایتِ واقعیِ کاربر: «کلیدا از کار افتادن — مثلاً فاندمنتال»):
+// در نصبِ PWA (حالتِ display-mode: standalone) و با پاپ‌آپ‌بلاکر، `window.open`
+// **NULL** برمی‌گرداند و کلید بی‌صدا می‌مُرد (نه تبی، نه پیامی). پس اگر تبِ نو
+// نیامد، همان تب به صفحه‌ی فاندمنتال می‌رود — «کلیدِ بی‌واکنش» ممنوع.
 const fundBtn=document.getElementById("fundBtn");
-if(fundBtn){ fundBtn.onclick=()=>window.open("/fundamental","_blank","noopener"); }
+if(fundBtn){
+  fundBtn.onclick=()=>{
+    let tab=null;
+    try{ tab=window.open("/fundamental","_blank","noopener"); }catch(e){ tab=null; }
+    if(!tab) location.assign("/fundamental");
+  };
+}
 
 // دکمه‌ی 📲 نصب روی دستگاه — آدرسِ قابل‌اشتراک + راهنمای هر پلتفرم + رویدادِ نصب
 (function(){
