@@ -1337,8 +1337,10 @@ function loadPuppeteer() {
      می‌شود که حالتش در این پنجره واقعاً موجود باشد — اگر رویدادِ اعلام‌شده‌ای
      نبود، «رکوردِ خالی» یادداشت می‌شود، نه سبزِ بی‌ادعا. */
   try {
-    await page.goto(new URL("/fundamental", URL).href,
-      { waitUntil: "domcontentloaded", timeout: 45000 });
+    // توجه: `URL` این‌جا متغیرِ خودِ اسکریپت (آدرسِ پایه) است و سازندهٔ سراسریِ
+    // `URL` را سایه می‌اندازد؛ پس آدرس با رشته ساخته می‌شود، نه `new URL(...)`.
+    const feedUrl = String(URL).replace(/\/+$/, "") + "/fundamental";
+    await page.goto(feedUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
     const fd = await page.evaluate(async () => {
       const wait = (ms) => new Promise((r) => setTimeout(r, ms));
       for (let i = 0; i < 60; i++) {
