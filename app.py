@@ -1740,6 +1740,22 @@ tr.on td{background:rgba(34,197,94,.05)}
 .alarms-dock{margin-top:22px;background:var(--panel);border:1px solid var(--line);
   border-radius:18px;padding:18px}
 .alarms-dock h2{font-size:16px;margin:0 0 12px;display:flex;align-items:center;gap:8px}
+/* کرکره‌ی «پشتیبان و انتقالِ داده» — خواستهٔ کاربر: نمای اصلی شلوغ/بچه‌گونه نباشد.
+   الگو همان کرکره‌ی «ستاپ‌ها»ست: یک نوارِ کلیدپذیر که بدنه‌ی گزینه‌ها را باز می‌کند. */
+.bk-dock{padding:0;overflow:hidden}
+.bk-head{margin:0;font-size:16px}
+.bk-toggle{width:100%;display:flex;align-items:center;gap:10px;padding:16px 18px;
+  background:transparent;border:none;color:var(--txt);font-family:inherit;
+  font-size:16px;font-weight:800;cursor:pointer;text-align:right;
+  white-space:nowrap}
+.bk-toggle:hover{background:rgba(77,163,255,.06)}
+.bk-toggle .arr{margin-right:auto;color:var(--muted);transition:.2s;font-size:12px}
+.bk-dock.open .bk-toggle .arr{transform:rotate(180deg)}
+.bk-st{margin-right:8px;font-weight:600;font-size:12px;color:var(--muted);
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bk-body{display:none;padding:0 18px 16px;border-top:1px dashed var(--line)}
+.bk-dock.open .bk-body{display:block}
+.bk-note{color:var(--muted);font-size:12px;margin:10px 0 0;line-height:1.8}
 .alarm-item{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--panel2);
   border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:8px;font-size:13px}
 .alarm-item.trig{border-color:rgba(34,197,94,.5);background:rgba(34,197,94,.08)}
@@ -1914,8 +1930,17 @@ input.abnum{flex:0 0 86px;min-width:86px;text-align:center;direction:ltr;
     <div id="alarmsList"><div class="aempty">هنوز آلارمی نگذاشته‌ای.</div></div>
   </div>
 
-  <div class="alarms-dock">
-    <h2>📦 پشتیبان و انتقالِ داده <span class="jmsg">(ژورنال، آلارم‌ها و تنظیماتِ ریسک — در یک فایلِ JSON)</span></h2>
+  <div class="alarms-dock bk-dock" id="bkDock">
+    <h2 class="bk-head">
+      <button id="bkToggle" class="bk-toggle" type="button" aria-expanded="false" aria-controls="bkBody"
+              title="پشتیبانِ داده و انتقالِ آن: برون‌بری/درون‌بریِ JSON، پشتیبانِ خودکارِ زمان‌بندی‌شده و برگرداندنِ نسخه‌ها. برای دیدنِ گزینه‌ها روی همین نوار کلیک کن.">
+        📦 پشتیبان و انتقالِ داده
+        <span class="bk-st jmsg" id="bkState">در حالِ خواندن…</span>
+        <span class="arr" aria-hidden="true">▾</span>
+      </button>
+    </h2>
+    <div class="bk-body" id="bkBody">
+    <p class="bk-note">📁 ژورنال، آلارم‌ها و تنظیماتِ ریسک — همه در یک فایلِ JSON. این بخش جمع شده است تا نمای اصلی تمیز بماند؛ برای گزینه‌ها روی نوارِ بالا کلیک کن. پشتیبانِ خودکار هم بی‌سروصدا در پس‌زمینه کار می‌کند.</p>
     <div class="uprow">
       <input type="file" id="impFile" accept="application/json,.json" style="display:none">
       <button class="upbtn" id="expBtn" title="کلِ دادهٔ تو (ردیف‌های ژورنال، آلارم‌ها و تنظیماتِ ریسک) را به‌شکلِ یک فایلِ JSON برون‌بری می‌کند؛ همان فایل را روی دستگاهِ تازه درون‌بری کن تا از صفر شروع نکنی.">⬇️ برون‌بری (JSON)</button>
@@ -1938,6 +1963,7 @@ input.abnum{flex:0 0 86px;min-width:86px;text-align:center;direction:ltr;
     </div>
     <div class="riskstat" id="abStat">در حالِ خواندنِ وضعیتِ پشتیبانِ خودکار…</div>
     <div id="abList"></div>
+    </div>
   </div>
 
   <div class="livewrap">
@@ -3269,6 +3295,20 @@ async function pfImportData(){
     loadAlarms(); loadRisk();
   }catch(e){ pfBkMsg("⚠ درون‌بری نشد: "+e, true); }
 }
+// ── کرکرهٔ «پشتیبان و انتقالِ داده»: پیش‌فرض بسته است تا نمای اصلی تمیز بماند
+// (خواستهٔ کاربر: صفحه شلوغ/بچه‌گونه دیده نشود). یک نوارِ کلیدپذیر بدنهٔ گزینه‌ها را
+// باز/بسته می‌کند و خلاصهٔ وضعیتِ پشتیبانِ خودکار هم در همان نوار نشان می‌رود.
+const bkToggle=document.getElementById("bkToggle"), bkDock=document.getElementById("bkDock"),
+      bkBody=document.getElementById("bkBody");
+if(bkToggle&&bkDock&&bkBody){
+  const bkPaint=()=>{
+    const open=bkDock.classList.contains("open");
+    bkToggle.setAttribute("aria-expanded", open?"true":"false");
+    bkBody.setAttribute("aria-hidden", open?"false":"true");
+  };
+  bkToggle.onclick=()=>{ bkDock.classList.toggle("open"); bkPaint(); };
+  bkPaint();
+}
 const expBtn=document.getElementById("expBtn"), impBtn=document.getElementById("impBtn"), impFile=document.getElementById("impFile");
 if(expBtn) expBtn.onclick=pfExportData;
 if(impBtn&&impFile) impBtn.onclick=()=>impFile.click();
@@ -3307,6 +3347,10 @@ async function loadAutobackup(){
       st.textContent="📦 "+j.count+" نسخه ("+pfAbBytes(j.total_bytes)+") · نگه‌داشتِ "+cf.keep
         +" نسخه · هر "+cf.interval_h+" ساعت · "+when+" · پوشه: "+j.dir;
     }
+    const bs=document.getElementById("bkState");
+    if(bs) bs.textContent = cf.enabled
+      ? "· پشتیبانِ خودکار روشن · هر "+cf.interval_h+" ساعت · "+j.count+" نسخه"
+      : "· پشتیبانِ خودکار خاموش";
     const list=document.getElementById("abList");
     if(list){
       const rows=(j.backups||[]).map(b=>
@@ -3317,7 +3361,11 @@ async function loadAutobackup(){
       list.innerHTML = rows || '<div class="aempty">هنوز نسخه‌ای ساخته نشده.</div>';
       list.querySelectorAll(".abrestore").forEach(b=>{ b.onclick=()=>pfAbRestore(b.dataset.name); });
     }
-  }catch(e){ if(st) st.textContent="⚠ وضعیتِ پشتیبانِ خودکار خوانده نشد: "+e; }
+  }catch(e){
+    if(st) st.textContent="⚠ وضعیتِ پشتیبانِ خودکار خوانده نشد: "+e;
+    const bs=document.getElementById("bkState");
+    if(bs) bs.textContent="· ⚠ خوانده نشد";
+  }
 }
 async function pfAbSave(){
   const tg=document.getElementById("abToggle"), ev=document.getElementById("abEvery"), kp=document.getElementById("abKeep");
