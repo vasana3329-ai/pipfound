@@ -35,12 +35,13 @@ const REQUIRED = ["go", "bt", "sym", "syms", "styles", "chips", "refreshBtn",
   "archiveBtn", "fundBtn", "sbBtn", "setupsBtn", "result", "btPanel",
   "setupsPanel", "alarmsDock", "tvBox", "shotGrid", "lightbox", "revChip",
   "dataChip", "riskPanel", "rkBalance", "rkRisk", "rkDaily", "rkOpen",
-  "rkStat", "rkSave", "installBtn", "bkDock", "bkToggle", "bkBody", "bkState"];
+  "rkStat", "rkSave", "installBtn", "bkDock", "bkToggle", "bkBody", "bkState",
+  "alarmsToggle", "alarmsBody", "btToggle", "btBody", "rkToggle", "rkBody"];
 const HANDLER_IDS = new Set(["rkSave", "installBtn"]);   // وایر داخلِ IIFE — با CDP سنجیده می‌شود
 /* کنترل‌هایی که اپ با `.onclick =` به آن‌ها هندلر می‌دهد؛ اگر این‌ها تابع نباشند
    یعنی بلوکِ اسکریپت اجرا نشده یا نیمه‌کاره مرده است. */
 const WIRED = ["go", "refreshBtn", "bt", "setupsBtn", "fundBtn", "archiveBtn",
-  "rkSave", "bkToggle"];
+  "rkSave", "bkToggle", "alarmsToggle", "btToggle", "rkToggle"];
 const LISTENER_ONLY = ["sbBtn", "styles", "installBtn"];
 
 const problems = [];
@@ -1124,69 +1125,80 @@ function loadPuppeteer() {
     fail("بررسیِ سرویس‌ورکر/آفلاین ممکن نشد: " + e.message);
   }
 
-  /* ۶.۹) کرکره‌ی «پشتیبان و انتقالِ داده» — خواسته‌ی کاربر: «اون بخش فقط یه کلید
-     باشه که روش کلیک بشه و کرگره گزینه‌هاش باز بشه؛ الان صفحه اصلی رو شلوغ و
-     بچه‌گونه نشون می‌ده». قراردادِ سه‌مرحله‌ای در مرورگرِ واقعی: (۱) در بارگذاری
-     نوار بسته است و گزینه‌ها **دیده نمی‌شوند**؛ (۲) یک کلیک روی نوار بدنه را باز
-     می‌کند و گزینه‌ها واقعاً کلیک‌پذیر می‌شوند (روی‌شان چیزی نمی‌افتد)؛ (۳) کلیکِ
-     دوباره می‌بندد. این رفتارِ رندرشده را هیچ چکِ متنی نمی‌بیند. */
+  /* ۶.۹) کرکره‌های نمای اصلی (آلارم‌ها · بک‌تست · ریسک · پشتیبانِ داده) — خواسته‌ی
+     کاربر: «این بخش‌ها فقط یه کلید باشن که روش کلیک بشه و کرکره‌شون باز بشه؛
+     الان صفحه اصلی رو شلوغ و بچه‌گونه نشون می‌ده». قراردادِ سه‌مرحله‌ای برای هر
+     چهار بخش در مرورگرِ واقعی: (۱) در بارگذاری نوار بسته است و محتوای داخل
+     **دیده نمی‌شود**؛ (۲) یک کلیک روی نوار بدنه را باز می‌کند و کنترلِ داخلش
+     واقعاً کلیک‌پذیر می‌شود (رویش چیزی نمی‌افتد)؛ (۳) کلیکِ دوباره می‌بندد.
+     این رفتارِ رندرشده را هیچ چکِ متنی نمی‌بیند. */
   try {
-    const dock = await page.evaluate(async () => {
+    const FOLDS = [
+      { box: "alarmsDock", toggle: "alarmsToggle", body: "alarmsBody", inner: "alarmsList" },
+      { box: "btPanel", toggle: "btToggle", body: "btBody", inner: "btFrom" },
+      { box: "riskPanel", toggle: "rkToggle", body: "rkBody", inner: "rkSave" },
+      { box: "bkDock", toggle: "bkToggle", body: "bkBody", inner: "expBtn" },
+    ];
+    const folds = await page.evaluate(async (specs) => {
       const wait = (ms) => new Promise((r) => setTimeout(r, ms));
-      const d = document.getElementById("bkDock"), b = document.getElementById("bkBody"),
-            t = document.getElementById("bkToggle"), ex = document.getElementById("expBtn"),
-            st = document.getElementById("bkState");
-      if (!d || !b || !t || !ex) return { missing: "bkDock/bkBody/bkToggle/expBtn" };
       const disp = (el) => getComputedStyle(el).display;
       const visible = (el) => { const r = el.getBoundingClientRect(); return r.height > 0 && r.width > 0; };
-      const out = { atLoad: { open: d.classList.contains("open"), display: disp(b),
-                              optsVisible: visible(ex), aria: t.getAttribute("aria-expanded"),
-                              summary: st ? (st.textContent || "").trim() : null } };
-      t.click(); await wait(90);
-      // ⚠ elementFromPoint با مختصاتِ **ویوپورت** کار می‌کند؛ اگر بخشِ بازشده زیرِ
-      // تای صفحه باشد مقدارِ null می‌دهد و ادعای «کلیک‌پذیر» دروغ می‌شود. پس اول
-      // خودِ کرکره را وسطِ صفحه می‌آوریم و بعد نقطه‌ی مرکزِ گزینه را می‌سنجیم.
-      d.scrollIntoView({ block: "center" });
-      await wait(80);
-      const r2 = ex.getBoundingClientRect();
-      const under = document.elementFromPoint((r2.left + r2.right) / 2, (r2.top + r2.bottom) / 2);
-      out.opened = { open: d.classList.contains("open"), display: disp(b),
-                     optsVisible: visible(ex), aria: t.getAttribute("aria-expanded"),
-                     inView: r2.top >= 0 && r2.bottom <= innerHeight,
-                     clickable: !!under && ex.contains(under) };
-      t.click(); await wait(90);
-      out.closedAgain = { open: d.classList.contains("open"), display: disp(b),
-                          aria: t.getAttribute("aria-expanded") };
+      const out = [];
+      for (const s of specs) {
+        const box = document.getElementById(s.box), t = document.getElementById(s.toggle),
+              b = document.getElementById(s.body), inner = document.getElementById(s.inner),
+              st = box ? box.querySelector(".fold-st") : null;
+        if (!box || !t || !b || !inner) { out.push({ box: s.box, missing: true }); continue; }
+        const rec = { box: s.box, atLoad: { open: box.classList.contains("open"), display: disp(b),
+                      innerVisible: visible(inner), aria: t.getAttribute("aria-expanded"),
+                      summary: st ? (st.textContent || "").trim() : null } };
+        t.click(); await wait(90);
+        // ⚠ elementFromPoint با مختصاتِ **ویوپورت** کار می‌کند؛ اگر بخشِ بازشده زیرِ
+        // تای صفحه باشد مقدارِ null می‌دهد و ادعای «کلیک‌پذیر» دروغ می‌شود. پس اول
+        // خودِ کرکره را وسطِ صفحه می‌آوریم و بعد نقطه‌ی مرکزِ کنترل را می‌سنجیم.
+        box.scrollIntoView({ block: "center" });
+        await wait(80);
+        const r2 = inner.getBoundingClientRect();
+        const under = document.elementFromPoint((r2.left + r2.right) / 2, (r2.top + r2.bottom) / 2);
+        rec.opened = { open: box.classList.contains("open"), display: disp(b),
+                       innerVisible: visible(inner), aria: t.getAttribute("aria-expanded"),
+                       inView: r2.top >= 0 && r2.bottom <= innerHeight,
+                       clickable: !!under && inner.contains(under) };
+        t.click(); await wait(90);
+        rec.closedAgain = { open: box.classList.contains("open"), display: disp(b),
+                            aria: t.getAttribute("aria-expanded") };
+        out.push(rec);
+      }
       return out;
-    });
-    if (dock.missing) fail("کرکره‌ی پشتیبان ناقص است: " + dock.missing + " پیدا نشد");
-    else {
-      if (dock.atLoad.open)
-        fail("کرکره‌ی پشتیبان در بارگذاری باز است — بخشِ پشتیبان باید جمع باشد");
-      if (dock.atLoad.display !== "none")
-        fail("بدنه‌ی کرکره‌ی پشتیبان در بارگذاری نمایش داده می‌شود (display=" + dock.atLoad.display + ")");
-      if (dock.atLoad.optsVisible)
-        fail("گزینه‌های پشتیبان در بارگذاری دیده می‌شوند — نمای اصلی شلوغ می‌مانَد");
-      if (dock.atLoad.aria !== "false")
-        fail("نوارِ کرکره‌ی پشتیبان aria-expanded=\"false\" ندارد (مقدار: " + dock.atLoad.aria + ")");
-      if (!dock.atLoad.summary || /در حالِ خواندن/.test(dock.atLoad.summary))
-        fail("خلاصه‌ی وضعیتِ پشتیبان روی نوارِ بسته پر نشد (متن: " + JSON.stringify(dock.atLoad.summary) + ")");
-      if (!dock.opened.open || dock.opened.display === "none")
-        fail("با یک کلیک روی نوار، بدنه‌ی کرکره‌ی پشتیبان باز نشد");
-      if (!dock.opened.optsVisible)
-        fail("پس از باز شدن، گزینه‌های پشتیبان دیده نمی‌شوند");
-      if (!dock.opened.clickable)
-        fail("پس از باز شدن، گزینه‌ی برون‌بری کلیک‌پذیر نیست (در ویوپورت: "
-          + dock.opened.inView + ") — یا چیزی رویش افتاده یا بخش بیرونِ ویوپورت است");
-      if (dock.opened.aria !== "true")
-        fail("پس از باز شدن، aria-expandedِ نوار به true به‌روز نشد");
-      if (dock.closedAgain.open || dock.closedAgain.display !== "none")
-        fail("کلیکِ دوباره روی نوار، کرکره‌ی پشتیبان را نبست");
-      notes.push(`کرکره‌ی پشتیبان: بسته در بارگذاری (${dock.atLoad.summary}) · `
-        + "باز/بسته با یک کلیک · گزینه‌ها کلیک‌پذیر ✓");
+    }, FOLDS);
+    for (const r of folds) {
+      if (r.missing) { fail(`کرکره‌ی «${r.box}» ناقص است: نوار/بدنه/کنترلِ داخلی پیدا نشد`); continue; }
+      if (r.atLoad.open) fail(`کرکره‌ی «${r.box}» در بارگذاری باز است — باید جمع باشد`);
+      if (r.atLoad.display !== "none")
+        fail(`بدنه‌ی کرکره‌ی «${r.box}» در بارگذاری دیده می‌شود (display=${r.atLoad.display})`);
+      if (r.atLoad.innerVisible)
+        fail(`محتوای کرکره‌ی «${r.box}» در بارگذاری دیده می‌شود — نمای اصلی شلوغ می‌مانَد`);
+      if (r.atLoad.aria !== "false")
+        fail(`نوارِ «${r.box}» در بارگذاری aria-expanded="false" ندارد (مقدار: ${r.atLoad.aria})`);
+      if (!r.opened.open || r.opened.display === "none")
+        fail(`با یک کلیک روی نوار، بدنه‌ی کرکره‌ی «${r.box}» باز نشد`);
+      if (!r.opened.innerVisible)
+        fail(`پس از باز شدن، محتوای کرکره‌ی «${r.box}» دیده نمی‌شود`);
+      if (!r.opened.clickable)
+        fail(`کنترلِ داخلیِ کرکره‌ی «${r.box}» کلیک‌پذیر نیست (در ویوپورت: ${r.opened.inView})`);
+      if (r.opened.aria !== "true")
+        fail(`پس از باز شدن، aria-expandedِ «${r.box}» به true به‌روز نشد`);
+      if (r.closedAgain.open || r.closedAgain.display !== "none")
+        fail(`کلیکِ دوباره کرکره‌ی «${r.box}» را نبست`);
     }
+    if (folds.some((r) => !r.missing && r.atLoad.summary && /در حالِ خواندن/.test(r.atLoad.summary)))
+      fail("خلاصه‌ی وضعیتِ یکی از کرکره‌ها با اندپوینت پر نشد");
+    const ok = folds.filter((r) => !r.missing);
+    notes.push(`کرکره‌های نمای اصلی (${ok.length}/${FOLDS.length}): `
+      + ok.map((r) => r.box + (r.atLoad.summary ? ` (${r.atLoad.summary})` : "")).join(" · ")
+      + " — همه بسته در بارگذاری، باز/بسته با یک کلیک و کنترلِ کلیک‌پذیر ✓");
   } catch (e) {
-    fail("بررسیِ کرکره‌ی پشتیبان ممکن نشد: " + e.message);
+    fail("بررسیِ کرکره‌های نمای اصلی ممکن نشد: " + e.message);
   }
 
   /* ۱۰) اسکرین‌شات برای بازبینیِ انسانی. */

@@ -79,7 +79,7 @@ python3 partial_candle_test.py  # موتور روی کندلِ ناقص سیگن
 python3 notify_mute_test.py     # تست‌ها روی دسکتاپِ تو نوتیف نمی‌فرستند (shimِ osascript)
 python3 archive_actual_test.py  # نتیجه‌ی قطعیِ آرشیو: عددِ Actual + صعودی/نزولی (نه شرطی)
 python3 button_alive_test.py    # کلیدِ بی‌واکنش نداریم: تورِ ایمنیِ فاندمنتال + واکنشِ دیدنیِ بروزرسانی
-python3 dock_collapse_test.py   # بخشِ پشتیبان/انتقالِ داده جمع است، نه بلوکِ همیشه‌باز
+python3 dock_collapse_test.py   # آلارم‌ها/بک‌تست/ریسک/پشتیبان جمع‌اند، نه بلوکِ همیشه‌باز
 python3 risk_test.py            # سایزِ پوزیشن، سقفِ ضرر، هم‌بستگی
 python3 correlation_test.py     # ضرایبِ مرجع و تذکرِ تخلفِ کاربر
 python3 smt_test.py             # واگراییِ SMT
