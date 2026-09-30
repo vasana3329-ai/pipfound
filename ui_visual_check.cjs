@@ -1264,7 +1264,11 @@ function loadPuppeteer() {
      گزارهٔ شرطی». چکِ متنی می‌تواند بگوید متنِ کد عوض شده؛ فقط رندرِ واقعی نشان
      می‌دهد که هیچ ردیفِ شرطی‌ای در DOM نیست و خطِ تأثیر زیرِ خطِ نتیجه نشسته است.
      اگر در آن ۶ ساعت خبری نباشد، بند با ادعای بی‌ربط سبز نمی‌شود: فقط «رکوردِ
-     خالی» یادداشت می‌شود و ادعاها روی حالتِ «خبر داریم» اجرا می‌شوند. */
+     خالی» یادداشت می‌شود و ادعاها روی حالتِ «خبر داریم» اجرا می‌شوند. درسِ CI:
+     `.arc-v` فقط «نتیجهٔ عدددار» نیست — ردیفِ صادقِ «این خبر عددِ اعلام‌شده
+     ندارد» و «منبعِ پاسخ نداد» هم `.arc-v v-fl`‌اند و عمداً خطِ تأثیر ندارند
+     (جهت نامعلوم ⇒ اثرِ ساخته‌شده ممنوع). پس ادعای «خطِ تأثیر» فقط روی
+     نتیجهٔ عدددارِ **جهت‌دار** اجرا می‌شود؛ وگرنه تست، صداقتِ داده را قرمز می‌کرد. */
   try {
     const arch = await page.evaluate(async () => {
       const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1284,6 +1288,13 @@ function loadPuppeteer() {
         rows: m ? m.querySelectorAll(".arc-d").length : -1,
         impacts: m ? m.querySelectorAll(".arc-i").length : -1,
         verdicts: m ? m.querySelectorAll(".arc-v").length : -1,
+        // «نتیجهٔ عدددارِ جهت‌دار» — فقط ردیف‌هایی که هم عددِ اعلام‌شده دارند
+        // (arc-num) و هم جهتِ قوی‌تر/ضعیف‌ترِ ارز. فقط همین‌ها باید خطِ تأثیر
+        // داشته باشند؛ ردیفِ «طبقِ انتظار» (خنثی)، «بی‌عدد» و «منبع در دسترس
+        // نبود» عمداً بی‌خطِ تأثیرند و نباید تست را قرمز کنند.
+        withDir: m ? Array.from(m.querySelectorAll(".arc-v")).filter(
+          (v) => v.querySelector(".arc-num") && /قوی\u200cتر|ضعیف\u200cتر/.test(v.textContent)
+        ).length : -1,
         impactText: m && m.querySelector(".arc-i") ? m.querySelector(".arc-i").textContent.trim() : "",
         note: m && m.querySelector(".arc-note") ? m.querySelector(".arc-note").textContent : "",
         text: m ? m.textContent : "",
@@ -1298,17 +1309,20 @@ function loadPuppeteer() {
       if (arch.rows !== 0)
         fail(`پنجرهٔ آرشیو ${arch.rows} ردیفِ گزارهٔ شرطی (⬆/⬇) نشان می‌دهد `
           + "— خواستهٔ «فقط نتیجه + تأثیرش، نه گزارهٔ شرطی» نقض شده");
-      if (arch.verdicts > 0 && arch.impacts === 0)
+      if (arch.withDir > 0 && arch.impacts === 0)
         fail("خطِ «تأثیرِ همین نتیجه» در پنجرهٔ آرشیو رندر نشد");
-      if (arch.impacts > arch.verdicts)
-        fail("خطِ تأثیر از خطِ نتیجه بیشتر است (ردیفِ بی‌نتیجه تأثیر گرفته)");
+      if (arch.impacts > arch.withDir)
+        fail("خطِ تأثیر از نتیجهٔ جهت‌دار بیشتر است (ردیفِ بی‌جهت تأثیر گرفته)");
       if (!/تأثیرِ همین نتیجه/.test(arch.note) && !/گزارهٔ شرطی/.test(arch.note))
         fail("یادداشتِ پنجرهٔ آرشیو قراردادِ «نتیجه + تأثیر، بی‌گزارهٔ شرطی» را توضیح نمی‌دهد");
       if (/⬆|⬇/.test(arch.text))
         fail("فلشِ گزارهٔ شرطی (⬆/⬇) هنوز در متنِ پنجرهٔ آرشیو دیده می‌شود");
       if (problems.length === before)
-        notes.push(`آرشیوِ اقتصادی (${arch.events} خبر، ${arch.verdicts} نتیجه): `
-          + "ردیفِ شرطی: ۰ · خطِ تأثیر زیرِ خطِ نتیجه ✓"
+        notes.push(`آرشیوِ اقتصادی (${arch.events} خبر، ${arch.verdicts} ردیفِ نتیجه، `
+          + `${arch.withDir} نتیجهٔ عدددارِ جهت‌دار): ردیفِ شرطی: ۰ ✓`
+          + (arch.withDir === 0
+              ? " — در این پنجره نتیجهٔ عدددارِ جهت‌دار نبود؛ فقط صداقتِ پنجره سنجیده شد"
+              : "")
           + (arch.impactText ? ` — نمونه: ${arch.impactText.slice(0, 90)}` : ""));
     }
   } catch (e) {
