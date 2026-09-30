@@ -1823,88 +1823,162 @@ _RF_HINT_DOM_RE = re.compile(r"rf-hint")
 _RF_NEED_JS_RE = re.compile(r"classList\.add\(\s*[\"']need[\"']\s*\)")
 _RF_NEED_CSS_RE = re.compile(r"\.rf-btn\.need\s*\{")
 
-# ── قراردادِ «کرکره‌ی جمعِ پیش‌فرض» (لایه‌ی ۴.۱۸) ─────────────────────────────
-# خواستهٔ کاربر: بخشِ «پشتیبان و انتقالِ داده» در نمای اصلی یک کلیدِ جمع‌وجور باشد
-# و گزینه‌ها فقط با کلیک باز شوند — نه یک بلوکِ همیشه‌باز که صفحه را شلوغ و
-# بچه‌گونه نشان می‌دهد. سه چیز باید قفل بماند: (۱) بدنه پیش‌فرض پنهان باشد و فقط
-# با کلاسِ جمع‌شدن/بازشدن نمایش داده شود؛ (۲) نوار کلیدپذیر باشد و حالتِ خودش را
-# به صفحه‌خوان هم بگوید; (۳) گزینه‌ها (برون‌بری، درون‌بری، پشتیبانِ خودکار و
-# فهرستِ نسخه‌ها) *داخلِ* همان بدنه بمانند تا واقعاً جمع شوند.
-_BK_DOCK_ID_RE = re.compile(r'id="bkDock"')
-_BK_DOCK_CLASS_RE = re.compile(r'class="alarms-dock bk-dock"')
-_BK_TOGGLE_ID_RE = re.compile(r'id="bkToggle"')
-_BK_BODY_ID_RE = re.compile(r'id="bkBody"')
-_BK_TOGGLE_TAG_RE = re.compile(
-    r'<button[^>]*id="bkToggle"[^>]*aria-expanded="false"[^>]*aria-controls="bkBody"', re.S)
-_BK_CSS_HIDE_RE = re.compile(r'\.bk-body\s*\{[^}]*display\s*:\s*none', re.S)
-_BK_CSS_OPEN_RE = re.compile(r'\.bk-dock\.open\s+\.bk-body\s*\{[^}]*display\s*:\s*block', re.S)
-_BK_JS_WIRE_RE = re.compile(r'bkToggle\.onclick')
-_BK_JS_OPEN_RE = re.compile(r'bkDock\.classList\.toggle\("open"\)')
-_BK_JS_ARIA_RE = re.compile(r'setAttribute\("aria-expanded"\s*,')
+# ── قراردادِ «کرکره‌های جمعِ پیش‌فرض» (لایه‌ی ۴.۱۸) ──────────────────────────
+# خواستهٔ کاربر: بخش‌های «نگهداری» در نمای اصلی همیشه‌باز نباشند — آلارم‌ها،
+# تنظیماتِ بک‌تست، مدیریتِ ریسک و پشتیبان/انتقالِ داده هر کدام یک نوارِ کلیدپذیر
+# باشند و بدنه فقط با کلیک باز شود. سه چیز باید قفل بماند: (۱) مکانیکِ مشترک —
+# بدنه پیش‌فرض پنهان است و فقط در حالتِ باز نمایش داده می‌شود؛ (۲) هر نوار
+# کلیدپذیر است و حالتِ خودش را به صفحه‌خوان هم می‌گوید؛ (۳) گزینه‌های بخشِ
+# پشتیبان (برون‌بری/درون‌بری/پشتیبانِ خودکار/فهرستِ نسخه‌ها) *داخلِ* بدنه بمانند.
+_FOLD_PANELS = (
+    ("alarmsDock", "alarmsToggle", "alarmsBody"),
+    ("btPanel", "btToggle", "btBody"),
+    ("riskPanel", "rkToggle", "rkBody"),
+    ("bkDock", "bkToggle", "bkBody"),
+)
+_FOLD_TAG_RE = re.compile(r'<(?:div|button|h2)\b[^>]*>', re.S)
+_FOLD_BODY_HIDE_RE = re.compile(r'\.fold-body\s*\{[^}]*display\s*:\s*none', re.S)
+_FOLD_BODY_SHOW_RE = re.compile(r'\.fold\.open\s+\.fold-body\s*\{[^}]*display\s*:\s*block', re.S)
+# تلهٔ واقعیِ همین دور: هر قاعدهٔ نمایشیِ دیگر روی *خودِ* بدنه (هم‌ارزِ انتخاب‌گر و
+# بعدتر در فایل) قاعدهٔ پنهان‌بودن را بی‌اثر می‌کند و پنل همیشه‌باز می‌مانَد.
+_FOLD_BODY_CLASS_RE = re.compile(r'class="fold-body\s+([A-Za-z][A-Za-z0-9_-]*)"')
+_FOLD_BODY_CLASSES = ("alarms-body", "bt-body", "risk-body", "bk-body")
+_FOLD_STYLE_RE = re.compile(r'<style[^>]*>(.*?)</style>', re.S)
+_FOLD_RULE_RE = re.compile(r'([^{}]+)\{([^{}]*)\}', re.S)
+_FOLD_JS_INIT_RE = re.compile(r'function\s+pfFold\s*\(')
+_FOLD_JS_ARIA_RE = re.compile(r'setAttribute\("aria-expanded"\s*,')
+_FOLD_JS_CALL_RE = re.compile(
+    r'pfFold\(\s*"([A-Za-z0-9_]+)"\s*,\s*"([A-Za-z0-9_]+)"\s*,\s*"([A-Za-z0-9_]+)"\s*\)')
+_BK_OPTION_IDS = ("expBtn", "impBtn", "abToggle", "abList", "abStat")
 _BK_STATE_DOM_RE = re.compile(r'id="bkState"')
 _BK_STATE_JS_RE = re.compile(r'getElementById\("bkState"\)')
-_BK_OPTION_IDS = ("expBtn", "impBtn", "abToggle", "abList", "abStat")
 
 
-def backup_dock_problems(root, pages=None):
-    """قراردادِ «کرکره‌ی جمعِ پیش‌فرض»: بخشِ پشتیبان/انتقالِ داده یک نوارِ
-    کلیدپذیر باشد، بدنه‌اش پیش‌فرض بسته بماند، و گزینه‌ها داخلِ همان بدنه بمانند."""
+def _fold_tag(page, needles):
+    """نخستین تگِ مارک‌آپی که همهٔ رشته‌های لازم را در خود دارد → (اندیس، متنِ تگ)."""
+    for m in _FOLD_TAG_RE.finditer(page):
+        t = m.group(0)
+        if all(n in t for n in needles):
+            return m.start(), t
+    return -1, ""
+
+
+def _fold_display_overrides(page, hide_at):
+    """قاعده‌های CSSی که بعد از پنهان‌بودنِ پیش‌فرض، روی *خودِ* یک بدنه `display`
+    می‌گذارند — انتخاب‌گرِ هم‌ارز + ترتیبِ متن یعنی پنهان‌بودن بی‌اثر می‌شود
+    (همان باگی که `.bt-body{display:flex}` زنده ساخت). قاعدهٔ بازکردنِ عمومی
+    (`.fold.open .fold-body`) عمداً مستثناست چون قراردادِ خودِ کرکره است.
+    فقط داخلِ بلوک‌های `<style>` می‌گردد تا متنِ JS/مارک‌آپ قاطیِ قاعده‌ها نشود.
+    """
+    hits = []
+    classes = sorted(set(_FOLD_BODY_CLASS_RE.findall(page)) or set(_FOLD_BODY_CLASSES))
+    for sm in _FOLD_STYLE_RE.finditer(page):
+        base = sm.start(1)
+        for rm in _FOLD_RULE_RE.finditer(sm.group(1)):
+            sel, decls = rm.group(1), rm.group(2)
+            if base + rm.start(1) < hide_at or ".fold.open" in sel:
+                continue
+            if not re.search(r'display\s*:', decls):
+                continue
+            for cls in classes:
+                if re.search(r'\.%s(?![-\w])' % re.escape(cls), sel):
+                    hits.append(cls)
+    return sorted(set(hits))
+
+
+def fold_panels_problems(root, pages=None):
+    """قراردادِ «کرکره‌های جمعِ پیش‌فرض»: بخش‌های نگهداریِ نمای اصلی (آلارم‌ها،
+    تنظیماتِ بک‌تست، مدیریتِ ریسک و پشتیبانِ داده) یک نوارِ کلیدپذیر داشته باشند،
+    بدنه‌شان پیش‌فرض بسته بماند، و وضعیتشان روی همان نوار دیده شود."""
     probs = []
-    stats = {"dock": False, "collapsed": False, "wired": False,
+    stats = {"panels": 0, "collapsed": False, "wired": False,
              "options_inside": False, "state": False}
     page = (pages or {}).get("HTML") or ""
     if not page:
-        probs.append("app.py → متنِ APP_PAGE خوانده نشد — کرکره‌ی پشتیبان سنجیده نمی‌شود")
+        probs.append("app.py → متنِ APP_PAGE خوانده نشد — کرکره‌های نمای اصلی سنجیده نمی‌شوند")
         return probs, stats
 
-    if _BK_DOCK_ID_RE.search(page) is None or _BK_DOCK_CLASS_RE.search(page) is None:
-        probs.append("app.py · کرکره‌ی «پشتیبان و انتقالِ داده» (bkDock/bk-dock) نیست — "
-                     "بخشِ پشتیبان دوباره یک بلوکِ همیشه‌باز می‌مانَد")
-    else:
-        stats["dock"] = True
-
-    if _BK_TOGGLE_ID_RE.search(page) is None or _BK_BODY_ID_RE.search(page) is None:
-        probs.append("app.py · نوارِ کلیدپذیر (bkToggle) یا بدنه‌ی کرکره (bkBody) حذف شده")
-    elif _BK_TOGGLE_TAG_RE.search(page) is None:
-        probs.append("app.py · نوارِ پشتیبان حالتِ اولیه‌ی درست ندارد "
-                     "(aria-expanded=\"false\" + aria-controls=\"bkBody\" لازم است)")
-
-    if _BK_CSS_HIDE_RE.search(page) is None:
-        probs.append("app.py · بدنه‌ی کرکره پیش‌فرض پنهان نیست (CSS) — "
+    # مکانیکِ مشترک: پنهان‌بودنِ پیش‌فرضِ بدنه + قاعدهٔ بازشدن + سازندهٔ عمومی
+    mech = True
+    if _FOLD_BODY_HIDE_RE.search(page) is None:
+        probs.append("app.py · بدنهٔ کرکره‌ها پیش‌فرض پنهان نیست (CSS) — "
                      "نمای اصلی دوباره شلوغ می‌شود")
-    elif _BK_CSS_OPEN_RE.search(page) is None:
-        probs.append("app.py · قاعده‌ی بازشدنِ کرکره نیست — کلید بی‌اثر می‌مانَد")
-    else:
-        stats["collapsed"] = True
+        mech = False
+    if _FOLD_BODY_SHOW_RE.search(page) is None:
+        probs.append("app.py · قاعدهٔ بازشدنِ کرکره‌ها نیست — کلیدها بی‌اثر می‌مانند")
+        mech = False
+    if _FOLD_JS_INIT_RE.search(page) is None:
+        probs.append("app.py · سازندهٔ کرکره (pfFold) حذف شده — هیچ نواری سیم‌کشی نمی‌شود")
+        mech = False
+    hm = _FOLD_BODY_HIDE_RE.search(page)
+    if hm is not None:
+        clobber = _fold_display_overrides(page, hm.end())
+        if clobber:
+            probs.append("app.py · قاعدهٔ نمایشیِ «.%s» پنهان‌بودنِ پیش‌فرضِ بدنه را "
+                         "بی‌اثر می‌کند (هم‌ارز است ولی بعدتر آمده) — پنل همیشه‌باز "
+                         "می‌مانَد" % "، ".join(clobber))
+            mech = False
+    stats["collapsed"] = mech
 
-    if _BK_JS_WIRE_RE.search(page) is None or _BK_JS_OPEN_RE.search(page) is None:
-        probs.append("app.py · نوارِ پشتیبان سیم‌کشی نشده — کلیک هیچ کاری نمی‌کند")
-    elif _BK_JS_ARIA_RE.search(page) is None:
-        probs.append("app.py · نوارِ پشتیبان وضعیتِ خودش را به صفحه‌خوان نمی‌گوید "
+    calls = set(_FOLD_JS_CALL_RE.findall(page))
+    folded, bk_body_at = 0, -1
+    for box_id, tgl_id, body_id in _FOLD_PANELS:
+        box_at, box_tag = _fold_tag(page, ['id="%s"' % box_id])
+        cm = re.search(r'class="([^"]*)"', box_tag) if box_at >= 0 else None
+        cls = cm.group(1) if cm else ""
+        if box_at < 0 or "fold" not in cls.split():
+            probs.append("app.py · بخشِ %s کلاسِ کرکره (fold) ندارد — همیشه‌باز می‌مانَد"
+                         % box_id)
+            continue
+        tgl_at, _ = _fold_tag(page, ['id="%s"' % tgl_id, 'aria-expanded="false"',
+                                     'aria-controls="%s"' % body_id])
+        if tgl_at < 0:
+            probs.append("app.py · نوارِ %s کلیدپذیر نیست (aria-expanded=\"false\" و "
+                         "aria-controls لازم است)" % box_id)
+            continue
+        body_at, _ = _fold_tag(page, ['id="%s"' % body_id, "fold-body"])
+        if body_at < 0:
+            probs.append("app.py · بدنهٔ کرکرهٔ %s پیدا نشد (کلاسِ fold-body)" % box_id)
+            continue
+        if body_at < tgl_at:
+            probs.append("app.py · بدنهٔ %s قبل از نوار آمده — ساختارِ کرکره خراب است"
+                         % box_id)
+            continue
+        if (box_id, tgl_id, body_id) not in calls:
+            probs.append("app.py · کرکرهٔ %s سیم‌کشی نشده (pfFold صدا زده نمی‌شود) — "
+                         "کلیک هیچ کاری نمی‌کند" % box_id)
+            continue
+        folded += 1
+        if box_id == "bkDock":
+            bk_body_at = body_at
+
+    if _FOLD_JS_ARIA_RE.search(page) is None:
+        probs.append("app.py · نوارهای کرکره وضعیتِ خودشان را به صفحه‌خوان نمی‌گویند "
                      "(aria-expanded)")
-    else:
-        stats["wired"] = True
+    stats["panels"] = folded
+    stats["wired"] = (folded == len(_FOLD_PANELS)
+                       and _FOLD_JS_ARIA_RE.search(page) is not None)
 
-    body_at = page.find('id="bkBody"')
-    if body_at < 0:
-        probs.append("app.py · بدنه‌ی کرکره (bkBody) پیدا نشد — گزینه‌ها بی‌جا می‌مانند")
+    # گزینه‌های بخشِ پشتیبان باید داخلِ بدنهٔ همان کرکره بمانند
+    if bk_body_at < 0:
+        probs.append("app.py · بدنهٔ کرکرهٔ پشتیبان (bkBody) پیدا نشد — گزینه‌ها بی‌جا می‌مانند")
     else:
         outside = [i for i in _BK_OPTION_IDS
-                   if 0 <= page.find('id="%s"' % i) < body_at]
+                   if 0 <= page.find('id="%s"' % i) < bk_body_at]
         if outside:
-            probs.append("app.py · این گزینه‌ها بیرونِ بدنه‌ی کرکره‌اند (باید جمع شوند): "
-                         + "، ".join(outside))
+            probs.append("app.py · این گزینه‌ها بیرونِ بدنهٔ کرکرهٔ پشتیبان‌اند "
+                         "(باید جمع شوند): " + "، ".join(outside))
         else:
             stats["options_inside"] = True
 
     # خلاصهٔ وضعیت باید هم روی نوار باشد و هم JS آن را پر کند؛ عمداً با regexِ
-    # دقیق (نه countِ زیررشته‌ای) سنجیده می‌شود — وگرنه یک نامِ مشابه مثلِ
-    # bkStateX هم زیررشتهٔ bkState را دارد و جهش را سبزِ دروغ می‌گذارد.
+    # دقیق (نه countِ زیررشته‌ای) سنجیده می‌شود — وگرنه نامِ مشابهی مثلِ bkStateX
+    # هم زیررشتهٔ bkState را دارد و جهش را سبزِ دروغ می‌گذارد.
     stats["state"] = bool(_BK_STATE_DOM_RE.search(page)) \
         and _BK_STATE_JS_RE.search(page) is not None
     if not stats["state"]:
-        probs.append("app.py · خلاصه‌ی وضعیتِ پشتیبان روی نوارِ بسته دیده نمی‌شود "
-                     "(bkState) — کاربر از روی نوار نمی‌فهمد پشتیبان روشن است یا نه")
+        probs.append("app.py · خلاصهٔ وضعیتِ پشتیبان روی نوارِ بسته دیده نمی‌شود (bkState) "
+                     "— کاربر از روی نوار نمی‌فهمد پشتیبان روشن است یا نه")
     return probs, stats
 
 
@@ -2138,13 +2212,13 @@ def run_checks(root, live=False, enforce_contract=True, accept_removals=False):
     rep["buttons"] = bastats
     rep["problems"] += [f"کلیدهای بی‌واکنش → {p}" for p in bap]
 
-    # ── چکِ استاتیکِ «کرکره‌ی جمعِ پیش‌فرض» ──
-    # خواستهٔ کاربر: بخشِ پشتیبان/انتقالِ داده در نمای اصلی فقط یک نوار باشد و
-    # گزینه‌ها با کلیک باز شوند. اگر کسی بدنه را همیشه‌باز یا سیم‌کشی را بردارد،
-    # همین‌جا گرفته می‌شود — نه وقتی کاربر دوباره بگوید «صفحه شلوغ شده».
-    bkp, bkstats = backup_dock_problems(root, pages)
-    rep["dock"] = bkstats
-    rep["problems"] += [f"کرکره‌ی پشتیبان → {p}" for p in bkp]
+    # ── چکِ استاتیکِ «کرکره‌های جمعِ پیش‌فرض» ──
+    # خواستهٔ کاربر: بخش‌های نگهداریِ نمای اصلی (آلارم‌ها، تنظیماتِ بک‌تست،
+    # مدیریتِ ریسک و پشتیبانِ داده) فقط یک نوار باشند و با کلیک باز شوند. اگر کسی
+    # بدنه را همیشه‌باز کند یا سیم‌کشی/aria را بردارد، همین‌جا گرفته می‌شود.
+    fpp, fstats = fold_panels_problems(root, pages)
+    rep["dock"] = fstats
+    rep["problems"] += [f"کرکره‌های نمای اصلی → {p}" for p in fpp]
 
     inv = inventory(pages)
     inv["routes"] = routes_of(root)
@@ -2319,10 +2393,10 @@ def _human(rep):
     bk = rep.get("dock") or {}
     if bk:
         lines.append(
-            f"   کرکره‌ی پشتیبانِ داده: جمعِ پیش‌فرض: "
-            f"{'✓' if bk.get('collapsed') else '✗'}"
+            f"   کرکره‌های نمای اصلی: جمعِ پیش‌فرض: "
+            f"{bk.get('panels', 0)}/{len(_FOLD_PANELS)}"
             f" · نوارِ کلیدپذیر: {'✓' if bk.get('wired') else '✗'}"
-            f" · گزینه‌ها داخلِ بدنه: {'✓' if bk.get('options_inside') else '✗'}"
+            f" · گزینه‌های پشتیبان داخلِ بدنه: {'✓' if bk.get('options_inside') else '✗'}"
             f" · خلاصهٔ وضعیت روی نوار: {'✓' if bk.get('state') else '✗'}")
     nt = rep.get("notify") or {}
     if nt:

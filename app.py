@@ -1387,8 +1387,8 @@ h1{font-size:22px;margin:0;font-weight:700;letter-spacing:.2px;
 .datanote.data-warn{color:var(--warn);border-color:#a16207;background:#2a1f05}
 .datanote.data-closed{color:#fca5a5;border-color:#7f1d1d;background:#2a0a0a}
 /* پنلِ ریسک — سرمایه/درصد/سقف‌ها + وضعیتِ امروز (ژورنال) */
-.riskpanel{margin-top:12px;padding:12px 12px 10px;border:1px solid var(--line);border-radius:14px;
-  background:var(--panel2)}
+.riskpanel{margin-top:12px;padding:0;overflow:hidden;border:1px solid var(--line);
+  border-radius:14px;background:var(--panel2)}
 .risktitle{font-size:12.5px;color:var(--muted);font-weight:700;margin-bottom:9px;line-height:1.8}
 .riskrow{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .rinp{background:var(--panel);border:1px solid var(--line);border-radius:10px;color:var(--txt);
@@ -1463,8 +1463,7 @@ h1{font-size:22px;margin:0;font-weight:700;letter-spacing:.2px;
 .chiphint{color:var(--muted);font-size:11px;opacity:.85;margin-top:-2px}
 .symwrap{position:relative;flex:1;min-width:200px;display:flex}
 /* پنلِ تنظیماتِ بک‌تست */
-.btpanel{margin-top:14px;border-top:1px dashed var(--line);padding-top:14px;display:flex;
-  flex-direction:column;gap:10px}
+.btpanel{margin-top:14px}
 .btrow{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 .btlbl{color:var(--muted);font-size:13px;font-weight:600;white-space:nowrap}
 .btinp{background:var(--panel2);border:1px solid var(--line);border-radius:10px;color:var(--txt);
@@ -1739,23 +1738,36 @@ tr.on td{background:rgba(34,197,94,.05)}
 /* alarms dock */
 .alarms-dock{margin-top:22px;background:var(--panel);border:1px solid var(--line);
   border-radius:18px;padding:18px}
-.alarms-dock h2{font-size:16px;margin:0 0 12px;display:flex;align-items:center;gap:8px}
-/* کرکره‌ی «پشتیبان و انتقالِ داده» — خواستهٔ کاربر: نمای اصلی شلوغ/بچه‌گونه نباشد.
-   الگو همان کرکره‌ی «ستاپ‌ها»ست: یک نوارِ کلیدپذیر که بدنه‌ی گزینه‌ها را باز می‌کند. */
-.bk-dock{padding:0;overflow:hidden}
-.bk-head{margin:0;font-size:16px}
-.bk-toggle{width:100%;display:flex;align-items:center;gap:10px;padding:16px 18px;
+.alarms-dock h2{font-size:16px;margin:0;display:flex;align-items:center;gap:8px}
+/* ── کرکره‌های نمای اصلی: آلارم‌ها · تنظیماتِ بک‌تست · مدیریتِ ریسک · پشتیبانِ داده ──
+   خواستهٔ کاربر: هیچ‌کدام از این بخش‌های «نگهداری» در نمای اصلی همیشه‌باز نباشند؛
+   هر کدام یک نوارِ کلیدپذیر است و بدنه‌اش فقط با کلیک باز می‌شود تا صفحه شلوغ و
+   بچه‌گونه دیده نشود. الگو همان کرکره‌ی «ستاپ‌ها»ست. */
+.fold-head{margin:0;font-size:16px}
+.fold-toggle{width:100%;display:flex;align-items:center;gap:10px;padding:16px 18px;
   background:transparent;border:none;color:var(--txt);font-family:inherit;
-  font-size:16px;font-weight:800;cursor:pointer;text-align:right;
-  white-space:nowrap}
-.bk-toggle:hover{background:rgba(77,163,255,.06)}
-.bk-toggle .arr{margin-right:auto;color:var(--muted);transition:.2s;font-size:12px}
-.bk-dock.open .bk-toggle .arr{transform:rotate(180deg)}
-.bk-st{margin-right:8px;font-weight:600;font-size:12px;color:var(--muted);
+  font-size:16px;font-weight:800;cursor:pointer;text-align:right;white-space:nowrap}
+.fold-toggle:hover{background:rgba(77,163,255,.06)}
+.fold-toggle .arr{margin-right:auto;color:var(--muted);transition:.2s;font-size:12px}
+.fold.open .fold-toggle .arr{transform:rotate(180deg)}
+.fold-st{margin-right:8px;font-weight:600;font-size:12px;color:var(--muted);
   min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.bk-body{display:none;padding:0 18px 16px;border-top:1px dashed var(--line)}
-.bk-dock.open .bk-body{display:block}
-.bk-note{color:var(--muted);font-size:12px;margin:10px 0 0;line-height:1.8}
+.fold-body{display:none}
+.fold.open .fold-body{display:block}
+.fold-note{color:var(--muted);font-size:12px;margin:10px 0 0;line-height:1.8}
+/* پوستهٔ هر بخش: خودِ نوار پدینگ دارد، پس پوسته پدینگِ اضافه نمی‌گیرد */
+.alarms-dock.fold{padding:0;overflow:hidden}
+.alarms-body{padding:0 18px 18px}
+.btpanel.fold{margin-top:14px}
+/* ⚠ این بدنه عمداً flex نیست: یک قاعدهٔ نمایشی روی خودِ هر بدنه (مثلِ display:flex)
+   با قاعدهٔ پنهان‌بودنِ پیش‌فرض هم‌ارزش می‌شود و ترتیبِ متن تعیین می‌کند — یعنی
+   پنل می‌تواند همیشه‌باز بماند (همین در اجرای زنده لو رفت و حالا
+   selfcheck.fold_panels_problems هم آن را می‌گیرد). فاصله‌ها با marginِ فرزندان. */
+.bt-body{padding-top:12px;border-top:1px dashed var(--line)}
+.bt-body > * + *{margin-top:10px}
+.risk-body{padding:0 12px 10px}
+.bk-dock{padding:0;overflow:hidden}
+.bk-body{padding:0 18px 16px;border-top:1px dashed var(--line)}
 .alarm-item{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--panel2);
   border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:8px;font-size:13px}
 .alarm-item.trig{border-color:rgba(34,197,94,.5);background:rgba(34,197,94,.08)}
@@ -1872,7 +1884,13 @@ input.abnum{flex:0 0 86px;min-width:86px;text-align:center;direction:ltr;
       <div class="sp-head">📚 ستاپ‌های پیشنهادی <span class="jmsg" id="spState">— اول یک تحلیل بگیر تا چراغ‌ها روشن شوند</span></div>
       <div id="spList"></div>
     </div>
-    <div id="btPanel" class="btpanel">
+    <div id="btPanel" class="fold btpanel">
+      <h2 class="fold-head"><button id="btToggle" class="fold-toggle" type="button"
+            aria-expanded="false" aria-controls="btBody"
+            title="تنظیماتِ بک‌تست: بازهٔ تاریخی، تایم‌فریم‌های دلخواه، جهتِ مجاز و عمقِ پیمایش. برای دیدنِ کادرها روی همین نوار کلیک کن.">
+        🧪 تنظیماتِ بک‌تست <span class="arr" aria-hidden="true">▾</span>
+      </button></h2>
+      <div class="fold-body bt-body" id="btBody">
       <div class="btrow">
         <span class="btlbl">بازه‌ی بک‌تست (تاریخِ روی چارت):</span>
         <input id="btFrom" class="btinp" type="text" placeholder="از — مثل 2026-06-01" autocomplete="off"
@@ -1899,9 +1917,17 @@ input.abnum{flex:0 0 86px;min-width:86px;text-align:center;direction:ltr;
         <input id="btWalk" class="btinp narrow" type="number" min="100" max="8000" step="100" value="2000"
                title="عمقِ پیمایشِ walk-forward = تعدادِ کندلِ ورودی که ماشین روی آن قدم‌به‌قدم جلو می‌رود. برای نمونه‌ی آماریِ معتبر ≥ ۲۰۰۰ توصیه می‌شود.">
       </div>
+      </div>
     </div>
-    <div class="riskpanel" id="riskPanel">
-      <div class="risktitle">💰 مدیریتِ ریسک — سرمایه و درصدِ ریسکت را بده تا کنارِ هر پلن «سایزِ پوزیشن» و ریسکِ دلاری‌اش را بدهد، و سقفِ ضررِ روزانه/تمرکزِ معاملات را هم بپاید</div>
+    <div class="riskpanel fold" id="riskPanel">
+      <h2 class="fold-head"><button id="rkToggle" class="fold-toggle" type="button"
+            aria-expanded="false" aria-controls="rkBody"
+            title="مدیریتِ ریسک: سرمایه، درصدِ ریسکِ هر معامله و سقفِ ضررِ روزانه/ریسکِ باز — تا کنارِ هر پلن «سایزِ پوزیشن» و ریسکِ دلاری‌اش را بدهد. برای دیدنِ کادرها روی همین نوار کلیک کن.">
+        💰 مدیریتِ ریسک <span class="fold-st jmsg" id="rkState">در حالِ خواندن…</span>
+        <span class="arr" aria-hidden="true">▾</span>
+      </button></h2>
+      <div class="fold-body risk-body" id="rkBody">
+      <div class="risktitle">سرمایه و درصدِ ریسکت را بده تا کنارِ هر پلن «سایزِ پوزیشن» و ریسکِ دلاری‌اش را بدهد، و سقفِ ضررِ روزانه/تمرکزِ معاملات را هم بپاید.</div>
       <div class="riskrow">
         <span class="btlbl">سرمایه</span>
         <input id="rkBalance" class="rinp wide" type="number" min="0" step="100" autocomplete="off"
@@ -1919,28 +1945,36 @@ input.abnum{flex:0 0 86px;min-width:86px;text-align:center;direction:ltr;
         <span id="rkMsg" class="jmsg"></span>
       </div>
       <div class="riskstat" id="rkStat">در حالِ خواندنِ وضعیتِ ریسک…</div>
+      </div>
     </div>
   </div>
 
   <div id="result"></div>
   <div id="btresult"></div>
 
-  <div class="alarms-dock" id="alarmsDock">
-    <h2>🔔 آلارم‌های فعال <span class="jmsg">(هر ۹۰ ثانیه بررسی می‌شوند)</span></h2>
-    <div id="alarmsList"><div class="aempty">هنوز آلارمی نگذاشته‌ای.</div></div>
+  <div class="alarms-dock fold" id="alarmsDock">
+    <h2 class="fold-head"><button id="alarmsToggle" class="fold-toggle" type="button"
+          aria-expanded="false" aria-controls="alarmsBody"
+          title="آلارم‌های قیمتیِ تو — هر ۹۰ ثانیه بررسی می‌شوند و هنگامِ رسیدنِ قیمت خبر می‌دهند. برای دیدنِ فهرست روی همین نوار کلیک کن.">
+      🔔 آلارم‌های فعال <span class="fold-st jmsg" id="alarmsState">…</span>
+      <span class="arr" aria-hidden="true">▾</span>
+    </button></h2>
+    <div class="fold-body alarms-body" id="alarmsBody">
+      <div id="alarmsList"><div class="aempty">هنوز آلارمی نگذاشته‌ای.</div></div>
+    </div>
   </div>
 
-  <div class="alarms-dock bk-dock" id="bkDock">
-    <h2 class="bk-head">
-      <button id="bkToggle" class="bk-toggle" type="button" aria-expanded="false" aria-controls="bkBody"
+  <div class="alarms-dock bk-dock fold" id="bkDock">
+    <h2 class="fold-head">
+      <button id="bkToggle" class="fold-toggle" type="button" aria-expanded="false" aria-controls="bkBody"
               title="پشتیبانِ داده و انتقالِ آن: برون‌بری/درون‌بریِ JSON، پشتیبانِ خودکارِ زمان‌بندی‌شده و برگرداندنِ نسخه‌ها. برای دیدنِ گزینه‌ها روی همین نوار کلیک کن.">
         📦 پشتیبان و انتقالِ داده
-        <span class="bk-st jmsg" id="bkState">در حالِ خواندن…</span>
+        <span class="fold-st jmsg" id="bkState">در حالِ خواندن…</span>
         <span class="arr" aria-hidden="true">▾</span>
       </button>
     </h2>
-    <div class="bk-body" id="bkBody">
-    <p class="bk-note">📁 ژورنال، آلارم‌ها و تنظیماتِ ریسک — همه در یک فایلِ JSON. این بخش جمع شده است تا نمای اصلی تمیز بماند؛ برای گزینه‌ها روی نوارِ بالا کلیک کن. پشتیبانِ خودکار هم بی‌سروصدا در پس‌زمینه کار می‌کند.</p>
+    <div class="fold-body bk-body" id="bkBody">
+    <p class="fold-note">📁 ژورنال، آلارم‌ها و تنظیماتِ ریسک — همه در یک فایلِ JSON. این بخش جمع شده است تا نمای اصلی تمیز بماند؛ برای گزینه‌ها روی نوارِ بالا کلیک کن. پشتیبانِ خودکار هم بی‌سروصدا در پس‌زمینه کار می‌کند.</p>
     <div class="uprow">
       <input type="file" id="impFile" accept="application/json,.json" style="display:none">
       <button class="upbtn" id="expBtn" title="کلِ دادهٔ تو (ردیف‌های ژورنال، آلارم‌ها و تنظیماتِ ریسک) را به‌شکلِ یک فایلِ JSON برون‌بری می‌کند؛ همان فایل را روی دستگاهِ تازه درون‌بری کن تا از صفر شروع نکنی.">⬇️ برون‌بری (JSON)</button>
@@ -3225,6 +3259,8 @@ async function loadAlarms(){
     const r = await fetch("/api/alarms");
     const list = await r.json();
     const box = document.getElementById("alarmsList");
+    const stEl = document.getElementById("alarmsState");
+    if(stEl) stEl.textContent = list.length ? ("· "+list.length+" آلارمِ فعال") : "· بدونِ آلارم";
     if(!list.length){box.innerHTML='<div class="aempty">هنوز آلارمی نگذاشته‌ای.</div>';return;}
     box.innerHTML = list.map(a=>{
       const trig = a.triggered;
@@ -3295,20 +3331,27 @@ async function pfImportData(){
     loadAlarms(); loadRisk();
   }catch(e){ pfBkMsg("⚠ درون‌بری نشد: "+e, true); }
 }
-// ── کرکرهٔ «پشتیبان و انتقالِ داده»: پیش‌فرض بسته است تا نمای اصلی تمیز بماند
-// (خواستهٔ کاربر: صفحه شلوغ/بچه‌گونه دیده نشود). یک نوارِ کلیدپذیر بدنهٔ گزینه‌ها را
-// باز/بسته می‌کند و خلاصهٔ وضعیتِ پشتیبانِ خودکار هم در همان نوار نشان می‌رود.
-const bkToggle=document.getElementById("bkToggle"), bkDock=document.getElementById("bkDock"),
-      bkBody=document.getElementById("bkBody");
-if(bkToggle&&bkDock&&bkBody){
-  const bkPaint=()=>{
-    const open=bkDock.classList.contains("open");
-    bkToggle.setAttribute("aria-expanded", open?"true":"false");
-    bkBody.setAttribute("aria-hidden", open?"false":"true");
+// ── کرکره‌های نمای اصلی: آلارم‌ها · تنظیماتِ بک‌تست · مدیریتِ ریسک · پشتیبانِ داده ──
+// خواستهٔ کاربر: هیچ‌کدام از این بخش‌های «نگهداری» در نمای اصلی همیشه‌باز نباشد؛
+// نوار کلیدپذیر است و بدنه فقط با کلیک باز می‌شود. وضعیتِ هر بخش هم به‌شکلِ خلاصه
+// روی همان نوار می‌آید تا جمع‌بودن به‌معنای «بی‌خبری» نباشد.
+function pfFold(boxId, toggleId, bodyId){
+  const box=document.getElementById(boxId), tgl=document.getElementById(toggleId),
+        body=document.getElementById(bodyId);
+  if(!box||!tgl||!body) return false;
+  const paint=()=>{
+    const open=box.classList.contains("open");
+    tgl.setAttribute("aria-expanded", open?"true":"false");
+    body.setAttribute("aria-hidden", open?"false":"true");
   };
-  bkToggle.onclick=()=>{ bkDock.classList.toggle("open"); bkPaint(); };
-  bkPaint();
+  tgl.onclick=()=>{ box.classList.toggle("open"); paint(); };
+  paint();
+  return true;
 }
+pfFold("alarmsDock","alarmsToggle","alarmsBody");
+pfFold("btPanel","btToggle","btBody");
+pfFold("riskPanel","rkToggle","rkBody");
+pfFold("bkDock","bkToggle","bkBody");
 const expBtn=document.getElementById("expBtn"), impBtn=document.getElementById("impBtn"), impFile=document.getElementById("impFile");
 if(expBtn) expBtn.onclick=pfExportData;
 if(impBtn&&impFile) impBtn.onclick=()=>impFile.click();
@@ -3504,6 +3547,9 @@ const rkSaveEl    = document.getElementById("rkSave");
 const rkMsgEl     = document.getElementById("rkMsg");
 // مقدار را فقط وقتی می‌گذاریم که کاربر در حالِ تایپ در همان کادر نباشد
 function _rkSet(el, v){ if(!el) return; if(document.activeElement===el) return; el.value=(v==null?"":v); }
+function rkSetState(t){
+  const el=document.getElementById("rkState"); if(el) el.textContent=t;
+}
 function rkRenderStat(j){
   const el=rkStatEl; if(!el) return;
   const s=(j&&j.settings)||{}, d=(j&&j.daily)||{};
@@ -3520,6 +3566,7 @@ function rkRenderStat(j){
   if(d.breached) parts.push("<span class=\"bad\">⛔ سقفِ ضررِ روزانه پر شده — امروز ورودِ جدید مجاز نیست.</span>");
   else if(d.open_breached) parts.push("<span class=\"bad\">⛔ سقفِ ریسکِ باز پر شده — اول یک پوزیشنِ باز را ببند.</span>");
   el.innerHTML = parts.join(" · ");
+  rkSetState("· امروز "+(rpct>0?"+":"")+rpct+"٪ · ریسکِ باز "+Number(d.open_risk_pct||0)+"٪");
 }
 async function loadRisk(){
   try{
@@ -3527,6 +3574,7 @@ async function loadRisk(){
     const j = await r.json();
     if(!j || j.ok===false){
       if(rkStatEl) rkStatEl.textContent = "ماژولِ ریسک در دسترس نیست: "+((j&&j.error)||"؟");
+      rkSetState("· در دسترس نیست");
       return;
     }
     const s=j.settings||{};
@@ -3537,6 +3585,7 @@ async function loadRisk(){
     rkRenderStat(j);
   }catch(e){
     if(rkStatEl) rkStatEl.textContent = "وضعیتِ ریسک در دسترس نیست: "+e;
+    rkSetState("· در دسترس نیست");
   }
 }
 async function saveRisk(){
