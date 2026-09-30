@@ -1823,6 +1823,90 @@ _RF_HINT_DOM_RE = re.compile(r"rf-hint")
 _RF_NEED_JS_RE = re.compile(r"classList\.add\(\s*[\"']need[\"']\s*\)")
 _RF_NEED_CSS_RE = re.compile(r"\.rf-btn\.need\s*\{")
 
+# ── قراردادِ «کرکره‌ی جمعِ پیش‌فرض» (لایه‌ی ۴.۱۸) ─────────────────────────────
+# خواستهٔ کاربر: بخشِ «پشتیبان و انتقالِ داده» در نمای اصلی یک کلیدِ جمع‌وجور باشد
+# و گزینه‌ها فقط با کلیک باز شوند — نه یک بلوکِ همیشه‌باز که صفحه را شلوغ و
+# بچه‌گونه نشان می‌دهد. سه چیز باید قفل بماند: (۱) بدنه پیش‌فرض پنهان باشد و فقط
+# با کلاسِ جمع‌شدن/بازشدن نمایش داده شود؛ (۲) نوار کلیدپذیر باشد و حالتِ خودش را
+# به صفحه‌خوان هم بگوید; (۳) گزینه‌ها (برون‌بری، درون‌بری، پشتیبانِ خودکار و
+# فهرستِ نسخه‌ها) *داخلِ* همان بدنه بمانند تا واقعاً جمع شوند.
+_BK_DOCK_ID_RE = re.compile(r'id="bkDock"')
+_BK_DOCK_CLASS_RE = re.compile(r'class="alarms-dock bk-dock"')
+_BK_TOGGLE_ID_RE = re.compile(r'id="bkToggle"')
+_BK_BODY_ID_RE = re.compile(r'id="bkBody"')
+_BK_TOGGLE_TAG_RE = re.compile(
+    r'<button[^>]*id="bkToggle"[^>]*aria-expanded="false"[^>]*aria-controls="bkBody"', re.S)
+_BK_CSS_HIDE_RE = re.compile(r'\.bk-body\s*\{[^}]*display\s*:\s*none', re.S)
+_BK_CSS_OPEN_RE = re.compile(r'\.bk-dock\.open\s+\.bk-body\s*\{[^}]*display\s*:\s*block', re.S)
+_BK_JS_WIRE_RE = re.compile(r'bkToggle\.onclick')
+_BK_JS_OPEN_RE = re.compile(r'bkDock\.classList\.toggle\("open"\)')
+_BK_JS_ARIA_RE = re.compile(r'setAttribute\("aria-expanded"\s*,')
+_BK_STATE_DOM_RE = re.compile(r'id="bkState"')
+_BK_STATE_JS_RE = re.compile(r'getElementById\("bkState"\)')
+_BK_OPTION_IDS = ("expBtn", "impBtn", "abToggle", "abList", "abStat")
+
+
+def backup_dock_problems(root, pages=None):
+    """قراردادِ «کرکره‌ی جمعِ پیش‌فرض»: بخشِ پشتیبان/انتقالِ داده یک نوارِ
+    کلیدپذیر باشد، بدنه‌اش پیش‌فرض بسته بماند، و گزینه‌ها داخلِ همان بدنه بمانند."""
+    probs = []
+    stats = {"dock": False, "collapsed": False, "wired": False,
+             "options_inside": False, "state": False}
+    page = (pages or {}).get("HTML") or ""
+    if not page:
+        probs.append("app.py → متنِ APP_PAGE خوانده نشد — کرکره‌ی پشتیبان سنجیده نمی‌شود")
+        return probs, stats
+
+    if _BK_DOCK_ID_RE.search(page) is None or _BK_DOCK_CLASS_RE.search(page) is None:
+        probs.append("app.py · کرکره‌ی «پشتیبان و انتقالِ داده» (bkDock/bk-dock) نیست — "
+                     "بخشِ پشتیبان دوباره یک بلوکِ همیشه‌باز می‌مانَد")
+    else:
+        stats["dock"] = True
+
+    if _BK_TOGGLE_ID_RE.search(page) is None or _BK_BODY_ID_RE.search(page) is None:
+        probs.append("app.py · نوارِ کلیدپذیر (bkToggle) یا بدنه‌ی کرکره (bkBody) حذف شده")
+    elif _BK_TOGGLE_TAG_RE.search(page) is None:
+        probs.append("app.py · نوارِ پشتیبان حالتِ اولیه‌ی درست ندارد "
+                     "(aria-expanded=\"false\" + aria-controls=\"bkBody\" لازم است)")
+
+    if _BK_CSS_HIDE_RE.search(page) is None:
+        probs.append("app.py · بدنه‌ی کرکره پیش‌فرض پنهان نیست (CSS) — "
+                     "نمای اصلی دوباره شلوغ می‌شود")
+    elif _BK_CSS_OPEN_RE.search(page) is None:
+        probs.append("app.py · قاعده‌ی بازشدنِ کرکره نیست — کلید بی‌اثر می‌مانَد")
+    else:
+        stats["collapsed"] = True
+
+    if _BK_JS_WIRE_RE.search(page) is None or _BK_JS_OPEN_RE.search(page) is None:
+        probs.append("app.py · نوارِ پشتیبان سیم‌کشی نشده — کلیک هیچ کاری نمی‌کند")
+    elif _BK_JS_ARIA_RE.search(page) is None:
+        probs.append("app.py · نوارِ پشتیبان وضعیتِ خودش را به صفحه‌خوان نمی‌گوید "
+                     "(aria-expanded)")
+    else:
+        stats["wired"] = True
+
+    body_at = page.find('id="bkBody"')
+    if body_at < 0:
+        probs.append("app.py · بدنه‌ی کرکره (bkBody) پیدا نشد — گزینه‌ها بی‌جا می‌مانند")
+    else:
+        outside = [i for i in _BK_OPTION_IDS
+                   if 0 <= page.find('id="%s"' % i) < body_at]
+        if outside:
+            probs.append("app.py · این گزینه‌ها بیرونِ بدنه‌ی کرکره‌اند (باید جمع شوند): "
+                         + "، ".join(outside))
+        else:
+            stats["options_inside"] = True
+
+    # خلاصهٔ وضعیت باید هم روی نوار باشد و هم JS آن را پر کند؛ عمداً با regexِ
+    # دقیق (نه countِ زیررشته‌ای) سنجیده می‌شود — وگرنه یک نامِ مشابه مثلِ
+    # bkStateX هم زیررشتهٔ bkState را دارد و جهش را سبزِ دروغ می‌گذارد.
+    stats["state"] = bool(_BK_STATE_DOM_RE.search(page)) \
+        and _BK_STATE_JS_RE.search(page) is not None
+    if not stats["state"]:
+        probs.append("app.py · خلاصه‌ی وضعیتِ پشتیبان روی نوارِ بسته دیده نمی‌شود "
+                     "(bkState) — کاربر از روی نوار نمی‌فهمد پشتیبان روشن است یا نه")
+    return probs, stats
+
 
 def archive_problems(root, pages=None):
     """قراردادِ «نتیجهٔ قطعی در آرشیو»: زنجیرهٔ Actual → حکم → رندرِ مطلق سالم بماند."""
@@ -2054,6 +2138,14 @@ def run_checks(root, live=False, enforce_contract=True, accept_removals=False):
     rep["buttons"] = bastats
     rep["problems"] += [f"کلیدهای بی‌واکنش → {p}" for p in bap]
 
+    # ── چکِ استاتیکِ «کرکره‌ی جمعِ پیش‌فرض» ──
+    # خواستهٔ کاربر: بخشِ پشتیبان/انتقالِ داده در نمای اصلی فقط یک نوار باشد و
+    # گزینه‌ها با کلیک باز شوند. اگر کسی بدنه را همیشه‌باز یا سیم‌کشی را بردارد،
+    # همین‌جا گرفته می‌شود — نه وقتی کاربر دوباره بگوید «صفحه شلوغ شده».
+    bkp, bkstats = backup_dock_problems(root, pages)
+    rep["dock"] = bkstats
+    rep["problems"] += [f"کرکره‌ی پشتیبان → {p}" for p in bkp]
+
     inv = inventory(pages)
     inv["routes"] = routes_of(root)
     rep["inventory"] = inv
@@ -2224,6 +2316,14 @@ def _human(rep):
             f"{'✓' if ba.get('fund_fallback') and ba.get('fund_guard') else '✗'}"
             f" · واکنشِ دیدنیِ بروزرسانی: {'✓' if ba.get('rf_visible') and ba.get('rf_flash') else '✗'}"
             f" · کلیدهای تبِ نو: {ba.get('newtab', 0)}")
+    bk = rep.get("dock") or {}
+    if bk:
+        lines.append(
+            f"   کرکره‌ی پشتیبانِ داده: جمعِ پیش‌فرض: "
+            f"{'✓' if bk.get('collapsed') else '✗'}"
+            f" · نوارِ کلیدپذیر: {'✓' if bk.get('wired') else '✗'}"
+            f" · گزینه‌ها داخلِ بدنه: {'✓' if bk.get('options_inside') else '✗'}"
+            f" · خلاصهٔ وضعیت روی نوار: {'✓' if bk.get('state') else '✗'}")
     nt = rep.get("notify") or {}
     if nt:
         lines.append(

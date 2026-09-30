@@ -35,12 +35,12 @@ const REQUIRED = ["go", "bt", "sym", "syms", "styles", "chips", "refreshBtn",
   "archiveBtn", "fundBtn", "sbBtn", "setupsBtn", "result", "btPanel",
   "setupsPanel", "alarmsDock", "tvBox", "shotGrid", "lightbox", "revChip",
   "dataChip", "riskPanel", "rkBalance", "rkRisk", "rkDaily", "rkOpen",
-  "rkStat", "rkSave", "installBtn"];
+  "rkStat", "rkSave", "installBtn", "bkDock", "bkToggle", "bkBody", "bkState"];
 const HANDLER_IDS = new Set(["rkSave", "installBtn"]);   // وایر داخلِ IIFE — با CDP سنجیده می‌شود
 /* کنترل‌هایی که اپ با `.onclick =` به آن‌ها هندلر می‌دهد؛ اگر این‌ها تابع نباشند
    یعنی بلوکِ اسکریپت اجرا نشده یا نیمه‌کاره مرده است. */
 const WIRED = ["go", "refreshBtn", "bt", "setupsBtn", "fundBtn", "archiveBtn",
-  "rkSave"];
+  "rkSave", "bkToggle"];
 const LISTENER_ONLY = ["sbBtn", "styles", "installBtn"];
 
 const problems = [];
@@ -1122,6 +1122,71 @@ function loadPuppeteer() {
     }
   } catch (e) {
     fail("بررسیِ سرویس‌ورکر/آفلاین ممکن نشد: " + e.message);
+  }
+
+  /* ۶.۹) کرکره‌ی «پشتیبان و انتقالِ داده» — خواسته‌ی کاربر: «اون بخش فقط یه کلید
+     باشه که روش کلیک بشه و کرگره گزینه‌هاش باز بشه؛ الان صفحه اصلی رو شلوغ و
+     بچه‌گونه نشون می‌ده». قراردادِ سه‌مرحله‌ای در مرورگرِ واقعی: (۱) در بارگذاری
+     نوار بسته است و گزینه‌ها **دیده نمی‌شوند**؛ (۲) یک کلیک روی نوار بدنه را باز
+     می‌کند و گزینه‌ها واقعاً کلیک‌پذیر می‌شوند (روی‌شان چیزی نمی‌افتد)؛ (۳) کلیکِ
+     دوباره می‌بندد. این رفتارِ رندرشده را هیچ چکِ متنی نمی‌بیند. */
+  try {
+    const dock = await page.evaluate(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const d = document.getElementById("bkDock"), b = document.getElementById("bkBody"),
+            t = document.getElementById("bkToggle"), ex = document.getElementById("expBtn"),
+            st = document.getElementById("bkState");
+      if (!d || !b || !t || !ex) return { missing: "bkDock/bkBody/bkToggle/expBtn" };
+      const disp = (el) => getComputedStyle(el).display;
+      const visible = (el) => { const r = el.getBoundingClientRect(); return r.height > 0 && r.width > 0; };
+      const out = { atLoad: { open: d.classList.contains("open"), display: disp(b),
+                              optsVisible: visible(ex), aria: t.getAttribute("aria-expanded"),
+                              summary: st ? (st.textContent || "").trim() : null } };
+      t.click(); await wait(90);
+      // ⚠ elementFromPoint با مختصاتِ **ویوپورت** کار می‌کند؛ اگر بخشِ بازشده زیرِ
+      // تای صفحه باشد مقدارِ null می‌دهد و ادعای «کلیک‌پذیر» دروغ می‌شود. پس اول
+      // خودِ کرکره را وسطِ صفحه می‌آوریم و بعد نقطه‌ی مرکزِ گزینه را می‌سنجیم.
+      d.scrollIntoView({ block: "center" });
+      await wait(80);
+      const r2 = ex.getBoundingClientRect();
+      const under = document.elementFromPoint((r2.left + r2.right) / 2, (r2.top + r2.bottom) / 2);
+      out.opened = { open: d.classList.contains("open"), display: disp(b),
+                     optsVisible: visible(ex), aria: t.getAttribute("aria-expanded"),
+                     inView: r2.top >= 0 && r2.bottom <= innerHeight,
+                     clickable: !!under && ex.contains(under) };
+      t.click(); await wait(90);
+      out.closedAgain = { open: d.classList.contains("open"), display: disp(b),
+                          aria: t.getAttribute("aria-expanded") };
+      return out;
+    });
+    if (dock.missing) fail("کرکره‌ی پشتیبان ناقص است: " + dock.missing + " پیدا نشد");
+    else {
+      if (dock.atLoad.open)
+        fail("کرکره‌ی پشتیبان در بارگذاری باز است — بخشِ پشتیبان باید جمع باشد");
+      if (dock.atLoad.display !== "none")
+        fail("بدنه‌ی کرکره‌ی پشتیبان در بارگذاری نمایش داده می‌شود (display=" + dock.atLoad.display + ")");
+      if (dock.atLoad.optsVisible)
+        fail("گزینه‌های پشتیبان در بارگذاری دیده می‌شوند — نمای اصلی شلوغ می‌مانَد");
+      if (dock.atLoad.aria !== "false")
+        fail("نوارِ کرکره‌ی پشتیبان aria-expanded=\"false\" ندارد (مقدار: " + dock.atLoad.aria + ")");
+      if (!dock.atLoad.summary || /در حالِ خواندن/.test(dock.atLoad.summary))
+        fail("خلاصه‌ی وضعیتِ پشتیبان روی نوارِ بسته پر نشد (متن: " + JSON.stringify(dock.atLoad.summary) + ")");
+      if (!dock.opened.open || dock.opened.display === "none")
+        fail("با یک کلیک روی نوار، بدنه‌ی کرکره‌ی پشتیبان باز نشد");
+      if (!dock.opened.optsVisible)
+        fail("پس از باز شدن، گزینه‌های پشتیبان دیده نمی‌شوند");
+      if (!dock.opened.clickable)
+        fail("پس از باز شدن، گزینه‌ی برون‌بری کلیک‌پذیر نیست (در ویوپورت: "
+          + dock.opened.inView + ") — یا چیزی رویش افتاده یا بخش بیرونِ ویوپورت است");
+      if (dock.opened.aria !== "true")
+        fail("پس از باز شدن، aria-expandedِ نوار به true به‌روز نشد");
+      if (dock.closedAgain.open || dock.closedAgain.display !== "none")
+        fail("کلیکِ دوباره روی نوار، کرکره‌ی پشتیبان را نبست");
+      notes.push(`کرکره‌ی پشتیبان: بسته در بارگذاری (${dock.atLoad.summary}) · `
+        + "باز/بسته با یک کلیک · گزینه‌ها کلیک‌پذیر ✓");
+    }
+  } catch (e) {
+    fail("بررسیِ کرکره‌ی پشتیبان ممکن نشد: " + e.message);
   }
 
   /* ۱۰) اسکرین‌شات برای بازبینیِ انسانی. */
