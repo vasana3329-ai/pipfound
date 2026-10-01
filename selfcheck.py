@@ -1831,6 +1831,31 @@ _FEED_UI_IMPACT_RE = re.compile(r"تأثیرِ همین نتیجه")
 _FEED_UI_WAIT_RE = re.compile(r"هنوز از منبع نرسیده")
 _FEED_UI_SRCFAIL_RE = re.compile(r"منبعِ نتیجه پاسخ نداد")
 
+# قراردادِ «پنجرهٔ گذشته + بجِ زندهٔ اعلام» (خواستهٔ کاربر: بجِ «N دقیقه پیش»
+# بدونِ رفرشِ کلِ صفحه زنده باشد و پنجرهٔ گذشتهٔ فید ۶/۱۲/۲۴ ساعته انتخاب شود).
+_FW_WINDOWS_RE = re.compile(r"PAST_WINDOWS\s*=\s*\(\s*6\s*,\s*12\s*,\s*24\s*\)")
+_FW_FN_RE = re.compile(r"def past_window\s*\(")
+_FW_NORM_RE = re.compile(r"return min\(PAST_WINDOWS, key=lambda")
+_FW_OFF_RE = re.compile(r"if\s+n\s*<=\s*0:\s*\n\s*return\s+0")
+_FW_FEED_RE = re.compile(r"hours=past_window\(past_hours\)")
+_FW_BUILD_RE = re.compile(r"past_hours\s*=\s*past_window\(past_hours\)")
+_FW_ECHO_RE = re.compile(r'"past_hours":\s*past_hours')
+_FW_ROUTE_RE = re.compile(r'get\("past",')
+_FW_ROUTE_PASS_RE = re.compile(r"past_hours=past_hours")
+_FW_SEG_RE = re.compile(r'id="pastSeg"')
+_FW_SEG_BTN_RE = re.compile(r'data-p="(6|12|24)"')
+_FW_STATE_RE = re.compile(r"pastHours=6")
+_FW_FETCH_RE = re.compile(r'\+"&past="\+pastHours')
+_FW_TICK_FN_RE = re.compile(r"function tickBadges\s*\(\s*\)")
+_FW_TICK_SEL_RE = re.compile(r'"#list \.cd-badge\.past\[data-m\]"')
+_FW_TICK_BASE_RE = re.compile(r"Date\.now\(\)-T0")
+_FW_DATAM_RE = re.compile(r'data-m="\$\{e\.minutes_ago\}"')
+_FW_TICK_LOOP_RE = re.compile(r"setInterval\(tickBadges,")
+_FW_T0_RE = re.compile(r"T0=Date\.now\(\)")
+_FW_T0_INIT_RE = re.compile(r"pastHours=6,\s*T0=Date\.now\(\)")
+_FW_FIRSTLOAD_RE = re.compile(r'if\(!DATA\)\s*\$\("#list"\)')
+_FW_OPEN_KEEP_RE = re.compile(r"openKeys\.has\(evKey\(e\)\)")
+
 # ── قراردادِ «کلیدِ بی‌واکنش نداریم» (لایهٔ ۴.۱۷) ───────────────────────────
 # شکایتِ واقعیِ کاربر: «چک کن خیلی از کلیدا رو از کار انداختی — مثلاً فاندمنتال و
 # روزرسانی». راستی‌آزماییِ زندهٔ اپ نشان داد دو بی‌صداییِ **واقعی** وجود دارد:
@@ -2252,6 +2277,148 @@ def feed_switch_problems(root, pages=None):
     return probs, stats
 
 
+def feed_window_problems(root, pages=None):
+    """قراردادِ «پنجرهٔ گذشته + بجِ زندهٔ اعلام» (خواستهٔ کاربر).
+
+    دو چیز باید سالم بماند:
+      ۱) پنجرهٔ گذشتهٔ فید فقط ۶/۱۲/۲۴ ساعت باشد و از انتخابگرِ رابط به سرور
+         برود (`?past=`) — با `past_window` قطعیِ شود تا ورودیِ دلبخواهیِ URL
+         فید را سنگین یا خالی نکند.
+      ۲) بجِ «N دقیقه پیش» با یک تیکِ سبکِ سمتِ کاربر (بدونِ فراخوانیِ
+         `load()`/`render()`/شبکه) زنده بماند — اگر کسی دوباره خواندنِ کامل
+         را جا بگذارد، کاربر دوباره می‌گوید «صفحه دارد رفرش می‌شود».
+    """
+    probs = []
+    stats = {"windows": False, "fn": False, "norm": False, "feed": False,
+             "build": False, "echo": False, "route": False, "seg": False,
+             "seg_btns": 0, "state": False, "fetch": False, "tick": False,
+             "tick_lean": False, "datam": False, "loop": False, "t0": False,
+             "off": False, "firstload": False, "keep": False}
+    fsrc = read_text(os.path.join(root, "fundamental.py")) or ""
+    appsrc = read_text(os.path.join(root, "app.py")) or ""
+    fund = (pages or {}).get("FUND_PAGE") or ""
+    if not fsrc:
+        probs.append("fundamental.py خوانده نشد — پنجرهٔ گذشتهٔ فید سنجیده نمی‌شود")
+        return probs, stats
+    if _FW_WINDOWS_RE.search(fsrc) is None:
+        probs.append("fundamental.py · پنجره‌های مجازِ گذشته (`PAST_WINDOWS = (6, 12, 24)`)"
+                     " پیدا نشد — پنجرهٔ گذشتهٔ فید بی‌سقف می‌شود")
+        return probs, stats
+    stats["windows"] = True
+    if _FW_FN_RE.search(fsrc) is None:
+        probs.append("fundamental.py · `past_window` حذف شده — مقدارِ `?past=` از "
+                     "URL خام به فید می‌رسد")
+        return probs, stats
+    stats["fn"] = True
+    wreg = _py_region(fsrc, "def past_window", "\ndef _feed_past_event")
+    if not wreg:
+        probs.append("fundamental.py · بدنهٔ `past_window` پیدا نشد — قطعی‌سازیِ "
+                     "پنجره سنجیده نمی‌شود")
+    else:
+        if _FW_NORM_RE.search(wreg) is None:
+            probs.append("fundamental.py · `past_window` مقدارِ نامعتبر را به نزدیک‌ترین "
+                         "پنجرهٔ مجاز نمی‌برد — ورودیِ عجیب، فید را خالی/سنگین می‌کند")
+        else:
+            stats["norm"] = True
+        if _FW_OFF_RE.search(wreg) is None:
+            probs.append("fundamental.py · صفر در `past_window` دیگر «خاموش» نیست — "
+                         "قراردادِ پنجرهٔ صفر (فیدِ فقط پیشِ‌رو) بی‌صدا عوض می‌شود")
+        else:
+            stats["off"] = True
+    freg = _py_region(fsrc, "def build_feed", "_VERDICT_SKIP_TOKENS")
+    if freg and _FW_FEED_RE.search(freg):
+        stats["feed"] = True
+    else:
+        probs.append("fundamental.py · `build_feed` پنجرهٔ گذشته را از `past_window` "
+                     "نمی‌گیرد — انتخابگرِ ۶/۱۲/۲۴ بی‌اثر می‌مانَد")
+    breg = _py_region(fsrc, "def build(", "\nif __name__")
+    if breg and _FW_BUILD_RE.search(breg):
+        stats["build"] = True
+    else:
+        probs.append("fundamental.py · `build` پنجرهٔ گذشته را قطعی نمی‌کند — مقدارِ خامِ "
+                     "URL به لایهٔ پایین می‌رود")
+    if breg and _FW_ECHO_RE.search(breg):
+        stats["echo"] = True
+    else:
+        probs.append("fundamental.py · پنجرهٔ مؤثرِ گذشته (`past_hours`) در پاسخ نمی‌آید — "
+                     "رابط نمی‌فهمد سرور کدام پنجره را سرو کرده")
+    if not appsrc:
+        probs.append("app.py خوانده نشد — مسیرِ /api/fundamental سنجیده نمی‌شود")
+    else:
+        rreg = _py_region(appsrc, 'if u.path == "/api/fundamental":', 'if u.path == "/fundamental":')
+        if rreg and _FW_ROUTE_RE.search(rreg) and _FW_ROUTE_PASS_RE.search(rreg):
+            stats["route"] = True
+        else:
+            probs.append("app.py · مسیرِ /api/fundamental پارامترِ `past` را نمی‌خواند/"
+                         "به `build` نمی‌دهد — انتخابگرِ گذشتهٔ رابط کار نمی‌کند")
+    if not fund:
+        probs.append("app.py → متنِ FUND_PAGE خوانده نشد — رابطِ پنجره/بجِ زنده سنجیده نمی‌شود")
+        return probs, stats
+    _segopts = set(_FW_SEG_BTN_RE.findall(fund))
+    stats["seg_btns"] = len(_segopts)
+    if _FW_SEG_RE.search(fund) is None or len(_segopts) < 3:
+        probs.append("app.py · انتخابگرِ «گذشته» (‏#pastSeg با ۶/۱۲/۲۴ ساعت) در فید نیست")
+    else:
+        stats["seg"] = True
+    if _FW_STATE_RE.search(fund) is None:
+        probs.append("app.py · حالتِ `pastHours` در فید نیست — انتخابگر به درخواست وصل نمی‌شود")
+    else:
+        stats["state"] = True
+    if _FW_FETCH_RE.search(fund) is None:
+        probs.append("app.py · درخواستِ فید پارامترِ `&past=` را نمی‌فرستد — انتخابگرِ گذشته بی‌اثر است")
+    else:
+        stats["fetch"] = True
+    if _FW_TICK_FN_RE.search(fund) is None:
+        probs.append("app.py · تابعِ زنده‌سازیِ بج (`tickBadges`) در فید نیست — «N دقیقه پیش» "
+                     "فقط با بازخوانیِ کاملِ صفحه تازه می‌شود")
+        return probs, stats
+    treg = _py_region(fund, "function tickBadges(", "\nasync function load(){")
+    if not treg:
+        probs.append("app.py · بدنهٔ `tickBadges` پیدا نشد — زنده‌بودنِ بج سنجیده نمی‌شود")
+    else:
+        if "load()" in treg or "render()" in treg or "fetch(" in treg:
+            probs.append("app.py · `tickBadges` فهرست را دوباره می‌سازد/می‌خواند — همان "
+                         "«رفرشِ صفحه»ی ناخواسته؛ بج باید فقط متنِ خودش را عوض کند")
+        else:
+            stats["tick_lean"] = True
+        if _FW_TICK_SEL_RE.search(treg) is None:
+            probs.append("app.py · تیکِ بج فقط کارت‌های اعلام‌شدهٔ عدددار را هدف نمی‌گیرد "
+                         "(‏`#list .cd-badge.past[data-m]`)")
+        else:
+            stats["tick"] = True
+        if _FW_TICK_BASE_RE.search(treg) is None:
+            probs.append("app.py · محاسبهٔ «دقیقه‌ها» در تیک به زمانِ خواندنِ فید (T0) گره "
+                         "نخورده — ساعتِ اشتباهِ دستگاه کاربر عدد را خراب می‌کند")
+    if _FW_DATAM_RE.search(fund) is None:
+        probs.append("app.py · `minutes_ago` سرور روی خودِ بج (`data-m`) نمی‌نشیند — تیک "
+                     "مبنایی برای شمردن ندارد")
+    else:
+        stats["datam"] = True
+    if _FW_TICK_LOOP_RE.search(fund) is None:
+        probs.append("app.py · زمان‌بندِ تیکِ بج (`setInterval(tickBadges, …)`) نیست — بج "
+                     "هرگز خودش جلو نمی‌رود")
+    else:
+        stats["loop"] = True
+    lreg = _py_region(fund, "async function load(){", '\n$("#impSeg")')
+    if _FW_T0_INIT_RE.search(fund) is None or \
+            not (_FW_T0_RE.search(lreg) and _FW_T0_RE.search(fund)):
+        probs.append("app.py · `T0` با هر خواندنِ فید به‌روز نمی‌شود — مبناِ تیک کهنه "
+                     "می‌مانَد و «N دقیقه پیش» عقب می‌افتد")
+    else:
+        stats["t0"] = True
+    if _FW_FIRSTLOAD_RE.search(fund) is None:
+        probs.append("app.py · جای‌گیرِ «در حالِ بارگذاری» در هر بازخوانی فهرست را خالی "
+                     "می‌کند — همان حسِ «رفرشِ صفحه» که کاربر گفته بود")
+    else:
+        stats["firstload"] = True
+    if _FW_OPEN_KEEP_RE.search(fund) is None:
+        probs.append("app.py · کارتِ بازِ کاربر در رندرِ دوره‌ای حفظ نمی‌شود (openKeys) — "
+                     "هر ۶۰ ثانیه کارِ باز بسته می‌شود و مثلِ رفرشِ صفحه حس می‌شود")
+    else:
+        stats["keep"] = True
+    return probs, stats
+
+
 def button_alive_problems(root, pages=None):
     """قراردادِ «کلیدِ بی‌واکنش نداریم»: هر کلیدی که تبِ نو باز می‌کند تورِ ایمنیِ
     «همین‌تب» داشته باشد، و پیامِ «کاری نبود» فقط sr-only نباشد."""
@@ -2434,6 +2601,15 @@ def run_checks(root, live=False, enforce_contract=True, accept_removals=False):
     fsp, fsstats = feed_switch_problems(root, pages)
     rep["feed"] = fsstats
     rep["problems"] += [f"فیدِ خبرهای پیش‌رو → {p}" for p in fsp]
+
+    # ── چکِ استاتیکِ «پنجرهٔ گذشته + بجِ زندهٔ اعلام» ──
+    # خواستهٔ کاربر: بجِ «N دقیقه پیش» بدونِ رفرشِ کلِ صفحه زنده باشد و پنجرهٔ
+    # گذشتهٔ فید با انتخابگرِ ۶/۱۲/۲۴ ساعت عوض شود. اگر کسی تیکِ سبک را با
+    # بازخوانیِ کامل عوض کند یا انتخابگر را از درخواست جدا کند، همین‌جا گرفته
+    # می‌شود (نه روزی که کاربر دوباره بگوید «باز هم صفحه رفرش می‌شود»).
+    fwp, fwstats = feed_window_problems(root, pages)
+    rep["feedwin"] = fwstats
+    rep["problems"] += [f"فیدِ زندهٔ خبرهای پیش‌رو → {p}" for p in fwp]
 
     # ── چکِ استاتیکِ «کلیدِ بی‌واکنش نداریم» ──
     # شکایتِ کاربر («کلیدا از کار افتادن»): کلیدِ تبِ نو و پیامِ sr-only دو
@@ -2627,6 +2803,22 @@ def _human(rep):
             f" · انتظارِ صادق: {'✓' if fs.get('wait') else '✗'}"
             f" · نزدیک‌ترین فقط پیشِ‌رو: {'✓' if fs.get('nexthigh') else '✗'}"
             f" · سناریوی پیشِ‌رو: {2 if fs.get('scen_future') else 0}")
+    fw = rep.get("feedwin") or {}
+    if fw:
+        wsel = fw.get("seg_btns", 0)
+        lines.append(
+            f"   فیدِ زنده: پنجرهٔ گذشتهٔ مجاز: {3 if fw.get('windows') else 0}"
+            f" · قطعی‌سازیِ past_window: "
+            f"{'✓' if fw.get('fn') and fw.get('norm') else '✗'}"
+            f" · مرزِ خاموشِ صفر: {'✓' if fw.get('off') else '✗'}"
+            f" · عبورِ انتخابگر به سرور: "
+            f"{'✓' if fw.get('seg') and fw.get('state') and fw.get('fetch') and fw.get('route') else '✗'}"
+            f" · گزینه‌های انتخابگر: {wsel}"
+            f" · تیکِ زندهٔ بج (بی‌رفرش): {'✓' if fw.get('tick') and fw.get('tick_lean') else '✗'}"
+            f" · مبنای دقیقه‌ها: "
+            f"{'✓' if fw.get('datam') and fw.get('loop') and fw.get('t0') else '✗'}"
+            f" · بارِ اول بی‌خالی: {'✓' if fw.get('firstload') else '✗'}"
+            f" · حفظِ کارتِ باز: {'✓' if fw.get('keep') else '✗'}")
     ba = rep.get("buttons") or {}
     if ba:
         lines.append(

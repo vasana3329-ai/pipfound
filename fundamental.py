@@ -196,6 +196,31 @@ def _countdown_fa(td):
     return " و ".join(parts[:2])
 
 
+# پنجره‌های مجازِ «گذشتهٔ» فید (ساعت) — همان‌هایی که انتخابگرِ UI نشان می‌دهد.
+PAST_WINDOWS = (6, 12, 24)
+
+
+def past_window(v):
+    """پنجرهٔ گذشته را به یکی از مقادیرِ مجازِ (۶/۱۲/۲۴) قطعی می‌کند.
+
+    چرا: این مقدار از کوئریِ URL می‌آید (`?past=999`) و تقویمِ گذشته نباید با یک
+    عددِ دلبخواهی تا بی‌نهایت بزرگ شود؛ نزدیک‌ترین پنجرهٔ مجاز انتخاب می‌شود.
+
+    مرزِ عمدی: صفر (و منفی) یعنی **خاموش** — بدونِ رویدادِ گذشته، فقط پیشِ‌روها
+    (قراردادِ دورِ ۷ که نباید بی‌صدا عوض شود). انتخابگرِ رابط فقط ۶/۱۲/۲۴
+    می‌فرستد، پس این حالت فقط برای فراخوانیِ برنامه‌ای/تست است.
+    """
+    try:
+        n = int(v)
+    except Exception:
+        return PAST_WINDOWS[0]
+    if n <= 0:
+        return 0
+    if n in PAST_WINDOWS:
+        return n
+    return min(PAST_WINDOWS, key=lambda w: (abs(w - n), w))
+
+
 def _feed_past_event(e, dt, now, ccy):
     """رویدادِ گذشتهٔ فید (عددش اعلام شده یا دارد می‌شود) — بی‌`analysis`ِ دوشاخه‌ای.
 
@@ -236,7 +261,7 @@ def build_feed(hours=180, min_impact="Medium", past_hours=6):
     cal = M.get_calendar()
     now = datetime.datetime.now(datetime.timezone.utc)
     horizon = now + datetime.timedelta(hours=hours)
-    floor = now - datetime.timedelta(hours=max(0, int(past_hours)))
+    floor = now - datetime.timedelta(hours=past_window(past_hours))
     want = {"High"} if min_impact == "High" else {"High", "Medium"}
     out, past = [], []
     for e in cal:
@@ -447,11 +472,13 @@ def archive(hours=6):
         "note": ("هر خبر فقط «نتیجه‌ی قطعیِ اعلام‌شده» + «تأثیرِ همان نتیجه» را دارد "
                  "(عددِ Actual + صعودی/نزولی + اثرش روی جفت‌ارزها/طلا)؛ چون خبر اعلام "
                  "شده، گزاره‌ی شرطی («اگر بالاتر شد → …») در این پنجره جایی ندارد. اگر "
-                 "عددِ اعلام‌شده در دسترس نباشد، همان خبر نامعلوم اعلام می‌شود."),
+                 "عددِ اعلام‌شده در دسترس نباشد، همان خبر نامعلوم اعلام می‌شود. "
+                 "پنجرهٔ گذشته ۶/۱۲/۲۴ ساعت و از انتخابگرِ UI قابلِ تغییر است."),
     }
 
 
 def build(hours=180, past_hours=6):
+    past_hours = past_window(past_hours)
     feed = build_feed(hours=hours, past_hours=past_hours)
     # «نزدیک‌ترین خبرِ پرتأثیر» فقط از میانِ رویدادهای پیشِ‌رو است؛ رویدادِ
     # اعلام‌شده دیگر «نزدیک‌ترین» نیست — نتیجه‌اش گرفته شده و در فهرست می‌مانَد.
@@ -468,6 +495,7 @@ def build(hours=180, past_hours=6):
         "generated_tehran": f"{_FA_DAYS[now_teh.weekday()]} {now_teh.strftime('%Y-%m-%d %H:%M')} تهران",
         "count": len(feed),
         "count_past": len(passed),
+        "past_hours": past_hours,
         "count_high": len(highs),
         "next_high": highs[0] if highs else None,
         "source_ok": src_ok,

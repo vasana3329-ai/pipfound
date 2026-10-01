@@ -3774,6 +3774,11 @@ h1{font-size:22px;margin:0 0 4px;font-weight:800;
       <button data-h="120" class="active">۵ روز</button>
       <button data-h="180">هفتگی</button>
     </div>
+    <div class="seg" id="pastSeg" title="چند ساعت از خبرهای اعلام‌شده در فید بماند">
+      <button data-p="6" class="active">گذشته: ۶ ساعت</button>
+      <button data-p="12">۱۲ ساعت</button>
+      <button data-p="24">۲۴ ساعت</button>
+    </div>
     <button class="refresh" id="refresh">↻ به‌روزرسانی</button>
   </div>
 
@@ -3785,7 +3790,12 @@ h1{font-size:22px;margin:0 0 4px;font-weight:800;
 
 <script>
 let impMode="high", horHours=120, DATA=null;
+// `pastHours` پنجرهٔ گذشتهٔ فید (۶/۱۲/۲۴ ساعت) است و به سرور می‌رود.
+// `T0` لحظهٔ خواندنِ فید و `openKeys` کارت‌های بازِ کاربر را نگه می‌دارد تا
+// بازخوانیِ ۶۰ثانیه‌ای فهرست، کارتِ باز را نبندد و صفحه «رفرش» به‌نظر نرسد.
+let pastHours=6, T0=Date.now(), openKeys=new Set();
 const $=s=>document.querySelector(s);
+const evKey=e=>`${e.iso}|${e.title}`;
 
 function dirClass(d){ if(d.includes("صعود"))return "dir-up"; if(d.includes("نزول"))return "dir-dn"; return "dir-neu"; }
 
@@ -3846,7 +3856,7 @@ function evCard(e,idx){
         ${scenCard("beat", a.beat)}
         ${scenCard("miss", a.miss)}
       </div>`;
-  return `<div class="ev" data-i="${idx}">
+  return `<div class="ev${openKeys.has(evKey(e))?" open":""}" data-i="${idx}" data-key="${evKey(e)}">
     <div class="ev-head">
       <span class="ev-icon">${a.icon||e.icon||""}</span>
       <div class="ev-main">
@@ -3855,7 +3865,7 @@ function evCard(e,idx){
       </div>
       <span class="ccy">${e.country_fa} (${e.country})</span>
       <span class="imp ${e.impact}">${e.impact==="High"?"پرتأثیر":"متوسط"}</span>
-      <span class="cd-badge${past?" past":""}">${badge}</span>
+      <span class="cd-badge${past?" past":""}"${past&&v.found&&e.minutes_ago!=null?` data-m="${e.minutes_ago}"`:``}>${badge}</span>
       <span class="chev">▾</span>
     </div>
     <div class="ev-body">
@@ -3887,15 +3897,35 @@ function render(){
   if(!evs.length){ $("#list").innerHTML='<div class="empty">در این بازه خبری با این سطحِ تأثیر پیدا نشد.</div>'; return; }
   $("#list").innerHTML=evs.map((e,i)=>evCard(e,i)).join("");
   $("#list").querySelectorAll(".ev-head").forEach(h=>{
-    h.onclick=()=>h.closest(".ev").classList.toggle("open");
+    h.onclick=()=>{
+      const c=h.closest(".ev"), k=c.dataset.key;
+      // کلیدِ کارتِ باز نگه داشته می‌شود تا رندرِ بعدیِ فهرست (هر ۶۰ ثانیه)
+      // کارِ بازِ کاربر را نبندد.
+      if(c.classList.toggle("open")) openKeys.add(k); else openKeys.delete(k);
+    };
+  });
+}
+
+// بجِ «N دقیقه پیش» هر ۳۰ ثانیه زنده می‌شود — نه با رفرشِ صفحه، نه با
+// درخواستِ تازه، نه با رندرِ دوبارهٔ فهرست. مبنا `data-m`ِ سرور (`minutes_ago`
+// در لحظهٔ خواندنِ فید) + زمانِ سپری‌شده از همان لحظه است؛ پس ساعتِ دستگاهِ
+// کاربر هیچ نقشی ندارد و عقب/جلو بودنِ ساعت هم عدد را خراب نمی‌کند.
+function tickBadges(){
+  const mins=Math.floor((Date.now()-T0)/60000);
+  document.querySelectorAll("#list .cd-badge.past[data-m]").forEach(b=>{
+    const m=(parseInt(b.dataset.m,10)||0)+mins;
+    b.textContent=`✅ اعلام شد · ${m} دقیقه پیش`;
   });
 }
 
 async function load(){
-  $("#list").innerHTML='<div class="empty">در حالِ بارگذاریِ تقویم…</div>';
+  // فقط بارِ اول جای‌گیرِ بارگذاری می‌گذارد؛ بازخوانیِ دوره‌ای نباید فهرستِ
+  // کاربر را یک لحظه خالی کند (همان چیزی که مثلِ «رفرشِ صفحه» حس می‌شود).
+  if(!DATA) $("#list").innerHTML='<div class="empty">در حالِ بارگذاریِ تقویم…</div>';
   try{
-    const r=await fetch("/api/fundamental?hours="+horHours);
+    const r=await fetch("/api/fundamental?hours="+horHours+"&past="+pastHours);
     DATA=await r.json();
+    T0=Date.now();
     render();
   }catch(err){
     $("#list").innerHTML=`<div class="err">ارتباط ناموفق: ${err}</div>`;
@@ -3912,9 +3942,16 @@ $("#horSeg").addEventListener("click",e=>{
   document.querySelectorAll("#horSeg button").forEach(x=>x.classList.remove("active"));
   b.classList.add("active"); horHours=parseInt(b.dataset.h,10); load();
 });
+$("#pastSeg").addEventListener("click",e=>{
+  const b=e.target.closest("button"); if(!b)return;
+  document.querySelectorAll("#pastSeg button").forEach(x=>x.classList.remove("active"));
+  b.classList.add("active"); pastHours=parseInt(b.dataset.p,10); load();
+});
 $("#refresh").onclick=load;
 load();
-// شمارشِ معکوسِ زنده هر ۶۰ ثانیه بازخوانی می‌شود
+// بجِ «N دقیقه پیش» هر ۳۰ ثانیه زنده می‌شود و فهرست هر ۶۰ ثانیه از سرور
+// تازه می‌شود؛ هیچ‌کدام رفرشِ صفحه یا بستنِ کارتِ باز نیستند.
+setInterval(tickBadges, 30000);
 setInterval(load, 60000);
 </script>
 </body>
@@ -4184,8 +4221,15 @@ class Handler(BaseHTTPRequestHandler):
                 hours = int(parse_qs(u.query).get("hours", ["180"])[0])
             except Exception:
                 hours = 180
+            # پنجرهٔ گذشتهٔ فید (۶/۱۲/۲۴ ساعت) — `FUND.past_window` هر ورودیِ
+            # دیگری را به نزدیک‌ترین مقدارِ مجاز قطعی می‌کند (کوئری در دستِ کاربر).
             try:
-                return self._send(200, json.dumps(FUND.build(hours=hours), ensure_ascii=False))
+                past_hours = int(parse_qs(u.query).get("past", ["6"])[0])
+            except Exception:
+                past_hours = 6
+            try:
+                return self._send(200, json.dumps(
+                    FUND.build(hours=hours, past_hours=past_hours), ensure_ascii=False))
             except Exception as e:
                 traceback.print_exc()
                 return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))

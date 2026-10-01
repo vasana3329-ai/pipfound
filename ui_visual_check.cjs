@@ -1404,6 +1404,177 @@ function loadPuppeteer() {
     }
   }
 
+  /* ۶.۱۲) فیدِ زنده: پنجرهٔ گذشتهٔ ۶/۱۲/۲۴ + بجِ «N دقیقه پیش» بدونِ رفرشِ صفحه —
+     خواسته‌ی کاربر. سه چیز سنجیده می‌شود، همه بدونِ انتظارِ زمانی (رویدادِ
+     ساختگی به DATA تزریق می‌شود، پس به تقویمِ واقعی وابسته نیست):
+       ۱) انتخابگرِ گذشته سه گزینه دارد و کلیک روی «۲۴ ساعت» واقعاً `?past=24`
+          می‌فرستد (شمارشِ درخواست‌ها)؛
+       ۲) با گذشتِ زمانِ فرضی، `tickBadges()` متنِ بج را جلو می‌برد بدونِ
+          درخواستِ تازه و بدونِ بازساختنِ فهرست (نشانه‌ی جاگذاشته روی کارت
+          باید سالم بمانَد)؛
+       ۳) کارتِ بازِ کاربر از رندرِ دوره‌ای (که هر ۶۰ ثانیه رخ می‌دهد) جانِ
+          سالم می‌برد — همان چیزی که مثلِ «رفرشِ صفحه» حس می‌شد. */
+  try {
+    const feedUrl2 = String(URL).replace(/\/+$/, "") + "/fundamental";
+    await page.goto(feedUrl2, { waitUntil: "domcontentloaded", timeout: 45000 });
+    const apiReqs = [];
+    const onReq = (r) => {
+      const u = r.url();
+      if (u.indexOf("/api/fundamental") >= 0) apiReqs.push(u);
+    };
+    page.on("request", onReq);
+    try {
+      /* ۱) انتخابگرِ پنجرهٔ گذشته */
+      const segInfo = await page.evaluate(async () => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        for (let i = 0; i < 40; i++) {
+          if (document.getElementById("pastSeg")) break;
+          await wait(250);
+        }
+        const seg = document.getElementById("pastSeg");
+        const btns = seg ? Array.from(seg.querySelectorAll("button")) : [];
+        return {
+          ok: !!seg,
+          vals: btns.map((b) => b.dataset.p || ""),
+          texts: btns.map((b) => b.textContent.trim()),
+          active: btns.filter((b) => b.classList.contains("active")).map((b) => b.dataset.p),
+        };
+      });
+      const before = problems.length;
+      if (!segInfo.ok)
+        fail("فیدِ زنده: انتخابگرِ پنجرهٔ گذشته (‏#pastSeg) در صفحه نیست — «۶/۱۲/۲۴ ساعت» قابلِ انتخاب نیست");
+      else {
+        const vals = segInfo.vals.slice().sort().join(",");
+        if (vals !== "12,24,6")
+          fail(`فیدِ زنده: گزینه‌های پنجرهٔ گذشته ${JSON.stringify(segInfo.vals)} است، نه ۶/۱۲/۲۴`);
+        if (segInfo.active.length !== 1)
+          fail("فیدِ زنده: در انتخابگرِ گذشته دقیقاً یک گزینه باید فعال باشد");
+        // کلیک روی «۲۴ ساعت» باید واقعاً پارامترِ past=24 را به سرور بفرستد
+        const n0 = apiReqs.length;
+        await page.evaluate(() => {
+          const b = document.querySelector('#pastSeg button[data-p="24"]');
+          if (b) b.click();
+        });
+        let sent = "";
+        for (let i = 0; i < 40; i++) {
+          const hit = apiReqs.slice(n0).find((u) => u.indexOf("past=24") >= 0);
+          if (hit) { sent = hit; break; }
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        if (!sent)
+          fail("فیدِ زنده: کلیکِ «۲۴ ساعت» درخواستی با `past=24` نفرستاد — انتخابگر به سرور وصل نیست");
+        else
+          notes.push("فیدِ زنده: پنجرهٔ گذشته → " + sent.replace(/^.*\/api/, "api"));
+      }
+
+      /* ۲) بجِ زنده بدونِ رفرش + ۳) کارتِ بازِ ماندگار */
+      const inject = await page.evaluate(async () => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        for (let i = 0; i < 40; i++) {
+          const l = document.getElementById("list");
+          if (l && (l.querySelector(".ev") || l.querySelector(".empty") || l.querySelector(".err"))) break;
+          await wait(250);
+        }
+        const out = { ok: false, before: "", dataM: "", err: "" };
+        try {
+          // توجه: `DATA`/`T0` با `let` در اسکریپتِ کلاسیک تعریف شده‌اند، پس روی
+          // `window` نیستند ولی از همین ریلم با نام قابلِ خواندن/نوشتن‌اند.
+          if (!DATA) DATA = { events: [] };
+          if (!Array.isArray(DATA.events)) DATA.events = [];
+          const iso = new Date(Date.now() - 5 * 60000).toISOString();
+          DATA.events.unshift({
+            iso, title: "PF TEST ANNOUNCED", title_fa: "آزمونِ اعلام‌شده", country: "USD",
+            country_fa: "دلارِ آمریکا", icon: "\u{1F4CA}", cat: "آزمون", impact: "High",
+            forecast: "1.0", previous: "0.9", et: "آزمون", tehran: "آزمون",
+            passed: true, minutes_ago: 5,
+            verdict: { found: true, actual: "1.2", outcome: "\u0635\u0639\u0648\u062f\u06cc",
+                       beat: "\u0628\u0627\u0644\u0627\u062a\u0631 \u0627\u0632 \u0627\u0646\u062a\u0638\u0627\u0631",
+                       dir: "\u0642\u0648\u06cc\u200c\u062a\u0631",
+                       effect: { pairs: [["EUR/USD", "\u2193 \u0646\u0632\u0648\u0644"]],
+                                 gold: ["XAU", "\u2193 \u0646\u0632\u0648\u0644", "\u062f\u0644\u0627\u0631\u0650 \u0642\u0648\u06cc"] } },
+          });
+          render();
+          const card = document.querySelector('#list .ev[data-key*="PF TEST ANNOUNCED"]');
+          if (!card) { out.err = "کارتِ اعلام‌شدهٔ آزمون رندر نشد"; return out; }
+          const badge = card.querySelector(".cd-badge");
+          out.before = badge ? badge.textContent.trim() : "";
+          out.dataM = badge ? String(badge.getAttribute("data-m")) : "";
+          card.setAttribute("data-pf-mark", "1");   // نشانه‌ی «فهرست بازسازی نشد»
+          out.ok = true;
+          return out;
+        } catch (e) {
+          out.err = String(e && e.message || e);
+          return out;
+        }
+      });
+      // پنجرهٔ باریکِ سنجشِ «بی‌درخواست»: فقط همین دو گام زیر شبکه‌ای ندارند
+      const nBeforeTick = apiReqs.length;
+      const live = await page.evaluate(() => {
+        const out = { after: "", markKept: false, openKept: false, err: "" };
+        try {
+          const card = document.querySelector('#list .ev[data-key*="PF TEST ANNOUNCED"]');
+          if (!card) { out.err = "کارتِ آزمون میانِ دو گام گم شد"; return out; }
+          T0 = T0 - 3 * 60000;                        // ۳ دقیقهٔ فرضی گذشته
+          tickBadges();
+          const card2 = document.querySelector('#list .ev[data-key*="PF TEST ANNOUNCED"]');
+          const badge2 = card2 && card2.querySelector(".cd-badge");
+          out.after = badge2 ? badge2.textContent.trim() : "";
+          out.markKept = !!(card2 && card2.getAttribute("data-pf-mark") === "1");
+          // ۳) کارتِ بازِ کاربر نباید با رندرِ دوره‌ای بسته شود
+          card2.querySelector(".ev-head").click();
+          if (card2.classList.contains("open")) {
+            render();
+            const card3 = document.querySelector('#list .ev[data-key*="PF TEST ANNOUNCED"]');
+            out.openKept = !!(card3 && card3.classList.contains("open"));
+            if (card3) card3.querySelector(".ev-head").click();
+          }
+          // پاک‌سازیِ رویدادِ آزمون تا اسکرین‌شات/ادامهٔ اجرا آلوده نشود
+          DATA.events = DATA.events.filter(
+            (e) => String(e.title || "").indexOf("PF TEST ANNOUNCED") < 0);
+          render();
+          return out;
+        } catch (e) {
+          out.err = String(e && e.message || e);
+          return out;
+        }
+      });
+      const nAfterTick = apiReqs.length;
+      if (inject.err)
+        fail("فیدِ زنده: تزریقِ رویدادِ آزمون ممکن نشد — " + inject.err);
+      else if (live.err)
+        fail("فیدِ زنده: سنجشِ بجِ اعلام ممکن نشد — " + live.err);
+      else {
+        if (!/دقیقه پیش/.test(inject.before) || !/اعلام شد/.test(inject.before))
+          fail(`فیدِ زنده: بجِ کارتِ اعلام‌شده «${inject.before}» است — متنِ «✅ اعلام شد · N دقیقه پیش» نیست`);
+        if (inject.dataM !== "5")
+          fail(`فیدِ زنده: minutes_ago سرور روی بج نیست (data-m=${inject.dataM || "—"}) — تیک مبنا ندارد`);
+        if (live.after === inject.before)
+          fail("فیدِ زنده: با گذشتِ زمان، بجِ «N دقیقه پیش» جلو نرفت — زنده نیست");
+        if (!/8 دقیقه پیش/.test(live.after))
+          fail(`فیدِ زنده: بج پس از ۳ دقیقهٔ فرضی «${live.after}» شد، نه ۸ دقیقه پیش`);
+        if (!live.markKept)
+          fail("فیدِ زنده: تیکِ بج فهرست را دوباره ساخت — همان «رفرشِ صفحه»ی ناخواسته");
+        if (nAfterTick !== nBeforeTick)
+          fail(`فیدِ زنده: تیکِ بج ${nAfterTick - nBeforeTick} درخواستِ /api/fundamental فرستاد — باید فقط متن را عوض کند`);
+        if (!live.openKept)
+          fail("فیدِ زنده: کارتِ بازِ کاربر با رندرِ دوره‌ای بسته شد — حسِ رفرشِ صفحه");
+      }
+      if (problems.length === before && !inject.err && !live.err)
+        notes.push(`فیدِ زنده: بجِ اعلامی «${inject.before}» → «${live.after}» بدونِ درخواست/بازسازی ✓`
+          + ` · کارتِ باز ماند ✓ · پنجرهٔ گذشته ۶/۱۲/۲۴ ✓`);
+    } finally {
+      try { page.off("request", onReq); } catch (e) { /* نسخه‌ی قدیمی: بی‌خیال */ }
+    }
+  } catch (e) {
+    fail("بررسیِ فیدِ زنده (پنجرهٔ گذشته + بج) ممکن نشد: " + e.message);
+  } finally {
+    try {
+      await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 45000 });
+    } catch (e) {
+      notes.push("بازگشت به صفحهٔ اصلی بعد از باندِ فیدِ زنده ممکن نشد: " + e.message);
+    }
+  }
+
   /* ۱۰) اسکرین‌شات برای بازبینیِ انسانی. */
   try {
     await page.screenshot({ path: SHOT });
