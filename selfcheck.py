@@ -1815,6 +1815,22 @@ _ARC_PERROW_RE = re.compile(r"◇ این خبر عددِ اعلام‌شده ن�
 _ARC_EFFECT_FN_RE = re.compile(r"def _realized_effect\s*\(")
 _VERDICT_EFFECT_RE = re.compile(r'res\["effect"\]\s*=\s*_realized_effect\s*\(')
 
+# ── قرار دادِ «سوییچِ خودکارِ فید بعد از اعلام» (لایهٔ ۴.۲۰) ───────────────
+# خواستهٔ کاربر: «فیدِ خبرهای پیش‌رو را طوری کن که بعد از اعلامِ عدد، خودکار از
+# گزارهٔ شرطی به «نتیجه + تأثیرِ محقق» سوییچ کند — نه دو سناریوی همیشگی.»
+# فیدِ پیشِ رو عمداً دو سناریو دارد؛ رویدادِ گذشته باید `passed` + `verdict`
+# بگیرد و **بی‌`analysis`** بمانَد تا رندرِ شرطی برایش ممکن نباشد.
+_FEED_PAST_FN_RE = re.compile(r"def _feed_past_event\s*\(")
+_FEED_PAST_FLAG_RE = re.compile(r'"passed":\s*True')
+_FEED_ATTACH_RE = re.compile(r"_attach_verdicts\(past\)")
+_FEED_NEXTHIGH_RE = re.compile(r'==\s*"High"\s*and\s*not\s+e\.get\("passed"\)')
+_FEED_UI_PASSED_RE = re.compile(r"e\.passed")
+_FEED_UI_RES_RE = re.compile(r"resCard\(e,\s*v\)")
+_FEED_UI_BRANCH_RE = re.compile(r"(?<!!)past\s*\?\s*resCard\(e,\s*v\)")
+_FEED_UI_IMPACT_RE = re.compile(r"تأثیرِ همین نتیجه")
+_FEED_UI_WAIT_RE = re.compile(r"هنوز از منبع نرسیده")
+_FEED_UI_SRCFAIL_RE = re.compile(r"منبعِ نتیجه پاسخ نداد")
+
 # ── قراردادِ «کلیدِ بی‌واکنش نداریم» (لایهٔ ۴.۱۷) ───────────────────────────
 # شکایتِ واقعیِ کاربر: «چک کن خیلی از کلیدا رو از کار انداختی — مثلاً فاندمنتال و
 # روزرسانی». راستی‌آزماییِ زندهٔ اپ نشان داد دو بی‌صداییِ **واقعی** وجود دارد:
@@ -2057,6 +2073,16 @@ def _archive_region(page):
     return page[i:j] if j > i else page[i:i + 6000]
 
 
+def _feed_evcard_region(fund):
+    """تکهٔ JSِ سازندهٔ کارتِ رویداد در فید (/fundamental) — سنجشِ «سوییچِ
+    اعلام» فقط همین‌جا انجام می‌شود، نه در کلِ صفحه (سناریوها عمداً هستند)."""
+    i = fund.find("function evCard(e,idx){")
+    if i < 0:
+        return ""
+    j = fund.find("\nfunction render(){", i)
+    return fund[i:j] if j > i else fund[i:i + 4000]
+
+
 def archive_problems(root, pages=None):
     """قراردادِ «نتیجه + تأثیر در آرشیو، بی‌گزارهٔ شرطی»: زنجیرهٔ
     Actual → حکم (با اثرِ محقَق) → رندرِ مطلقِ بی‌شرط سالم بماند."""
@@ -2139,6 +2165,90 @@ def archive_problems(root, pages=None):
                 probs.append("app.py · آرشیو «تأثیرِ همین نتیجه» را نشان نمی‌دهد — "
                              "نتیجه بی‌تأثیر می‌مانَد")
             stats["impact"] = _ARC_IMPACT_RE.search(region) is not None
+    return probs, stats
+
+
+def feed_switch_problems(root, pages=None):
+    """قراردادِ «سوییچِ خودکارِ فید بعد از اعلامِ عدد»: رویدادِ گذشته از
+    _feed_past_event می‌آید (passed=True، بی‌analysis)، حکمِ قطعی با
+    _attach_verdicts(past) تزریق می‌شود، «نزدیک‌ترین خبرِ پرتأثیر» فقط از
+    پیشِ‌روهاست، و رابط برای رویدادِ اعلام‌شده کارتِ «نتیجه + تأثیر» می‌سازد."""
+    probs = []
+    stats = {"past_fn": False, "lean": False, "verdict": False, "nexthigh": False,
+             "ui": False, "impact": False, "wait": False, "scen_future": False}
+    fsrc = read_text(os.path.join(root, "fundamental.py")) or ""
+    fund = (pages or {}).get("FUND_PAGE") or ""
+    if not fsrc:
+        probs.append("fundamental.py خوانده نشد — سوییچِ فید سنجیده نمی‌شود")
+        return probs, stats
+    if _FEED_PAST_FN_RE.search(fsrc) is None:
+        probs.append("fundamental.py · سازندهٔ رویدادِ گذشتهٔ فید (_feed_past_event) "
+                     "حذف شده — فید برای خبرِ اعلام‌شده دو سناریوی همیشگی را می‌مانَد")
+        return probs, stats
+    pfn = _py_region(fsrc, "def _feed_past_event", "\ndef build_feed")
+    if not pfn:
+        probs.append("fundamental.py · بدنهٔ سازندهٔ رویدادِ گذشتهٔ فید پیدا نشد — "
+                     "`passed` و بارِ بی‌analysis سنجیده نمی‌شوند")
+        return probs, stats
+    if _FEED_PAST_FLAG_RE.search(pfn) is None:
+        probs.append("fundamental.py · رویدادِ گذشته `passed=True` نمی‌گیرد — "
+                     "رابط نمی‌فهمد خبر اعلام شده")
+    else:
+        stats["past_fn"] = True
+    if '"analysis"' in pfn:
+        probs.append("fundamental.py · بارِ رویدادِ گذشته باز هم `analysis`ِ دوشاخه‌ای "
+                     "می‌فرستد — رندرِ شرطی برای خبرِ اعلام‌شده ممکن می‌مانَد")
+    stats["lean"] = '"analysis"' not in pfn
+    bfreg = _py_region(fsrc, "def build_feed", "_VERDICT_SKIP_TOKENS")
+    if bfreg and _FEED_ATTACH_RE.search(bfreg):
+        stats["verdict"] = True
+    else:
+        probs.append("fundamental.py · build_feed حکمِ قطعی (_attach_verdicts(past)) را "
+                     "تزریق نمی‌کند — «نتیجه + تأثیر» نمایش داده نمی‌شود")
+    breg = _py_region(fsrc, "def build(", "\nif __name__")
+    if breg and _FEED_NEXTHIGH_RE.search(breg):
+        stats["nexthigh"] = True
+    else:
+        probs.append("fundamental.py · «نزدیک‌ترین خبرِ پرتأثیر» رویدادهای گذشته را "
+                     "کنار نمی‌گذارد — خبرِ اعلام‌شده به‌جای خبرِ بعدی نشان داده می‌شود")
+    if not fund:
+        probs.append("app.py → متنِ FUND_PAGE خوانده نشد — سوییچِ فید در رابط سنجیده نمی‌شود")
+        return probs, stats
+    if _FEED_UI_PASSED_RE.search(fund) is None:
+        probs.append("app.py · فید وضعیتِ اعلام (`e.passed`) را نمی‌سنجد — رویدادِ "
+                     "اعلام‌شده باز هم دو سناریوی شرطی می‌گیرد")
+        return probs, stats
+    evreg = _feed_evcard_region(fund)
+    if not evreg:
+        probs.append("app.py · سازندهٔ کارتِ رویداد (evCard) در FUND_PAGE پیدا نشد")
+        return probs, stats
+    if _FEED_UI_RES_RE.search(evreg) is None:
+        probs.append("app.py · کارتِ «نتیجه» (resCard) در مسیرِ رویدادِ گذشته نیست — "
+                     "سوییچِ اعلام نیمه‌کاره می‌مانَد")
+    else:
+        stats["ui"] = True
+        if _FEED_UI_BRANCH_RE.search(evreg) is None:
+            probs.append("app.py · شاخهٔ رویدادِ اعلام‌شده خراب است (‏`past ? resCard…` نیست) — "
+                         "فید ممکن است برعکس سوییچ کند")
+    if _FEED_UI_IMPACT_RE.search(fund) is None:
+        probs.append("app.py · «تأثیرِ همین نتیجه» در فید رندر نمی‌شود")
+    else:
+        stats["impact"] = True
+    wait_ok = bool(_FEED_UI_WAIT_RE.search(fund)) and bool(_FEED_UI_SRCFAIL_RE.search(fund))
+    if not wait_ok:
+        probs.append("app.py · حالتِ صادقِ انتظارِ نتیجه (عدد نرسیده/منبع پاسخ نداد) "
+                     "در فید نیست — کاربر حدس می‌بیند")
+    stats["wait"] = wait_ok
+    i_res = evreg.find("resCard(e, v)")
+    i_scen = evreg.find('scenCard("beat"')
+    if i_scen < 0:
+        probs.append("app.py · سناریوهای پیشِ‌رو (scenCard) از فید حذف شدند — "
+                     "خبرِ اعلام‌نشده باید دو سناریو داشته باشد")
+    else:
+        stats["scen_future"] = True
+        if not (0 <= i_res < i_scen):
+            probs.append("app.py · ترتیبِ شاخه‌های فید خراب است (سناریو قبل از نتیجه) — "
+                         "برای خبرِ اعلام‌شده هم گزارهٔ شرطی رندر می‌شود")
     return probs, stats
 
 
@@ -2315,6 +2425,15 @@ def run_checks(root, live=False, enforce_contract=True, accept_removals=False):
     arp, arstats = archive_problems(root, pages)
     rep["archive"] = arstats
     rep["problems"] += [f"آرشیوِ اقتصادی → {p}" for p in arp]
+
+    # ── چکِ استاتیکِ «سوییچِ خودکارِ فید بعد از اعلام» ──
+    # خواستهٔ کاربر: فیدِ پیش‌رو بعد از اعلامِ عدد خودکار به «نتیجه + تأثیر»
+    # سوییچ کند، نه دو سناریوی همیشگی. اگر کسی مسیرِ `passed` یا تزریقِ حکم را
+    # بردارد، همین‌جا گرفته می‌شود (پیش از آنکه کاربر دوباره بگوید «چرا باز
+    # «اگر» نشان می‌دهد؟»).
+    fsp, fsstats = feed_switch_problems(root, pages)
+    rep["feed"] = fsstats
+    rep["problems"] += [f"فیدِ خبرهای پیش‌رو → {p}" for p in fsp]
 
     # ── چکِ استاتیکِ «کلیدِ بی‌واکنش نداریم» ──
     # شکایتِ کاربر («کلیدا از کار افتادن»): کلیدِ تبِ نو و پیامِ sr-only دو
@@ -2498,6 +2617,16 @@ def _human(rep):
             f" · بی‌گزارهٔ شرطی: {'✓' if ar.get('conditional') and ar.get('lean') else '✗'}"
             f" · ردیفِ بی‌عدد صادق: {'✓' if ar.get('perrow') else '✗'}"
             f" · صعودی/نزولی در صفحه: {ar.get('outcomes', 0)}")
+    fs = rep.get("feed") or {}
+    if fs:
+        lines.append(
+            f"   فیدِ خبرهای پیش‌رو: سوییچِ اعلام → نتیجه + تأثیر: "
+            f"{'✓' if fs.get('past_fn') and fs.get('ui') and fs.get('verdict') else '✗'}"
+            f" · بی‌گزارهٔ شرطی در رویدادِ اعلام‌شده: {'✓' if fs.get('lean') else '✗'}"
+            f" · تأثیرِ نتیجه در فید: {'✓' if fs.get('impact') else '✗'}"
+            f" · انتظارِ صادق: {'✓' if fs.get('wait') else '✗'}"
+            f" · نزدیک‌ترین فقط پیشِ‌رو: {'✓' if fs.get('nexthigh') else '✗'}"
+            f" · سناریوی پیشِ‌رو: {2 if fs.get('scen_future') else 0}")
     ba = rep.get("buttons") or {}
     if ba:
         lines.append(

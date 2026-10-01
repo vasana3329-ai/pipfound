@@ -3732,6 +3732,14 @@ h1{font-size:22px;margin:0 0 4px;font-weight:800;
 .scard .sh{font-size:13px;font-weight:800;margin-bottom:6px}
 .scard.beat .sh{color:#86efac}
 .scard.miss .sh{color:#fca5a5}
+.scard.res{background:rgba(148,163,184,.07);border:1px solid rgba(148,163,184,.28)}
+.scard.res .sh{color:#cbd5e1}
+.res-num{font-size:13.5px;font-weight:800;display:flex;gap:8px;flex-wrap:wrap;align-items:baseline}
+.res-num b{font-variant-numeric:tabular-nums;font-size:17px}
+.res-imp{margin-top:10px;font-size:12.5px;line-height:1.75;color:#dbe0ff;
+  background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.25);border-radius:8px;padding:9px 12px}
+.res-wait{font-size:13px;color:var(--muted);line-height:1.8}
+.cd-badge.past{background:rgba(34,197,94,.12);color:#86efac;border-color:rgba(34,197,94,.35)}
 .scard .cd-dir{font-size:13px;font-weight:800;margin-bottom:10px;color:var(--txt)}
 .pairtbl{width:100%;border-collapse:collapse;font-size:13px}
 .pairtbl td{padding:5px 4px;border-bottom:1px dashed var(--line)}
@@ -3795,22 +3803,59 @@ function scenCard(cls, s){
   </div>`;
 }
 
+function resCard(e, v){
+  if(!v.found){
+    const txt = (DATA && DATA.source_ok === false)
+      ? "◇ منبعِ نتیجه پاسخ نداد — نتیجه و تأثیری برای گفتن نیست"
+      : "⏳ تازه اعلام شد — عددِ اعلام‌شده هنوز از منبع نرسیده";
+    return `<div class="scard res"><div class="sh">نتیجه</div><div class="res-wait">${txt}</div></div>`;
+  }
+  const arr = v.outcome==="صعودی"?"▲":(v.outcome==="نزولی"?"▼":"◆");
+  const dd = v.outcome==="صعودی"?"صعودی":(v.outcome==="نزولی"?"نزولی":"خنثی");
+  const ff = v.beat?` · ${v.beat}`:"";
+  const dd2 = v.dir?` · ${e.country_fa||""} ${v.dir}`:"";
+  const ef = v.effect||{};
+  const arw = x=>String(x||"").replace("صعود","").replace("نزول","").trim();
+  const pr = (ef.pairs||[]).map(x=>`${x[0]} ${arw(x[1])}`).join(" · ");
+  const gd = ef.gold?`${ef.gold[0]} ${arw(ef.gold[1])}`:"";
+  const imp = [pr, gd].filter(Boolean).join(" · ");
+  return `<div class="scard res">
+    <div class="sh">نتیجهٔ اعلام‌شده</div>
+    <div class="res-num"><span>${arr}</span><span>نتیجه: <b>${v.actual}</b></span><span>${dd}${ff}${dd2}</span></div>
+    ${imp?`<div class="res-imp">تأثیرِ همین نتیجه: ${imp}</div>`:""}
+  </div>`;
+}
+
 function evCard(e,idx){
-  const a=e.analysis;
+  const a=e.analysis||{};
+  const v=e.verdict||{};
+  const past=!!e.passed;
   const fcBox = e.forecast?`<div class="box"><div class="k">پیش‌بینی</div><div class="v">${e.forecast}</div></div>`:"";
   const prBox = e.previous?`<div class="box"><div class="k">قبلی</div><div class="v">${e.previous}</div></div>`:"";
   const enTtl = e.title_fa? `<div class="en">${e.title}</div>` : "";
   const faTtl = e.title_fa || e.title;
+  const badge = past
+    ? (v.found?`✅ اعلام شد${e.minutes_ago!=null?` · ${e.minutes_ago} دقیقه پیش`:""}`:"⏳ نتیجه به‌زودی")
+    : `⏳ ${e.countdown}`;
+  // سوییچِ فید: رویدادِ اعلام‌شده «نتیجه + تأثیرِ محقق» را می‌گیرد، نه دو سناریوی
+  // شرطی — بارِ این رویدادها عمداً `analysis` ندارد (تحلیلِ شرطی فقط برای پیشِ‌رو).
+  const body = past
+    ? resCard(e, v)
+    : `<div class="why">💡 ${a.why}</div>
+      <div class="scen">
+        ${scenCard("beat", a.beat)}
+        ${scenCard("miss", a.miss)}
+      </div>`;
   return `<div class="ev" data-i="${idx}">
     <div class="ev-head">
-      <span class="ev-icon">${a.icon}</span>
+      <span class="ev-icon">${a.icon||e.icon||""}</span>
       <div class="ev-main">
         <div class="ev-title">${faTtl}${enTtl}</div>
-        <div class="ev-meta">${a.cat} · ${e.et}<br>${e.tehran}</div>
+        <div class="ev-meta">${a.cat||e.cat||""} · ${e.et}<br>${e.tehran}</div>
       </div>
       <span class="ccy">${e.country_fa} (${e.country})</span>
       <span class="imp ${e.impact}">${e.impact==="High"?"پرتأثیر":"متوسط"}</span>
-      <span class="cd-badge">⏳ ${e.countdown}</span>
+      <span class="cd-badge${past?" past":""}">${badge}</span>
       <span class="chev">▾</span>
     </div>
     <div class="ev-body">
@@ -3819,11 +3864,7 @@ function evCard(e,idx){
         <span>🇮🇷 <b>${e.tehran}</b></span>
       </div>
       <div class="fc">${fcBox}${prBox}</div>
-      <div class="why">💡 ${a.why}</div>
-      <div class="scen">
-        ${scenCard("beat", a.beat)}
-        ${scenCard("miss", a.miss)}
-      </div>
+      ${body}
     </div>
   </div>`;
 }

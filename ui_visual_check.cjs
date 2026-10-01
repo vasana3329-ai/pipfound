@@ -1329,6 +1329,81 @@ function loadPuppeteer() {
     fail("بررسیِ پنجرهٔ آرشیوِ اقتصادی ممکن نشد: " + e.message);
   }
 
+  /* ۶.۱۱) فیدِ خبرهای پیش‌رو: سوییچِ خودکارِ «اعلام شد → نتیجه + تأثیر»، نه دو
+     سناریوی همیشگی — خواسته‌ی کاربر. صفحهٔ /fundamental در مرورگرِ واقعی:
+     کارتِ رویدادِ اعلام‌شده (نشانِ «اعلام شد») نباید هیچ کارتِ شرطی
+     (‏scard beat/miss) داشته باشد و باید کارتِ نتیجه (‏scard res) داشته باشد؛
+     رویدادِ پیشِ‌رو همچنان دو سناریو دارد. درسِ دورِ قبل: فقط ادعایی سنجیده
+     می‌شود که حالتش در این پنجره واقعاً موجود باشد — اگر رویدادِ اعلام‌شده‌ای
+     نبود، «رکوردِ خالی» یادداشت می‌شود، نه سبزِ بی‌ادعا. */
+  try {
+    // توجه: `URL` این‌جا متغیرِ خودِ اسکریپت (آدرسِ پایه) است و سازندهٔ سراسریِ
+    // `URL` را سایه می‌اندازد؛ پس آدرس با رشته ساخته می‌شود، نه `new URL(...)`.
+    const feedUrl = String(URL).replace(/\/+$/, "") + "/fundamental";
+    await page.goto(feedUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+    const fd = await page.evaluate(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      for (let i = 0; i < 60; i++) {
+        const list = document.getElementById("list");
+        if (list && (list.querySelector(".ev") || list.querySelector(".empty") || list.querySelector(".err"))) break;
+        await wait(250);
+      }
+      const err = document.querySelector("#list .err");
+      const cards = Array.from(document.querySelectorAll(".ev"));
+      const out = {
+        cards: cards.length, err: err ? err.textContent.slice(0, 80) : "",
+        announced: 0, announcedRes: 0, announcedCond: 0, impact: 0, sample: "",
+        future: 0, futureWithCond: 0,
+      };
+      for (const c of cards) {
+        const badge = c.querySelector(".cd-badge");
+        const past = !!(badge && badge.classList.contains("past"));
+        const cond = c.querySelectorAll(".scard.beat, .scard.miss").length;
+        const res = c.querySelectorAll(".scard.res").length;
+        if (past) {
+          out.announced++;
+          if (res) out.announcedRes++;
+          out.announcedCond += cond;
+          const imp = c.querySelector(".res-imp");
+          if (imp) { out.impact++; if (!out.sample) out.sample = imp.textContent.trim().slice(0, 90); }
+        } else {
+          out.future++;
+          if (cond > 0) out.futureWithCond++;
+        }
+      }
+      return out;
+    });
+    const before = problems.length;
+    if (fd.err) notes.push(`فیدِ خبرهای پیش‌رو: خطای بارگذاری (${fd.err}) — سنجشِ سوییچ انجام نشد`);
+    else if (fd.cards === 0) notes.push("فیدِ خبرهای پیش‌رو: در این پنجره رویدادی نبود — سنجشِ سوییچ انجام نشد");
+    else {
+      if (fd.announcedCond > 0)
+        fail(`فید: ${fd.announcedCond} کارتِ شرطی (⬆/⬇) زیرِ رویدادِ اعلام‌شده — `
+          + "«سوییچِ خودکار به نتیجه + تأثیر» نقض شده");
+      if (fd.announced > 0 && fd.announcedRes < fd.announced)
+        fail(`فید: ${fd.announced - fd.announcedRes} رویدادِ اعلام‌شده کارتِ «نتیجه» ندارد`);
+      if (fd.future > 0 && fd.futureWithCond < fd.future)
+        fail(`فید: ${fd.future - fd.futureWithCond} رویدادِ پیشِ‌رو سناریوی شرطی ندارد `
+          + "— تحلیلِ پیش از خبر نباید حذف شود");
+      if (problems.length === before)
+        notes.push(`فیدِ خبرهای پیش‌رو (${fd.announced} اعلام‌شده، ${fd.future} پیشِ‌رو): `
+          + "رویدادِ اعلام‌شده بی‌گزارهٔ شرطی ✓"
+          + (fd.impact ? ` · خطِ تأثیر: ${fd.impact}` : "")
+          + (fd.sample ? ` — نمونه: ${fd.sample}` : "")
+          + (fd.announced === 0
+              ? " — در این پنجره رویدادِ اعلام‌شده نبود؛ فقط ساختارِ پیشِ‌رو سنجیده شد"
+              : ""));
+    }
+  } catch (e) {
+    fail("بررسیِ فیدِ خبرهای پیش‌رو ممکن نشد: " + e.message);
+  } finally {
+    try {
+      await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 45000 });
+    } catch (e) {
+      notes.push("بازگشت به صفحهٔ اصلی برای اسکرین‌شات ممکن نشد: " + e.message);
+    }
+  }
+
   /* ۱۰) اسکرین‌شات برای بازبینیِ انسانی. */
   try {
     await page.screenshot({ path: SHOT });
