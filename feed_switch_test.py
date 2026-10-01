@@ -192,11 +192,13 @@ if not NO_MUT:
         drop(d)
     d = copy_repo()
     try:
+        # دورِ ۴.۲۱: کفِ پنجره از `past_window` می‌آید (پنجرهٔ ۶/۱۲/۲۴)؛ این جهشِ
+        # بی‌گناه فقط یک کامنت روی همان خط می‌گذارد تا لنگرِ تازه هم سنجیده شود.
         edit(d, "fundamental.py",
-             "    floor = now - datetime.timedelta(hours=max(0, int(past_hours)))",
-             "    floor = now - datetime.timedelta(hours=int(past_hours) if past_hours > 0 else 0)")
+             "    floor = now - datetime.timedelta(hours=past_window(past_hours))",
+             "    floor = now - datetime.timedelta(hours=past_window(past_hours))  # کفِ پنجره")
         probs, st = scan(d)
-        check("بی‌گناه: بازنویسیِ هم‌معنیِ پنجرهٔ گذشته سبز می‌مانَد",
+        check("بی‌گناه: کامنتِ تازه روی خطِ کفِ پنجره سبز می‌مانَد",
               probs == [] and st.get("lean") is True, str(probs)[:200])
     finally:
         drop(d)
