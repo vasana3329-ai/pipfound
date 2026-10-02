@@ -1828,7 +1828,9 @@ _FEED_UI_PASSED_RE = re.compile(r"e\.passed")
 _FEED_UI_RES_RE = re.compile(r"resCard\(e,\s*v\)")
 _FEED_UI_BRANCH_RE = re.compile(r"(?<!!)past\s*\?\s*resCard\(e,\s*v\)")
 _FEED_UI_IMPACT_RE = re.compile(r"تأثیرِ همین نتیجه")
-_FEED_UI_WAIT_RE = re.compile(r"هنوز از منبع نرسیده")
+# عبارتِ خودِ ردیفِ رابط لازم است: توضیحِ فارسیِ کنارِ `flipEvent` هم همین
+# کلمه‌ها را دارد و با الگویِ کوتاه‌تر، جهشِ «ردیفِ صادقِ انتظار» را می‌پوشانْد.
+_FEED_UI_WAIT_RE = re.compile(r"عددِ اعلام‌شده هنوز از منبع نرسیده")
 _FEED_UI_SRCFAIL_RE = re.compile(r"منبعِ نتیجه پاسخ نداد")
 
 # قراردادِ «پنجرهٔ گذشته + بجِ زندهٔ اعلام» (خواستهٔ کاربر: بجِ «N دقیقه پیش»
@@ -1841,7 +1843,10 @@ _FW_FEED_RE = re.compile(r"hours=past_window\(past_hours\)")
 _FW_BUILD_RE = re.compile(r"past_hours\s*=\s*past_window\(past_hours\)")
 _FW_ECHO_RE = re.compile(r'"past_hours":\s*past_hours')
 _FW_ROUTE_RE = re.compile(r'get\("past",')
-_FW_ROUTE_PASS_RE = re.compile(r"past_hours=past_hours")
+# پاس‌دادنِ پنجره به `build` سنجیده می‌شود، نه هر `past_hours=past_hours`:
+# مسیرِ `?event=` هم همین پاس را به `one_event` دارد و با الگویِ باز، خرابیِ
+# `build` (انتخابگرِ گذشته) بی‌صدا سبز می‌مانْد.
+_FW_ROUTE_PASS_RE = re.compile(r"FUND\.build\([^)]*past_hours=past_hours")
 _FW_SEG_RE = re.compile(r'id="pastSeg"')
 _FW_SEG_BTN_RE = re.compile(r'data-p="(6|12|24)"')
 _FW_STATE_RE = re.compile(r"pastHours=6")
@@ -1854,6 +1859,42 @@ _FW_TICK_LOOP_RE = re.compile(r"setInterval\(tickBadges,")
 _FW_T0_RE = re.compile(r"T0=Date\.now\(\)")
 _FW_T0_INIT_RE = re.compile(r"pastHours=6,\s*T0=Date\.now\(\)")
 _FW_FIRSTLOAD_RE = re.compile(r'if\(!DATA\)\s*\$\("#list"\)')
+
+# قراردادِ «سوییچِ لحظه‌ایِ اعلام» (خواستهٔ کاربر: کارتِ پیشِ‌رو دقیقاً در لحظهٔ
+# صفر شدنِ شمارشِ معکوس، بدونِ رفرش، به «اعلام شد + نتیجه» سوییچ کند).
+_FF_INS_RE = re.compile(r'"in_s":\s*int\(max\(0,')
+_FF_ONEEV_RE = re.compile(r"def one_event\s*\(")
+_FF_ONEEV_EVENT_RE = re.compile(r'"event":\s*ev,')
+_FF_ONEEV_NEXT_RE = re.compile(r'"next_high":')
+_FF_ONEEV_FEED_RE = re.compile(r"= build_feed\(")
+_FF_ROUTE_RE = re.compile(r'get\("event",')
+_FF_FLIP_FN_RE = re.compile(r"async function flipEvent\s*\(")
+_FF_PATCH_FN_RE = re.compile(r"function patchEvent\s*\(")
+_FF_TICK_CALL_RE = re.compile(r"flipEvent\(c\.dataset\.key\)")
+# کلیدِ dataset برای `data-in-s` می‌شود `inS`؛ خواندن با `dataset.in_s` بی‌صدا
+# `undefined` می‌دهد و همهٔ کارت‌های پیشِ‌رو «رسیده» حساب می‌شوند.
+_FF_INS_READ_RE = re.compile(r'getAttribute\("data-in-s"\)')
+_FF_INS_BAD_RE = re.compile(r"dataset\.in_s")
+_FF_EVENT_URL_RE = re.compile(r"\?event=\$\{encodeURIComponent\(iso\)\}")
+_FF_EARLY_RE = re.compile(r"if\(!ev \|\| ev\.passed!==true\)")
+_FF_RETRY_MAX_RE = re.compile(r"FLIP_RETRY_MAX=(\d+)")
+_FF_RETRY_USE_RE = re.compile(r"n<=FLIP_RETRY_MAX")
+_FF_RETRY_STOP_RE = re.compile(r"delete flipTries\[key\]")
+_FF_RETRY_SCHED_RE = re.compile(r"setTimeout\(\(\)=>flipEvent\(nk\), FLIP_RETRY_MS\)")
+_FF_FOUND_RE = re.compile(r"\(\(ev\.verdict\|\|\{\}\)\.found\)")
+_FF_PATCH_ONLY_RE = re.compile(r"card\.outerHTML=evCard\(ev, idx\)")
+_FF_DATA_SYNC_RE = re.compile(r"DATA\.events\[i\]=ev")
+_FF_REKEY_RE = re.compile(r"const nk=evKey\(ev\)")
+_FF_REKEY_CARD_RE = re.compile(r"findCard\(nk\)")
+_FF_NEXT_SYNC_RE = re.compile(r"DATA\.next_high=\(d && d\.next_high\)\|\|null")
+_FF_NEXT_FN_RE = re.compile(r"function renderNext\s*\(")
+_FF_NEXT_USE_RE = re.compile(r"renderNext\(\)")
+_FF_DATAS_RE = re.compile(r'data-in-s="\$\{e\.in_s\}"')
+_FF_FRESH_BASE_RE = re.compile(r'nb\.setAttribute\("data-t0", String\(Date\.now\(\)\)\)')
+_FF_NUM_MULT_RE = re.compile(r'_NUM_MULT\s*=\s*\{\s*"k":')
+_FF_NUM_USE_RE = re.compile(r"mult\s*=\s*_NUM_MULT\[s\[-1:\]\]")
+_FF_NUM_EMPTY_RE = re.compile(r"if\s+not\s+s:\s*\n\s*return\s+None")
+_FF_NUM_EXACT_RE = re.compile(r"if\s+not\s+s\s+or\s+s\s+in\s+_VERDICT_SKIP_TOKENS:")
 _FW_OPEN_KEEP_RE = re.compile(r"openKeys\.has\(evKey\(e\)\)")
 
 # ── قراردادِ «کلیدِ بی‌واکنش نداریم» (لایهٔ ۴.۱۷) ───────────────────────────
@@ -2230,7 +2271,9 @@ def feed_switch_problems(root, pages=None):
     else:
         probs.append("fundamental.py · build_feed حکمِ قطعی (_attach_verdicts(past)) را "
                      "تزریق نمی‌کند — «نتیجه + تأثیر» نمایش داده نمی‌شود")
-    breg = _py_region(fsrc, "def build(", "\nif __name__")
+    # پنجرهٔ `build` عمداً تا `one_event` بسته می‌شود؛ وگرنه خطوطِ مشترکِ تک‌رویداد
+    # می‌توانست خرابیِ `build` را بپوشانَد و جهشِ آزمون بی‌صدا سبز بمانَد.
+    breg = _py_region(fsrc, "def build(", "\ndef one_event(")
     if breg and _FEED_NEXTHIGH_RE.search(breg):
         stats["nexthigh"] = True
     else:
@@ -2331,7 +2374,9 @@ def feed_window_problems(root, pages=None):
     else:
         probs.append("fundamental.py · `build_feed` پنجرهٔ گذشته را از `past_window` "
                      "نمی‌گیرد — انتخابگرِ ۶/۱۲/۲۴ بی‌اثر می‌مانَد")
-    breg = _py_region(fsrc, "def build(", "\nif __name__")
+    # پنجرهٔ `build` عمداً تا `one_event` بسته می‌شود؛ وگرنه خطوطِ مشترکِ تک‌رویداد
+    # می‌توانست خرابیِ `build` را بپوشانَد و جهشِ آزمون بی‌صدا سبز بمانَد.
+    breg = _py_region(fsrc, "def build(", "\ndef one_event(")
     if breg and _FW_BUILD_RE.search(breg):
         stats["build"] = True
     else:
@@ -2416,6 +2461,157 @@ def feed_window_problems(root, pages=None):
                      "هر ۶۰ ثانیه کارِ باز بسته می‌شود و مثلِ رفرشِ صفحه حس می‌شود")
     else:
         stats["keep"] = True
+    return probs, stats
+
+
+def feed_flip_problems(root, pages=None):
+    """قراردادِ «سوییچِ لحظه‌ایِ اعلام» (خواستهٔ کاربر).
+
+    زنجیره‌ای که باید سالم بماند:
+      ۱) سرور ثانیه‌های **دقیقِ** باقی‌مانده (`in_s`) را می‌دهد — تنها لنگرِ
+         درست برای این‌که کارت در لحظهٔ صفر سوییچ کند و نه با گِردکردنِ ساعتی؛
+      ۲) برای یک کارت فقط «همان یک رویداد» پرسیده می‌شود (`?event=` +
+         `one_event`) نه فهرستِ کل — یعنی بدونِ بازخوانیِ صفحه/فهرست؛
+      ۳) سوییچ فقط وقتی انجام می‌شود که سرور بگوید `passed` (اعلامِ زودرس
+         ممنوع)؛ سوییچ درجا روی همان کارت است (نه `render()`ِ کامل)؛
+      ۴) تا نیامدنِ عدد، ردیفِ صادقِ انتظار می‌مانَد و پرسش با یک **سقف**
+         تکرار می‌شود (نه چرخهٔ بی‌پایان، نه نتیجهٔ ساختگی) — و با رسیدنِ عدد
+         تکرار متوقف می‌شود؛
+      ۵) «نزدیک‌ترین خبرِ پرتأثیر» و مبنای «N دقیقه پیش» همان لحظه تازه می‌شوند
+         تا کارتِ سوییچ‌شده با عددِ کهنه یا کادرِ اشاره به خبرِ گذشته نمانَد.
+    """
+    probs = []
+    stats = {"ins": False, "one_event": False, "route": False, "tick": False,
+             "flip_fn": False, "patch_fn": False, "event_url": False,
+             "early": False, "retry": False, "patch_only": False, "next": False,
+             "datas": False, "fresh_base": False, "num_mult": False,
+             "data_sync": False, "num_exact": False, "ins_read": False,
+             "rekey": False}
+    fsrc = read_text(os.path.join(root, "fundamental.py")) or ""
+    appsrc = read_text(os.path.join(root, "app.py")) or ""
+    fund = (pages or {}).get("FUND_PAGE") or ""
+    if not fsrc:
+        probs.append("fundamental.py خوانده نشد — سوییچِ لحظه‌ایِ اعلام سنجیده نمی‌شود")
+        return probs, stats
+    freg = _py_region(fsrc, "def build_feed", "_VERDICT_SKIP_TOKENS")
+    if not _FF_INS_RE.search(freg):
+        probs.append("fundamental.py · ثانیه‌های دقیقِ باقی‌مانده (`in_s`) در بارِ رویدادِ "
+                     "پیشِ‌رو نیست — رابط نمی‌تواند لحظهٔ اعلام را دقیق بگیرد")
+    else:
+        stats["ins"] = True
+    if _FF_ONEEV_RE.search(fsrc) is None:
+        probs.append("fundamental.py · `one_event` (بارِ یک رویداد برای سوییچِ لحظه‌ای) "
+                     "حذف شده — برای یک کارت باید فهرستِ کل خوانده شود")
+        return probs, stats
+    oreg = _py_region(fsrc, "def one_event", "\nif __name__")
+    if _FF_ONEEV_EVENT_RE.search(oreg) and _FF_ONEEV_NEXT_RE.search(oreg) \
+            and _FF_ONEEV_FEED_RE.search(oreg):
+        stats["one_event"] = True
+    else:
+        probs.append("fundamental.py · `one_event` بارِ رویداد/نزدیک‌ترین خبر را "
+                     "از مسیرِ `build_feed` نمی‌دهد — سوییچِ لحظه‌ای دوباره‌کاری می‌کند")
+    if not appsrc:
+        probs.append("app.py خوانده نشد — مسیرِ تک‌رویداد سنجیده نمی‌شود")
+    else:
+        rreg = _py_region(appsrc, 'if u.path == "/api/fundamental":', 'if u.path == "/fundamental":')
+        if _FF_ROUTE_RE.search(rreg) and "FUND.one_event(" in rreg:
+            stats["route"] = True
+        else:
+            probs.append("app.py · مسیرِ /api/fundamental پارامترِ `event` را نمی‌خواند/"
+                         "به `one_event` نمی‌دهد — سوییچِ لحظه‌ای جوابی نمی‌گیرد")
+    if not fund:
+        probs.append("app.py → متنِ FUND_PAGE خوانده نشد — سوییچِ لحظه‌ای در رابط سنجیده نمی‌شود")
+        return probs, stats
+    if _FF_DATAS_RE.search(fund) is None:
+        probs.append("app.py · `in_s` روی بجِ کارتِ پیشِ‌رو (`data-in-s`) نمی‌نشیند — تیک "
+                     "لنگرِ ثانیه‌ای ندارد")
+    else:
+        stats["datas"] = True
+    stats["ins_read"] = bool(_FF_INS_READ_RE.search(fund)) and not _FF_INS_BAD_RE.search(fund)
+    treg = _py_region(fund, "function tickBadges(", "\nasync function load(){")
+    if _FF_TICK_CALL_RE.search(treg) and "fetch(" not in treg \
+            and _FF_INS_READ_RE.search(treg):
+        stats["tick"] = True
+    else:
+        probs.append("app.py · تیکِ ۳۰ثانیه‌ای در لحظهٔ صفر سوییچ نمی‌کند (یا خودش "
+                     "شبکه می‌زند/لنگرِ ثانیه‌ای را نمی‌خواند) — کارتِ پیشِ‌رو تا "
+                     "پنجرهٔ ۶۰ثانیه‌ای کهنه می‌مانَد")
+    if _FF_INS_BAD_RE.search(fund):
+        probs.append("app.py · لنگرِ ثانیه‌ای با کلیدِ اشتباهِ dataset خوانده می‌شود "
+                     "(`dataset.in_s` وجود ندارد؛ `inS` درست است) — عدد `undefined` "
+                     "می‌شود و همهٔ کارت‌های پیشِ‌رو فوراً «رسیده» حساب می‌شوند")
+    if _FF_FLIP_FN_RE.search(fund) is None:
+        probs.append("app.py · تابعِ سوییچِ لحظه‌ای (`flipEvent`) در فید نیست")
+        return probs, stats
+    freg2 = _py_region(fund, "async function flipEvent(", "\nfunction patchEvent(")
+    if _FF_EVENT_URL_RE.search(freg2):
+        stats["flip_fn"] = True
+    else:
+        probs.append("app.py · `flipEvent` تک‌رویداد (`?event=`) را نمی‌پرسد — می‌خواهد "
+                     "کلِ فهرست را بخواند")
+    stats["event_url"] = bool(_FF_EVENT_URL_RE.search(freg2))
+    if _FF_EARLY_RE.search(freg2) is None:
+        probs.append("app.py · گاردِ «هنوز اعلام نشده» در `flipEvent` نیست — اگر ساعتِ "
+                     "مرورگر جلو باشد، کارت زودرس «اعلام شد» می‌شود")
+    else:
+        stats["early"] = True
+    m = _FF_RETRY_MAX_RE.search(fund)
+    if m and _FF_RETRY_USE_RE.search(freg2) and _FF_RETRY_STOP_RE.search(freg2) \
+            and _FF_RETRY_SCHED_RE.search(freg2) and _FF_FOUND_RE.search(freg2) \
+            and int(m.group(1)) > 0:
+        stats["retry"] = True
+    else:
+        probs.append("app.py · تکرارِ پرسشِ عددِ اعلام‌شده سقف/شرطِ توقف ندارد — یا "
+                     "بی‌سقف می‌پرسد یا بعد از رسیدنِ عدد ادامه می‌دهد")
+    if _FF_NEXT_SYNC_RE.search(freg2) is None or _FF_NEXT_FN_RE.search(fund) is None \
+            or _FF_NEXT_USE_RE.search(freg2) is None:
+        probs.append("app.py · «نزدیک‌ترین خبرِ پرتأثیر» بعد از سوییچ تازه نمی‌شود — "
+                     "کادر به خبرِ اعلام‌شده اشاره می‌کند")
+    else:
+        stats["next"] = True
+    if _FF_PATCH_FN_RE.search(fund) is None:
+        probs.append("app.py · تابعِ سوییچِ درجا (`patchEvent`) در فید نیست")
+        return probs, stats
+    preg = _py_region(fund, "function patchEvent(", "\n$(")
+    if _FF_PATCH_ONLY_RE.search(preg) and "render()" not in preg:
+        stats["patch_only"] = True
+    else:
+        probs.append("app.py · سوییچِ کارت کلِ فهرست را بازمی‌سازد (`render()` در "
+                     "`patchEvent`) — همان حسِ رفرشِ صفحه")
+    stats["patch_fn"] = _FF_PATCH_FN_RE.search(fund) is not None
+    if _FF_REKEY_RE.search(preg) and _FF_REKEY_CARD_RE.search(preg) \
+            and _FF_RETRY_SCHED_RE.search(freg2):
+        stats["rekey"] = True
+    else:
+        probs.append("app.py · وقتی منبع عنوانِ رویداد را عوض کند کلیدِ کارت عوض می‌شود — "
+                     "بدونِ دنبال‌کردنِ کلیدِ تازه، کارت گم/سطرِ DATA تکراری می‌مانَد")
+    if _FF_DATA_SYNC_RE.search(preg) is None:
+        probs.append("app.py · ردیفِ همان رویداد در `DATA.events` به‌روز نمی‌شود — رندرِ "
+                     "بعدیِ فهرست کارتِ سوییچ‌شده را به حالتِ پیشِ‌رو برمی‌گرداند")
+    else:
+        stats["data_sync"] = True
+    if _FF_FRESH_BASE_RE.search(preg) is None:
+        probs.append("app.py · مبنای «N دقیقه پیش»ِ کارتِ سوییچ‌شده تازه نمی‌شود — "
+                     "عددِ بج از T0ِ قبلی جلو می‌زند")
+    else:
+        stats["fresh_base"] = True
+    # عددِ اعلام‌شده در منبع به‌شکلِ «195K»/«1.2M» هم می‌آید؛ اگر خوانندهٔ عدد
+    # پسوندِ مقیاس را نفهمد، کارتِ سوییچ‌شده همیشه «عدد در دسترس نیست» می‌مانَد
+    # (دقیقاً همان چیزی که این سوییچ برای رفعش ساخته شده).
+    nreg = _py_region(fsrc, "def _num(", "\ndef _realized_effect")
+    if _FF_NUM_MULT_RE.search(fsrc) and _FF_NUM_USE_RE.search(nreg) \
+            and _FF_NUM_EMPTY_RE.search(nreg):
+        stats["num_mult"] = True
+    else:
+        probs.append("fundamental.py · خوانندهٔ عدد پسوندِ مقیاس (K/M/B/T) را نمی‌فهمد "
+                     "— «195K» حکمِ «عدد در دسترس نیست» می‌گیرد و کارتِ اعلام‌شده هیچ‌وقت "
+                     "نتیجه نمی‌دهد")
+    if _FF_NUM_EXACT_RE.search(nreg) is None:
+        probs.append("fundamental.py · نشانهٔ «داده نداریم» زیررشته‌ای سنجیده می‌شود — "
+                     "همهٔ عددهای منفی («-2.5%») هم «نامعلوم» می‌شوند و آن خبر نتیجه "
+                     "نمی‌گیرد")
+    else:
+        stats["num_exact"] = True
     return probs, stats
 
 
@@ -2610,6 +2806,15 @@ def run_checks(root, live=False, enforce_contract=True, accept_removals=False):
     fwp, fwstats = feed_window_problems(root, pages)
     rep["feedwin"] = fwstats
     rep["problems"] += [f"فیدِ زندهٔ خبرهای پیش‌رو → {p}" for p in fwp]
+
+    # ── چکِ استاتیکِ «سوییچِ لحظه‌ایِ اعلام» ──
+    # خواستهٔ کاربر: کارتِ پیشِ‌رو دقیقاً در لحظهٔ صفر شدنِ شمارشِ معکوس بدونِ
+    # رفرش به «اعلام شد + نتیجه» سوییچ کند. اگر کسی لنگرِ ثانیه‌ای، مسیرِ
+    # تک‌رویداد، گاردِ اعلامِ زودرس یا سقفِ تکرار را بردارد، همین‌جا گرفته
+    # می‌شود (نه روزی که کاربر بگوید «باز یک دقیقه کهنه می‌مانَد»).
+    flp, flstats = feed_flip_problems(root, pages)
+    rep["feedflip"] = flstats
+    rep["problems"] += [f"سوییچِ لحظه‌ایِ اعلام → {p}" for p in flp]
 
     # ── چکِ استاتیکِ «کلیدِ بی‌واکنش نداریم» ──
     # شکایتِ کاربر («کلیدا از کار افتادن»): کلیدِ تبِ نو و پیامِ sr-only دو
@@ -2819,6 +3024,20 @@ def _human(rep):
             f"{'✓' if fw.get('datam') and fw.get('loop') and fw.get('t0') else '✗'}"
             f" · بارِ اول بی‌خالی: {'✓' if fw.get('firstload') else '✗'}"
             f" · حفظِ کارتِ باز: {'✓' if fw.get('keep') else '✗'}")
+    fl = rep.get("feedflip") or {}
+    if fl:
+        lines.append(
+            f"   سوییچِ لحظه‌ایِ اعلام: لنگرِ ثانیه‌ای: {'✓' if fl.get('ins') else '✗'}"
+            f" · مسیرِ تک‌رویداد: {'✓' if fl.get('one_event') and fl.get('route') else '✗'}"
+            f" · تیکِ لحظهٔ صفر: {'✓' if fl.get('tick') else '✗'}"
+            f" · خواندنِ درستِ لنگرِ ثانیه‌ای: {'✓' if fl.get('ins_read') else '✗'}"
+            f" · سوییچِ درجا (بی‌بازسازی): {'✓' if fl.get('patch_only') else '✗'}"
+            f" · گاردِ اعلامِ زودرس: {'✓' if fl.get('early') else '✗'}"
+            f" · صبرِ سقف‌دار تا عدد: {'✓' if fl.get('retry') else '✗'}"
+            f" · کلیدِ تازه پس از تغییرِ عنوان: {'✓' if fl.get('rekey') else '✗'}"
+            f" · خواندنِ عددِ «۱۹۵K»: {'✓' if fl.get('num_mult') else '✗'}"
+            f" · عددهای منفی: {'✓' if fl.get('num_exact') else '✗'}"
+            f" · نزدیک‌ترین خبرِ تازه: {'✓' if fl.get('next') else '✗'}")
     ba = rep.get("buttons") or {}
     if ba:
         lines.append(

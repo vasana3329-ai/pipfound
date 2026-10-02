@@ -294,6 +294,10 @@ def build_feed(hours=180, min_impact="Medium", past_hours=6):
             "tehran": f"{_FA_DAYS[teh.weekday()]} {teh.strftime('%Y-%m-%d %H:%M')} به‌وقتِ تهران",
             "tehran_short": teh.strftime("%m-%d %H:%M"),
             "in_hours": round((dt - now).total_seconds() / 3600, 1),
+            # `in_s` ثانیه‌های **دقیق**ِ باقی‌مانده است (برخلافِ `in_hours` که
+            # به یک‌دهمِ ساعت گرد می‌شود) — لنگرِ سوییچِ لحظه‌ایِ رابط: کارت
+            # دقیقاً وقتی این به صفر رسید، از پیشِ‌رو به «اعلام‌شده» می‌رود.
+            "in_s": int(max(0, (dt - now).total_seconds())),
             "countdown": _countdown_fa(dt - now),
             "passed": False,
             "analysis": _analysis(e.get("title"), ccy),
@@ -308,14 +312,32 @@ def build_feed(hours=180, min_impact="Medium", past_hours=6):
 # رقم‌های حرفی که «بهتر/بدتر» عددی معنا ندارند (کنترلِ صداقتِ حکم).
 _VERDICT_SKIP_TOKENS = ("—", "-", "n/a", "na", "tbd")
 
+# پسوندِ مقیاسِ عدد در منبعِ Actual/TE: «195K» · «1.2M» · «2.3B» · «1.4T».
+_NUM_MULT = {"k": 1000.0, "m": 1000000.0, "b": 1000000000.0, "t": 1000000000000.0}
+
 
 def _num(v):
-    """«3.6%»/«15.2%»/«1,234K» → شماره؛ نشدن → None (بدونِ حدس)."""
+    """«3.6%»/«15.2%»/«1,234K»/«1.2M» → شماره؛ نشدن → None (بدونِ حدس).
+
+    چرا پسوند هم خوانده می‌شود: عددهای اشتغال/GDP در منبعِ ستونِ Actual
+    به‌شکلِ «195K»/«1.2M» می‌آیند؛ پیش‌تر همین پسوند `None` می‌داد و حکمِ
+    «عددِ اعلام‌شده در دسترس نیست» صادر می‌شد درحالی‌که عدد رسیده بود (یعنی
+    کارتِ اعلام‌شده هیچ‌وقت نتیجه نمی‌گرفت).
+    """
     s = (v or "").replace(",", "").replace("%", "").strip().lower()
-    if not s or any(tok in s for tok in _VERDICT_SKIP_TOKENS):
+    # تطبیق باید **دقیق** باشد، نه زیررشته‌ای: نشانهٔ «داده نداریم» «-» است، ولی
+    # زیررشته‌گرفتن آن همهٔ عددهای **منفی** («-2.5%» = انقباض/افت) را هم
+    # «نامعلوم» می‌کرد و آن خبر هرگز نتیجه نمی‌گرفت.
+    if not s or s in _VERDICT_SKIP_TOKENS:
+        return None
+    mult = 1.0
+    if s[-1:] in _NUM_MULT:
+        mult = _NUM_MULT[s[-1:]]
+        s = s[:-1].strip()
+    if not s:
         return None
     try:
-        return float(s)
+        return float(s) * mult
     except ValueError:
         return None
 
@@ -503,6 +525,32 @@ def build(hours=180, past_hours=6):
         "note": ("آنچه بازار را تکان می‌دهد «انحراف از پیش‌بینی» است، نه خودِ عدد. دورِ "
                  "±۱۵ تا ۳۰ دقیقه‌ی هر خبرِ پرتأثیر، ورودِ تازه ممنوع؛ اجازه بده فِیک‌اوتِ اولیه پاک شود. "
                  "خبری که عددش اعلام شده، از دو سناریو به «نتیجه + تأثیرِ محقق» سوییچ می‌کند."),
+    }
+
+
+def one_event(iso, hours=180, past_hours=6):
+    """بارِ تازهٔ یک رویداد + «نزدیک‌ترین خبرِ پرتأثیر» — برای سوییچِ لحظه‌ایِ فید.
+
+    چرا: فید هر ۶۰ ثانیه یک‌بار کامل خوانده می‌شود؛ برای این‌که کارتِ پیشِ‌رو
+    دقیقاً در لحظهٔ رسیدنِ شمارشِ معکوس به صفر سوییچ کند، رابط فقط همین یک
+    رویداد را می‌پرسد (سبک، بدونِ بازخوانیِ کلِ فهرست و بدونِ رفرشِ صفحه).
+
+    اگر ساعتِ مرورگر کمی جلوتر باشد، رویداد هنوز در فیدِ سرور «پیشِ‌رو» است و
+    همان بارِ پیشِ‌رو (`passed=False`، با سناریوها) برمی‌گردد تا رابط ادعای
+    اعلامِ زودرس نکند. رویدادِ بیرونِ پنجره ⇒ `event=None`.
+    """
+    iso = (iso or "").strip()
+    past_hours = past_window(past_hours)
+    feed = build_feed(hours=hours, past_hours=past_hours)
+    ev = next((e for e in feed if e.get("iso") == iso), None)
+    highs = [e for e in feed if e["impact"] == "High" and not e.get("passed")]
+    return {
+        "iso": iso,
+        "event": ev,
+        "next_high": highs[0] if highs else None,
+        "past_hours": past_hours,
+        "generated_tehran": f"{_FA_DAYS[datetime.datetime.now(TEHRAN).weekday()]} "
+                            f"{datetime.datetime.now(TEHRAN).strftime('%Y-%m-%d %H:%M')} تهران",
     }
 
 

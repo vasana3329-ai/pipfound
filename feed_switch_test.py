@@ -152,8 +152,10 @@ if not NO_MUT:
                        "        pass  # حکم تزریق نشد (جهش)"))
     red("next_high رویدادهای گذشته را کنار نمی‌گذارد",
         "کنار نمی‌گذارد",
+        # لنگر باید مخصوصِ `build` باشد؛ در `one_event` هم همین خط هست.
         lambda d: edit(d, "fundamental.py",
-                       'and not e.get("passed")', ''))
+                       '    highs = [e for e in feed if e["impact"] == "High" and not e.get("passed")]\n    passed = [e for e in feed if e.get("passed")]',
+                       '    highs = list(feed)\n    passed = [e for e in feed if e.get("passed")]'))
     red("رابط وضعیتِ اعلام (e.passed) را نمی‌سنجد",
         "وضعیتِ اعلام",
         lambda d: edit(d, "app.py", "  const past=!!e.passed;", "  const past=false;"))
