@@ -179,11 +179,16 @@ if not NO_MUT:
                        "hours=max(0, int(past_hours))"))
     red("build پنجره را قطعی نمی‌کند",
         "قطعی نمی‌کند",
+        # لنگر عمداً سرِ `build` را هم دارد؛ در `one_event` هم همین خط هست.
         lambda d: edit(d, "fundamental.py",
-                       "    past_hours = past_window(past_hours)\n", ""))
+                       "def build(hours=180, past_hours=6):\n    past_hours = past_window(past_hours)\n",
+                       "def build(hours=180, past_hours=6):\n"))
     red("پنجرهٔ مؤثر در پاسخ نمی‌آید",
         "نمی‌آید",
-        lambda d: edit(d, "fundamental.py", '        "past_hours": past_hours,\n', ""))
+        # لنگر باید مخصوصِ `build` باشد؛ در پاسخِ تک‌رویداد هم همین کلید هست.
+        lambda d: edit(d, "fundamental.py",
+                       '        "count_past": len(passed),\n        "past_hours": past_hours,\n',
+                       '        "count_past": len(passed),\n'))
     red("مسیرِ API پارامترِ past را نمی‌خواند",
         "را نمی‌خواند",
         lambda d: edit(d, "app.py", "FUND.build(hours=hours, past_hours=past_hours)",
@@ -203,16 +208,16 @@ if not NO_MUT:
                        "function tickBadgesGone(){"))
     red("تیکِ بج به بازخوانیِ کامل برگشته",
         "دوباره می‌سازد",
-        lambda d: edit(d, "app.py", "function tickBadges(){\n  const mins=",
-                       "function tickBadges(){\n  load();\n  const mins="))
+        lambda d: edit(d, "app.py", "function tickBadges(){\n  const ms=",
+                       "function tickBadges(){\n  load();\n  const ms="))
     red("تیکِ بج کارت‌های عدددار را هدف نمی‌گیرد",
         "هدف نمی‌گیرد",
         lambda d: edit(d, "app.py", '"#list .cd-badge.past[data-m]"',
                        '"#list .cd-badge"'))
     red("تیکِ بج به زمانِ خواندنِ فید گره نخورده",
         "گره",
-        lambda d: edit(d, "app.py", "const mins=Math.floor((Date.now()-T0)/60000);",
-                       "const mins=0;"))
+        lambda d: edit(d, "app.py", "const ms=Date.now()-T0, mins=Math.floor(ms/60000);",
+                       "const ms=0, mins=Math.floor(ms/60000);"))
     red("minutes_ago سرور روی بج نمی‌نشیند",
         "نمی‌نشیند",
         lambda d: edit(d, "app.py", ' data-m="${e.minutes_ago}"', ' data-mx="${e.minutes_ago}"'))

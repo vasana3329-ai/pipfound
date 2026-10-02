@@ -3865,7 +3865,7 @@ function evCard(e,idx){
       </div>
       <span class="ccy">${e.country_fa} (${e.country})</span>
       <span class="imp ${e.impact}">${e.impact==="High"?"پرتأثیر":"متوسط"}</span>
-      <span class="cd-badge${past?" past":""}"${past&&v.found&&e.minutes_ago!=null?` data-m="${e.minutes_ago}"`:``}>${badge}</span>
+      <span class="cd-badge${past?" past":""}"${past&&v.found&&e.minutes_ago!=null?` data-m="${e.minutes_ago}" data-t0="${T0}"`:``}${!past&&e.in_s!=null?` data-in-s="${e.in_s}"`:``}>${badge}</span>
       <span class="chev">▾</span>
     </div>
     <div class="ev-body">
@@ -3886,17 +3886,27 @@ function render(){
   $("#note").textContent="⚠️ "+(DATA.note||"");
   let evs=DATA.events||[];
   if(impMode==="high") evs=evs.filter(e=>e.impact==="High");
-  // next high
-  const nh=DATA.next_high;
-  $("#nextWrap").innerHTML = nh ? `<div class="next">
+  renderNext();
+  if(!evs.length){ $("#list").innerHTML='<div class="empty">در این بازه خبری با این سطحِ تأثیر پیدا نشد.</div>'; return; }
+  $("#list").innerHTML=evs.map((e,i)=>evCard(e,i)).join("");
+  bindHeads($("#list"));
+}
+
+// کادرِ «نزدیک‌ترین خبرِ پرتأثیر» جدا شد تا بعد از سوییچِ لحظه‌ایِ یک خبر،
+// فقط همین کادر تازه شود (نه کلِ فهرست).
+function renderNext(){
+  const nh=DATA && DATA.next_high;
+  $("#nextWrap").innerHTML = (nh && nh.analysis) ? `<div class="next">
     <div class="lbl">نزدیک‌ترین خبرِ پرتأثیر</div>
     <div class="ttl">${nh.analysis.icon} ${nh.title_fa||nh.title} — ${nh.country_fa}</div>
     <div class="ev-meta" style="margin-top:6px">${nh.et} · 🇮🇷 ${nh.tehran}</div>
     <div style="margin-top:6px">تا اعلام: <span class="cd">${nh.countdown}</span></div>
   </div>` : "";
-  if(!evs.length){ $("#list").innerHTML='<div class="empty">در این بازه خبری با این سطحِ تأثیر پیدا نشد.</div>'; return; }
-  $("#list").innerHTML=evs.map((e,i)=>evCard(e,i)).join("");
-  $("#list").querySelectorAll(".ev-head").forEach(h=>{
+}
+
+// هندلرِ باز/بستهٔ کارت‌ها — هم بعد از رندرِ کامل، هم بعد از سوییچِ تک‌کارت.
+function bindHeads(root){
+  root.querySelectorAll(".ev-head").forEach(h=>{
     h.onclick=()=>{
       const c=h.closest(".ev"), k=c.dataset.key;
       // کلیدِ کارتِ باز نگه داشته می‌شود تا رندرِ بعدیِ فهرست (هر ۶۰ ثانیه)
@@ -3911,10 +3921,23 @@ function render(){
 // در لحظهٔ خواندنِ فید) + زمانِ سپری‌شده از همان لحظه است؛ پس ساعتِ دستگاهِ
 // کاربر هیچ نقشی ندارد و عقب/جلو بودنِ ساعت هم عدد را خراب نمی‌کند.
 function tickBadges(){
-  const mins=Math.floor((Date.now()-T0)/60000);
+  const ms=Date.now()-T0, mins=Math.floor(ms/60000);
   document.querySelectorAll("#list .cd-badge.past[data-m]").forEach(b=>{
-    const m=(parseInt(b.dataset.m,10)||0)+mins;
+    // مبنای هر بج لحظهٔ رسیدنِ *همان* داده است (کارتِ سوییچ‌شده بعد از T0
+    // آمده؛ وگرنه چند دقیقهٔ اضافه به عددش می‌خورد).
+    const t0=parseInt(b.dataset.t0,10);
+    const m=(parseInt(b.dataset.m,10)||0)+Math.floor((isFinite(t0)?(Date.now()-t0):ms)/60000);
     b.textContent=`✅ اعلام شد · ${m} دقیقه پیش`;
+  });
+  // لحظهٔ اعلام: هر کارتِ پیش‌رویی که شمارشِ معکوسش به صفر رسیده، همین‌جا
+  // سوییچ می‌شود (بدونِ بازخوانیِ کلِ فهرست و بدونِ انتظار برای پنجرهٔ ۶۰ثانیه‌ای).
+  document.querySelectorAll("#list .cd-badge[data-in-s]").forEach(b=>{
+    // توجه: `data-in-s` در dataset به `inS` می‌رود (نه `in_s`)؛ با کلیدِ
+    // اشتباه عدد `undefined` می‌شد و همهٔ کارت‌های پیشِ‌رو فوراً "رسیده" حساب
+    // می‌شدند ⇒ خواندن با `getAttribute` صریح است.
+    const left=(parseInt(b.getAttribute("data-in-s"),10)||0)-Math.floor(ms/1000);
+    const c=b.closest(".ev");
+    if(left<=0 && c && !c.dataset.flip) flipEvent(c.dataset.key);
   });
 }
 
@@ -3930,6 +3953,76 @@ async function load(){
   }catch(err){
     $("#list").innerHTML=`<div class="err">ارتباط ناموفق: ${err}</div>`;
   }
+}
+
+// ⏱️ سوییچِ لحظه‌ایِ اعلام: کارتِ پیشِ‌رو درست وقتی شمارشِ معکوسش به صفر
+// می‌رسد، از سرور فقط «همین یک رویداد» را می‌پرسد و اگر عدد اعلام شده باشد
+// همان‌جا «نتیجه + تأثیرِ محقق» می‌گیرد — بدونِ بازخوانیِ کلِ فهرست و بدونِ
+// انتظار برای پنجرهٔ ۶۰ثانیه‌ای. اگر عدد هنوز از منبع نرسیده باشد، ردیفِ
+// صادقِ انتظار می‌مانَد و با یک سقفِ مشخص (نه چرخهٔ بی‌پایان) دوباره پرسیده
+// می‌شود؛ و اگر ساعتِ ما کمی جلوتر از سرور باشد، کارت دست‌نخورده می‌مانَد.
+const FLIP_RETRY_MS=60000, FLIP_RETRY_MAX=8, flipTries={};
+const findCard=k=>Array.from(document.querySelectorAll("#list .ev")).find(x=>x.dataset.key===k);
+
+async function flipEvent(key){
+  const iso=String(key||"").split("|")[0];
+  const card=findCard(key);
+  if(!iso || !card) return;
+  card.dataset.flip="1";
+  try{
+    const r=await fetch(`/api/fundamental?event=${encodeURIComponent(iso)}&hours=${horHours}&past=${pastHours}`);
+    const d=await r.json();
+    const ev=(d && d.event)||null;
+    if(!ev || ev.passed!==true){
+      // سرور می‌گوید هنوز اعلام نشده (یا رویداد از پنجره بیرون رفته) ⇒ هیچ
+      // ادعایی ساخته نمی‌شود؛ کارت همان‌طور می‌مانَد و تیکِ بعدی دوباره می‌سنجد.
+      delete card.dataset.flip;
+      return;
+    }
+    const nk=evKey(ev);   // عنوانِ همین رویداد ممکن است در منبع عوض شده باشد
+    patchEvent(ev, key);
+    DATA.next_high=(d && d.next_high)||null;
+    renderNext();
+    if(!((ev.verdict||{}).found)){
+      // اعلام شد ولی عددش هنوز نرسیده: صادقانه منتظر می‌مانیم و با سقف
+      // دوباره می‌پرسیم (وقتی عدد رسید، همین مسیر کارت را کامل می‌کند).
+      const n=(flipTries[key]||0)+1; flipTries[key]=n;
+      if(n<=FLIP_RETRY_MAX) setTimeout(()=>flipEvent(nk), FLIP_RETRY_MS);
+    }else{
+      delete flipTries[key];
+    }
+  }catch(err){
+    const c=findCard(key); if(c) delete c.dataset.flip;
+  }
+}
+
+// فقط کارتِ همان رویداد درجا جایگزین می‌شود (نه بازسازیِ کلِ فهرست) و حالِ
+// باز/بستهٔ کاربر حفظ می‌شود؛ سطرِ همان رویداد در DATA هم به‌روز می‌شود تا
+// رندرِ بعدی همان تصویر را نشان دهد.
+function patchEvent(ev, key){
+  // کلیدِ کارت از (زمان | عنوان) ساخته می‌شود؛ اگر منبع عنوانِ همان رویداد را
+  // عوض کرده باشد سرور کلیدِ تازه می‌دهد. در آن حالت سطرِ DATA جایگزین می‌شود
+  // (نه اضافه) و کارت با کلیدِ تازه پیدا می‌شود — وگرنه یک سطرِ تکراری
+  // می‌مانْد و کارتِ سوییچ‌شده گم می‌شد.
+  const nk=evKey(ev);
+  if(DATA && Array.isArray(DATA.events)){
+    const i=DATA.events.findIndex(x=>evKey(x)===key);
+    if(i>=0) DATA.events[i]=ev; else DATA.events.push(ev);
+  }
+  const card=findCard(key);
+  if(!card) return;
+  const wasOpen=card.classList.contains("open") || openKeys.has(key);
+  const idx=parseInt(card.dataset.i,10)||0;
+  card.outerHTML=evCard(ev, idx);
+  const nc=findCard(nk);
+  if(!nc) return;
+  bindHeads(nc);
+  if(nk!==key) openKeys.delete(key);
+  if(wasOpen){ openKeys.add(nk); nc.classList.add("open"); }
+  // عددِ «دقیقه پیش»ِ همین کارت از لحظهٔ همین سوییچ شمرده می‌شود، نه از T0ِ
+  // خواندنِ قبلیِ فید — وگرنه عددِ بج چند دقیقه جلو می‌زند.
+  const nb=nc.querySelector(".cd-badge[data-m]");
+  if(nb) nb.setAttribute("data-t0", String(Date.now()));
 }
 
 $("#impSeg").addEventListener("click",e=>{
@@ -4227,7 +4320,15 @@ class Handler(BaseHTTPRequestHandler):
                 past_hours = int(parse_qs(u.query).get("past", ["6"])[0])
             except Exception:
                 past_hours = 6
+            # `?event=<iso>`: فقط همین یک رویداد (+ نزدیک‌ترین خبرِ پرتأثیر) —
+            # برای سوییچِ لحظه‌ایِ کارتِ پیشِ‌رو، رابط لازم نیست فهرستِ کل را
+            # دوباره بخواند.
+            ev_iso = (parse_qs(u.query).get("event", [""])[0] or "").strip()
             try:
+                if ev_iso:
+                    return self._send(200, json.dumps(
+                        FUND.one_event(ev_iso, hours=hours, past_hours=past_hours),
+                        ensure_ascii=False))
                 return self._send(200, json.dumps(
                     FUND.build(hours=hours, past_hours=past_hours), ensure_ascii=False))
             except Exception as e:

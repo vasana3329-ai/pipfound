@@ -1420,7 +1420,10 @@ function loadPuppeteer() {
     const apiReqs = [];
     const onReq = (r) => {
       const u = r.url();
-      if (u.indexOf("/api/fundamental") >= 0) apiReqs.push(u);
+      // درخواستِ عمدیِ «سوییچِ لحظه‌ای» (`?event=`) شمرده نمی‌شود: آن پرسشِ
+      // تک‌رویدادِ سنجیده‌شده است، نه بازخوانیِ فهرست. وگرنه اگر وسطِ این سنجش
+      // یک شمارشِ معکوسِ واقعی به صفر برسد، تیکِ بی‌گناه متهم می‌شود.
+      if (u.indexOf("/api/fundamental") >= 0 && u.indexOf("event=") < 0) apiReqs.push(u);
     };
     page.on("request", onReq);
     try {
@@ -1510,16 +1513,35 @@ function loadPuppeteer() {
       // پنجرهٔ باریکِ سنجشِ «بی‌درخواست»: فقط همین دو گام زیر شبکه‌ای ندارند
       const nBeforeTick = apiReqs.length;
       const live = await page.evaluate(() => {
-        const out = { after: "", markKept: false, openKept: false, err: "" };
+        const out = { after: "", afterNoT0: "", markKept: false, openKept: false, err: "" };
         try {
           const card = document.querySelector('#list .ev[data-key*="PF TEST ANNOUNCED"]');
           if (!card) { out.err = "کارتِ آزمون میانِ دو گام گم شد"; return out; }
-          T0 = T0 - 3 * 60000;                        // ۳ دقیقهٔ فرضی گذشته
+          // «۳ دقیقهٔ فرضی»: تیک سنِ هر بج را از لنگرِ خودش (`data-t0` = لحظه‌ای
+          // که `minutes_ago` از سرور گرفته شده) می‌خواند؛ پس همان لنگر جلو برده
+          // می‌شود و `T0` هم جابه‌جا می‌شود تا مسیرِ پشتیبان (بجِ بی‌`data-t0`)
+          // در همان گام یکسان سنجیده شود.
+          const age = (ms) => {
+            T0 = T0 - ms;
+            document.querySelectorAll("#list .cd-badge.past[data-t0]").forEach((b) => {
+              const v = parseInt(b.getAttribute("data-t0"), 10);
+              if (isFinite(v)) b.setAttribute("data-t0", String(v - ms));
+            });
+          };
+          age(3 * 60000);
           tickBadges();
           const card2 = document.querySelector('#list .ev[data-key*="PF TEST ANNOUNCED"]');
           const badge2 = card2 && card2.querySelector(".cd-badge");
           out.after = badge2 ? badge2.textContent.trim() : "";
           out.markKept = !!(card2 && card2.getAttribute("data-pf-mark") === "1");
+          // بجِ بی‌`data-t0` (صفحهٔ کش‌شدهٔ قدیمی) هم باید جلو برود — پشتیبانِ T0.
+          if (badge2) {
+            badge2.removeAttribute("data-t0");
+            age(60000);
+            tickBadges();
+            out.afterNoT0 = badge2.textContent.trim();
+            badge2.setAttribute("data-t0", String(T0 + 60000));  // بازگرداندنِ لنگر
+          }
           // ۳) کارتِ بازِ کاربر نباید با رندرِ دوره‌ای بسته شود
           card2.querySelector(".ev-head").click();
           if (card2.classList.contains("open")) {
@@ -1552,6 +1574,9 @@ function loadPuppeteer() {
           fail("فیدِ زنده: با گذشتِ زمان، بجِ «N دقیقه پیش» جلو نرفت — زنده نیست");
         if (!/8 دقیقه پیش/.test(live.after))
           fail(`فیدِ زنده: بج پس از ۳ دقیقهٔ فرضی «${live.after}» شد، نه ۸ دقیقه پیش`);
+        if (!/9 دقیقه پیش/.test(live.afterNoT0 || ""))
+          fail(`فیدِ زنده: بجِ بدونِ data-t0 (صفحهٔ کش‌شده) با لنگرِ T0 جلو نرفت `
+            + `(«${live.afterNoT0 || "—"}») — پشتیبانِ سنِ بج کار نمی‌کند`);
         if (!live.markKept)
           fail("فیدِ زنده: تیکِ بج فهرست را دوباره ساخت — همان «رفرشِ صفحه»ی ناخواسته");
         if (nAfterTick !== nBeforeTick)
@@ -1572,6 +1597,229 @@ function loadPuppeteer() {
       await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 45000 });
     } catch (e) {
       notes.push("بازگشت به صفحهٔ اصلی بعد از باندِ فیدِ زنده ممکن نشد: " + e.message);
+    }
+  }
+
+  /* ۶.۱۳) سوییچِ لحظه‌ایِ اعلام: کارتِ پیشِ‌رو در لحظهٔ صفر شدنِ شمارشِ معکوس،
+     بدونِ رفرشِ فهرست، فقط با یک پرسشِ تک‌رویداد به «اعلام شد + نتیجه» می‌رود —
+     خواسته‌ی کاربر. دو چیز سنجیده می‌شود، هر دو قطعی و بی‌وابسته به تقویمِ واقعی:
+       ۱) مسیرِ واقعی: `?event=<iso>` باید همان رویداد را برگرداند و لنگرِ ثانیه‌ای
+          (`in_s`) را همراه داشته باشد؛
+       ۲) رفتارِ سوییچ: با لنگرِ ثانیه‌ایِ صفرشده و یک پاسخِ ساختگیِ
+          «اعلام‌شده»، همان کارت باید درجا نتیجه + تأثیر بگیرد (صفر سناریو)،
+          «نزدیک‌ترین خبر» تازه شود و ردیفِ DATA هم هم‌گام بماند. */
+  try {
+    const feedUrl3 = String(URL).replace(/\/+$/, "") + "/fundamental";
+    await page.goto(feedUrl3, { waitUntil: "domcontentloaded", timeout: 45000 });
+    const ready = await page.evaluate(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      for (let i = 0; i < 60; i++) {
+        const list = document.getElementById("list");
+        if (list && (list.querySelector(".ev") || list.querySelector(".empty") || list.querySelector(".err"))) break;
+        await wait(250);
+      }
+      const err = document.querySelector("#list .err");
+      const cards = Array.from(document.querySelectorAll("#list .ev"));
+      const fut = cards.find((c) => {
+        const b = c.querySelector('.cd-badge[data-in-s]');
+        // `data-in-s` در dataset به `inS` می‌رود؛ صریح با getAttribute خوانده می‌شود.
+        return b && parseInt(b.getAttribute("data-in-s") || "0", 10) > 120;
+      });
+      if (!fut) return { skip: true, cards: cards.length, err: err ? err.textContent.slice(0, 60) : "" };
+      const iso = String(fut.dataset.key || "").split("|")[0];
+      const inS = parseInt(fut.querySelector('.cd-badge[data-in-s]').getAttribute("data-in-s"), 10);
+      const r = await fetch("/api/fundamental?event=" + encodeURIComponent(iso) + "&hours=120&past=6");
+      const d = await r.json();
+      return {
+        skip: false, iso, inS, keys: d ? Object.keys(d) : [],
+        gotIso: (d && d.event && d.event.iso) || null,
+        passed: d && d.event ? d.event.passed : null,
+        inSServer: d && d.event ? d.event.in_s : null,
+        pastHours: d ? d.past_hours : null,
+        hasNext: !!(d && d.next_high),
+      };
+    });
+    const before = problems.length;
+    if (ready.skip)
+      notes.push(`سوییچِ لحظه‌ای: در این پنجره خبرِ پیشِ‌رویی با فاصلهٔ >۲دقیقه نبود `
+        + `(${ready.cards} کارت) — مسیرِ تک‌رویداد سنجیده نشد`);
+    else {
+      if (ready.gotIso !== ready.iso)
+        fail(`سوییچِ لحظه‌ای: مسیرِ تک‌رویداد رویدادِ دیگری داد (${ready.gotIso} ≠ ${ready.iso})`);
+      if (ready.passed !== false)
+        fail("سوییچِ لحظه‌ای: رویدادِ پیشِ‌رو باید از تک‌رویداد `passed=false` بگیرد، "
+          + `نه ${ready.passed}`);
+      if (!(ready.inSServer > 60))
+        fail(`سوییچِ لحظه‌ای: لنگرِ ثانیه‌ایِ سرور بی‌فایده است (in_s=${ready.inSServer})`);
+      if (ready.keys.indexOf("event") < 0 || ready.keys.indexOf("next_high") < 0)
+        fail(`سوییچِ لحظه‌ای: پاسخِ تک‌رویداد کلیدهای لازم را ندارد (${ready.keys.join(",")})`);
+    }
+
+    const flip = await page.evaluate(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const cards = Array.from(document.querySelectorAll("#list .ev"));
+      const card = cards.find((c) => c.querySelector('.cd-badge[data-in-s]'));
+      if (!card) return { skip: true };
+      // شاهدِ «فقط همین یک کارت سوییچ شد»: اگر لنگرِ ثانیه‌ای اشتباه خوانده شود،
+      // همهٔ کارت‌های پیشِ‌رو فوراً «رسیده» حساب می‌شوند و این عدد صفر می‌شود.
+      const otherKey = (cards.find((c) => c !== card && c.querySelector('.cd-badge[data-in-s]')) || {}).dataset;
+      const otherKeyVal = otherKey ? otherKey.key : null;
+      const key = card.dataset.key;
+      const iso = String(key || "").split("|")[0];
+      const out = { skip: false, flipUrl: "" };
+      const realFetch = window.fetch;
+      // پاسخِ «اعلام‌شده»ِ ساختگی برای همان رویداد — تا سنجش به تقویمِ واقعی وابسته نباشد.
+      // (بارِ دوم عنوان عوض می‌شود تا مسیرِ «کلیدِ تازه» هم سنجیده شود.)
+      const stubFor = (stubIso, stubTitle) => {
+        const body = {
+          ok: true, iso: stubIso, next_high: null, past_hours: 6,
+          event: {
+            iso: stubIso, title: stubTitle, title_fa: "سوییچِ آزمون", country: "USD",
+            country_fa: "دلارِ آمریکا", icon: "\u{1F4CA}", cat: "آزمون", impact: "High",
+            forecast: "1.0", previous: "0.9", et: "آزمون", tehran: "آزمون",
+            passed: true, minutes_ago: 0,
+            verdict: { found: true, actual: "1.2", outcome: "\u0635\u0639\u0648\u062f\u06cc",
+                       beat: "\u0628\u0627\u0644\u0627\u062a\u0631 \u0627\u0632 \u0627\u0646\u062a\u0638\u0627\u0631",
+                       dir: "\u0642\u0648\u06cc\u200c\u062a\u0631",
+                       effect: { pairs: [["EUR/USD", "\u2193 \u0646\u0632\u0648\u0644"]],
+                                 gold: ["XAU", "\u2193 \u0646\u0632\u0648\u0644", "\u062f\u0644\u0627\u0631\u0650 \u0642\u0648\u06cc"] } },
+          },
+        };
+        return Promise.resolve(new Response(JSON.stringify(body),
+          { status: 200, headers: { "Content-Type": "application/json" } }));
+      };
+      let stubTitle = String(key).split("|").slice(1).join("|") || "PF TEST FLIP";
+      window.fetch = (u, o) => {
+        const uu = String(u);
+        if (uu.indexOf("event=") >= 0) {
+          if (!out.flipUrl) out.flipUrl = uu;
+          return stubFor(iso, stubTitle);
+        }
+        return realFetch(u, o);
+      };
+      // لنگرِ ساعت را به «همین حالا» برمی‌گردانیم و لنگرِ ثانیه‌ای فقط همین کارت
+      // را صفر می‌کنیم: کارت‌های دیگر باید پیشِ‌رو بمانند (وقتی کلِ ساعت جابه‌جا
+      // شود همه «رسیده» می‌شوند و سنجش بی‌معنی می‌شود).
+      const zeroAnchor = (c) => {
+        T0 = Date.now();
+        const b = c.querySelector(".cd-badge[data-in-s]");
+        if (b) b.setAttribute("data-in-s", "0");
+      };
+      const waitFlip = async (k) => {
+        for (let i = 0; i < 40; i++) {
+          const nc = Array.from(document.querySelectorAll("#list .ev"));
+          const now = nc.find((c) => c.dataset.key === k);
+          if (now && now.querySelector(".scard.res")) break;
+          await wait(100);
+        }
+      };
+      const snap = (k) => {
+        const nc = Array.from(document.querySelectorAll("#list .ev")).find((c) => c.dataset.key === k);
+        const b = nc ? nc.querySelector(".cd-badge") : null;
+        const dm = nc ? nc.querySelector('.cd-badge[data-m]') : null;
+        const imp = nc ? nc.querySelector(".res-imp") : null;
+        return {
+          found: !!nc, badge: b ? b.textContent.trim() : "",
+          cond: nc ? nc.querySelectorAll(".scard.beat, .scard.miss").length : -1,
+          res: nc ? nc.querySelectorAll(".scard.res").length : -1,
+          imp: imp ? imp.textContent.trim().slice(0, 60) : "",
+          dataM: dm ? dm.getAttribute("data-m") : null,
+          dataT0: dm ? dm.getAttribute("data-t0") : null,
+        };
+      };
+      try {
+        out.before = card.querySelector(".cd-badge").textContent.trim();
+        out.condBefore = card.querySelectorAll(".scard.beat, .scard.miss").length;
+        zeroAnchor(card);
+        tickBadges();
+        await waitFlip(key);
+        Object.assign(out, snap(key));
+        out.nextWrap = document.getElementById("nextWrap").innerHTML.length;
+        // توجه: `DATA` با `let` تعریف شده و روی `window` نیست؛ با نام خوانده می‌شود.
+        out.dataSynced = !!(typeof DATA !== "undefined" && DATA
+          && Array.isArray(DATA.events)
+          && DATA.events.some((e) => e.iso === iso && e.passed === true));
+        // سطرها با کلیدِ کارت شمرده می‌شوند (نه زمان): چند خبر می‌توانند در یک
+        // دقیقه باشند و یک کلیدِ تنها باید یک سطر داشته باشد.
+        out.rowsForKey = (typeof DATA !== "undefined" && DATA && Array.isArray(DATA.events))
+          ? DATA.events.filter((e) => evKey(e) === key).length : -1;
+        if (otherKeyVal) {
+          const oc = Array.from(document.querySelectorAll("#list .ev"))
+            .find((c) => c.dataset.key === otherKeyVal);
+          const ob = oc ? oc.querySelector(".cd-badge") : null;
+          out.otherStillFuture = !!(ob && ob.getAttribute("data-in-s") !== null
+            && parseInt(ob.getAttribute("data-in-s") || "0", 10) > 60);
+          // بارِ دوم: همان رویداد با عنوانِ عوض‌شده ⇒ کلیدِ تازه، بی‌سطرِ تکراری
+          if (oc) {
+            const oiso = String(otherKeyVal).split("|")[0];
+            stubTitle = "PF TEST FLIP RENAMED";
+            zeroAnchor(oc);
+            tickBadges();
+            await waitFlip(oiso + "|" + stubTitle);
+            out.renamed = snap(oiso + "|" + stubTitle);
+            const nk = oiso + "|" + stubTitle;
+            if (typeof DATA !== "undefined" && DATA && Array.isArray(DATA.events)) {
+              out.rowsForNewKey = DATA.events.filter((e) => evKey(e) === nk).length;
+              out.rowsForOldKey = DATA.events.filter((e) => evKey(e) === otherKeyVal).length;
+            }
+          }
+        }
+        return out;
+      } catch (e) {
+        out.err = String((e && e.message) || e);
+        return out;
+      } finally {
+        window.fetch = realFetch;
+      }
+    });
+    if (flip.skip)
+      notes.push("سوییچِ لحظه‌ای: کارتِ پیشِ‌رویی برای سنجشِ سوییچ نبود");
+    else if (flip.err)
+      fail("سوییچِ لحظه‌ای: اجرای سوییچ خطا داد — " + flip.err);
+    else {
+      if (flip.condBefore !== 2)
+        fail(`سوییچِ لحظه‌ای: کارتِ پیشِ‌رو باید پیش از سوییچ دو سناریو داشته باشد (${flip.condBefore})`);
+      if (flip.flipUrl.indexOf("event=") < 0)
+        fail("سوییچِ لحظه‌ای: درخواستِ سوییچ پارامترِ `event=` نداشت — " + flip.flipUrl);
+      if (!/اعلام شد/.test(flip.after))
+        fail(`سوییچِ لحظه‌ای: کارت پس از لحظهٔ اعلام سوییچ نکرد («${flip.after}») — قبلاً «${flip.before}»`);
+      if (flip.condAfter !== 0)
+        fail(`سوییچِ لحظه‌ای: ${flip.condAfter} کارتِ شرطی زیرِ رویدادِ اعلام‌شده ماند`);
+      if (flip.res !== 1)
+        fail("سوییچِ لحظه‌ای: کارتِ «نتیجهٔ اعلام‌شده» پس از سوییچ رندر نشد");
+      if (!flip.imp)
+        fail("سوییچِ لحظه‌ای: خطِ «تأثیرِ همین نتیجه» پس از سوییچ نیامد");
+      if (flip.dataM !== "0")
+        fail(`سوییچِ لحظه‌ای: «دقیقه‌ها»ی کارتِ سوییچ‌شده نادرست است (data-m=${flip.dataM})`);
+      if (!flip.dataT0)
+        fail("سوییچِ لحظه‌ای: مبنای «N دقیقه پیش»ِ کارتِ سوییچ‌شده تازه نشد");
+      if (flip.nextWrap !== 0)
+        fail("سوییچِ لحظه‌ای: «نزدیک‌ترین خبرِ پرتأثیر» پس از سوییچ تازه نشد");
+      if (!flip.dataSynced)
+        fail("سوییچِ لحظه‌ای: ردیفِ رویداد در DATA هم‌گام نشد (رندرِ بعدی برمی‌گرداندش)");
+      if (flip.otherStillFuture === false)
+        fail("سوییچِ لحظه‌ای: کارتِ پیشِ‌روی دیگری هم بی‌دلیل «اعلام شد» شد — "
+          + "لنگرِ ثانیه‌ای درست خوانده نمی‌شود");
+      if (flip.rowsForKey !== 1)
+        fail(`سوییچِ لحظه‌ای: تعدادِ سطرِ کارتِ سوییچ‌شده در DATA باید یک باشد (${flip.rowsForKey})`);
+      if (flip.renamed) {
+        if (!flip.renamed.found || !/اعلام شد/.test(flip.renamed.badge) || flip.renamed.res !== 1)
+          fail("سوییچِ لحظه‌ای: وقتی منبع عنوانِ رویداد را عوض کند، کارت گم/سوییچ‌نشده می‌مانَد");
+        if (flip.rowsForNewKey !== 1 || flip.rowsForOldKey !== 0)
+          fail(`سوییچِ لحظه‌ای: با عنوانِ عوض‌شده سطرِ DATA درست جابه‌جا نشد `
+            + `(تازه=${flip.rowsForNewKey} کهنه=${flip.rowsForOldKey})`);
+      }
+      if (problems.length === before)
+        notes.push(`سوییچِ لحظه‌ای: کارتِ پیشِ‌رو («${flip.before}») در لحظهٔ صفر بدونِ `
+          + `بازسازیِ فهرست به «${flip.after}» سوییچ شد ✓ — نتیجه + تأثیر: ${flip.imp}`);
+    }
+  } catch (e) {
+    fail("بررسیِ سوییچِ لحظه‌ایِ اعلام ممکن نشد: " + e.message);
+  } finally {
+    try {
+      await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 45000 });
+    } catch (e) {
+      notes.push("بازگشت به صفحهٔ اصلی بعد از باندِ سوییچِ لحظه‌ای ممکن نشد: " + e.message);
     }
   }
 
