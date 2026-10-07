@@ -36,12 +36,14 @@ const REQUIRED = ["go", "bt", "sym", "syms", "styles", "chips", "refreshBtn",
   "setupsPanel", "alarmsDock", "tvBox", "shotGrid", "lightbox", "revChip",
   "dataChip", "riskPanel", "rkBalance", "rkRisk", "rkDaily", "rkOpen",
   "rkStat", "rkSave", "installBtn", "bkDock", "bkToggle", "bkBody", "bkState",
-  "alarmsToggle", "alarmsBody", "btToggle", "btBody", "rkToggle", "rkBody"];
+  "alarmsToggle", "alarmsBody", "btToggle", "btBody", "rkToggle", "rkBody",
+  "gapDock", "gapToggle", "gapBody", "gapSym", "gapTf", "gapLo", "gapHi",
+  "gapGo", "gapList", "gapRes"];
 const HANDLER_IDS = new Set(["rkSave", "installBtn"]);   // وایر داخلِ IIFE — با CDP سنجیده می‌شود
 /* کنترل‌هایی که اپ با `.onclick =` به آن‌ها هندلر می‌دهد؛ اگر این‌ها تابع نباشند
    یعنی بلوکِ اسکریپت اجرا نشده یا نیمه‌کاره مرده است. */
 const WIRED = ["go", "refreshBtn", "bt", "setupsBtn", "fundBtn", "archiveBtn",
-  "rkSave", "bkToggle", "alarmsToggle", "btToggle", "rkToggle"];
+  "rkSave", "bkToggle", "alarmsToggle", "btToggle", "rkToggle", "gapToggle"];
 const LISTENER_ONLY = ["sbBtn", "styles", "installBtn"];
 
 const problems = [];
@@ -1150,6 +1152,7 @@ function loadPuppeteer() {
       { box: "btPanel", toggle: "btToggle", body: "btBody", inner: "btFrom" },
       { box: "riskPanel", toggle: "rkToggle", body: "rkBody", inner: "rkSave" },
       { box: "bkDock", toggle: "bkToggle", body: "bkBody", inner: "expBtn" },
+      { box: "gapDock", toggle: "gapToggle", body: "gapBody", inner: "gapGo" },
     ];
     const folds = await page.evaluate(async (specs) => {
       const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1821,6 +1824,105 @@ function loadPuppeteer() {
     } catch (e) {
       notes.push("بازگشت به صفحهٔ اصلی بعد از باندِ سوییچِ لحظه‌ای ممکن نشد: " + e.message);
     }
+  }
+
+  /* ۶.۱۴) پرسشِ تأییدِ شکافِ ارزش منصفانه (FVG): کاربر آدرسِ گپ + تایم‌فریم را
+     می‌دهد و اپ همان گپِ واقعی را با ۱۲ بندِ تأیید نمره می‌دهد و می‌گوید می‌شود
+     به آن اتکا کرد یا نه. آدرس از خودِ موتور گرفته می‌شود تا سنجش به تقویمِ
+     بازار وابسته نباشد؛ اگر گپِ بازی نبود، باند با یادداشت رد می‌شود. */
+  try {
+    const gq = await page.evaluate(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const out = { ok: true, err: "", closedAtLoad: null, opened: null, cards: 0,
+                    grade: "", pct: null, checks: 0, reliable: false, state: "",
+                    askedAddr: null, notFound: "", near: 0, verdict: "" };
+      const body = document.getElementById("gapBody");
+      const tog = document.getElementById("gapToggle");
+      if (!body || !tog) { out.ok = false; out.err = "پنلِ پرسش (gapToggle/gapBody) در صفحه نیست"; return out; }
+      out.closedAtLoad = getComputedStyle(body).display === "none";
+      tog.click();
+      await wait(150);
+      out.opened = getComputedStyle(body).display !== "none";
+
+      const sym = ((document.getElementById("sym") || {}).value || "").trim();
+      const tf = "15m";
+      const r = await fetch(`/api/gap?symbol=${encodeURIComponent(sym)}&tf=${tf}`, { cache: "no-store" });
+      const d = await r.json();
+      if (!d.ok || !((d.gaps || []).length)) { out.cards = 0; return out; }
+      const g = d.gaps[0];
+      out.askedAddr = `${g.gap.bottom}–${g.gap.top}`;
+
+      document.getElementById("gapSym").value = sym;
+      document.getElementById("gapTf").value = tf;
+      document.getElementById("gapLo").value = String(g.gap.bottom);
+      document.getElementById("gapHi").value = String(g.gap.top);
+      document.getElementById("gapGo").click();
+      for (let i = 0; i < 80; i++) {
+        if (document.querySelector("#gapRes .gap-ck") || document.querySelector("#gapRes .err")) break;
+        await wait(250);
+      }
+      out.cards = document.querySelectorAll("#gapRes .card").length;
+      const card = document.querySelector("#gapRes .card");
+      if (card) {
+        out.grade = ((card.querySelector(".grade") || {}).textContent || "").trim();
+        const st = ((card.querySelector(".scoretxt") || {}).textContent || "");
+        const m = st.match(/([\d.]+)\u066a/);
+        out.pct = m ? parseFloat(m[1]) : null;
+        out.checks = card.querySelectorAll(".gap-ck").length;
+        out.reliable = !!card.querySelector(".badge.g-green");
+        out.verdict = ((card.querySelector(".verdict") || {}).textContent || "").slice(0, 90);
+      }
+      out.state = ((document.getElementById("gapState") || {}).textContent || "").trim();
+
+      /* آدرسِ عمداً بی‌ربط: باید «نمی‌خورد» بگوید + نزدیک‌ترین گپ‌ها را بدهد،
+         نه یک گپِ الکی برای هر آدرسی. */
+      document.getElementById("gapLo").value = "500";
+      document.getElementById("gapHi").value = "501";
+      document.getElementById("gapGo").click();
+      for (let i = 0; i < 80; i++) {
+        const v = document.querySelector("#gapRes .card .verdict");
+        if (v && /آدرس/.test(v.textContent || "")) break;
+        if (document.querySelector("#gapRes .err")) break;
+        await wait(250);
+      }
+      out.notFound = ((document.querySelector("#gapRes .card .verdict") || {}).textContent || "").slice(0, 70);
+      out.near = document.querySelectorAll("#gapRes .card .gap-near").length;
+      return out;
+    });
+    const before = problems.length;
+    if (!gq.ok) fail("پرسشِ گپ: " + gq.err);
+    else {
+      if (gq.closedAtLoad !== true)
+        fail("پرسشِ گپ: پنل باید همان اول جمع باشد (کرکره‌ی جمعِ پیش‌فرض)");
+      if (gq.opened !== true)
+        fail("پرسشِ گپ: کلیک روی نوارِ پنل آن را باز نکرد");
+      if (!gq.cards)
+        notes.push("پرسشِ گپ: در این پنجره گپِ بازی روی نمادِ جاری نبود — "
+          + "مسیرِ پرسشِ آدرس‌دار سنجیده نشد");
+      else {
+        if (!gq.grade || gq.grade === "—")
+          fail(`پرسشِ گپ: کارتِ حکم درجه ندارد («${gq.grade}»)`);
+        if (gq.checks !== 12)
+          fail(`پرسشِ گپ: ${gq.checks} بندِ امتیاز رندر شد (باید ۱۲ بند باشد)`);
+        if (!(gq.pct > 0))
+          fail(`پرسشِ گپ: درصدِ امتیازِ تأیید سنجیده نشد (${gq.pct})`);
+        if (!gq.verdict)
+          fail("پرسشِ گپ: متنِ حکم در کارت نیامد");
+        if (gq.reliable !== ["A+", "A"].includes(gq.grade))
+          fail(`پرسشِ گپ: برچسبِ «قابلِ اتکا» با درجه نمی‌خواند (درجه=${gq.grade}، `
+            + `قابلِ اتکا=${gq.reliable})`);
+      }
+      if (!/آدرس/.test(gq.notFound))
+        fail(`پرسشِ گپ: آدرسِ بی‌ربط (۵۰۰–۵۰۱) حکمِ «نمی‌خورد» نگرفت («${gq.notFound}»)`);
+      if (!gq.near)
+        fail("پرسشِ گپ: برای آدرسِ بی‌ربط، فهرستِ نزدیک‌ترین گپ‌ها پیشنهاد نشد");
+      if (problems.length === before)
+        notes.push(`پرسشِ گپ: آدرسِ ${gq.askedAddr} (${gq.state}) ⇒ درجهٔ ${gq.grade} · `
+          + `${gq.pct}٪ · ${gq.checks}/۱۲ بند · ${gq.reliable ? "قابلِ اتکا" : "تأییدِ ناکافی"}`
+          + " ✓ — و آدرسِ بی‌ربط رد شد ✓");
+    }
+  } catch (e) {
+    fail("بررسیِ پرسشِ تأییدِ شکافِ ارزش منصفانه ممکن نشد: " + e.message);
   }
 
   /* ۱۰) اسکرین‌شات برای بازبینیِ انسانی. */

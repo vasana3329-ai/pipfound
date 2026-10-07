@@ -1914,6 +1914,64 @@ _RF_HINT_DOM_RE = re.compile(r"rf-hint")
 _RF_NEED_JS_RE = re.compile(r"classList\.add\(\s*[\"']need[\"']\s*\)")
 _RF_NEED_CSS_RE = re.compile(r"\.rf-btn\.need\s*\{")
 
+# ── قراردادِ «پرسشِ تأییدِ شکافِ ارزش منصفانه» (لایهٔ ۴.۲۳) ─────────────────
+# خواستهٔ کاربر: «کاربر آدرسِ شکاف را در یک تایم‌فریمِ مشخص می‌دهد و از اپ
+# می‌خواهد تأییدِ همان گپ را بررسی کند.» یعنی رابط یک **پرسش** است، نه فهرستِ
+# خام. قراردادی که باید سالم بمانَد (هر شکستنش = پرسشِ بی‌جواب یا حکمِ دروغ):
+#   ۱) پویشِ گپ‌ها گیتِ دیسپلیسمنت ندارد — گرنه آدرسِ درستِ کاربر «پیدا نشد»
+#      می‌گیرد چون گپِ کم‌جان پیش از تطبیق حذف می‌شود؛
+#   ۲) آدرسِ کاربر با آستانهٔ ۵۰٪ هم‌پوشانی به گپِ واقعی قفل می‌شود؛
+#   ۳) چرخهٔ عمرِ چهارحالته (تازه/لمس‌شده/میتیگیت/پرشده) و سقف‌های اعتبار
+#      (بازارِ بسته ⇒ C، گپِ مصرف‌شده ⇒ C) حفظ شوند؛
+#   ۴) دوازده بندِ امتیازِ تأیید و فقط درجه‌های A+/A «قابلِ اتکا»؛
+#   ۵) اندپوینتِ /api/gap + پنلِ کرکره‌ایِ پرسش که آدرس (lo/hi) را می‌فرستد.
+_GQ_DISP_GATE_RE = re.compile(r"^DISP_GATE\s*=\s*([0-9.]+)", re.M)
+_GQ_DISP_STRONG_RE = re.compile(r"^DISP_STRONG\s*=\s*([0-9.]+)", re.M)
+_GQ_MATCH_MIN_RE = re.compile(r"^MATCH_MIN_OVERLAP\s*=\s*([0-9.]+)", re.M)
+_GQ_RELIABLE_RE = re.compile(r"RELIABLE_GRADES\s*=\s*\(([^)]*)\)")
+_GQ_ROW_RE = re.compile(r"^\s*row\(", re.M)
+_GQ_SCAN_GATE_RE = re.compile(r"DISP_GATE")
+_GQ_STATE_RE = re.compile(r'"(fresh|touched|mitigated|filled)"')
+_GQ_IMPORT_RE = re.compile(r"^\s*import gap_query as G", re.M)
+_GQ_PANEL_IDS = ("gapDock", "gapToggle", "gapBody", "gapSym", "gapTf",
+                 "gapLo", "gapHi", "gapGo", "gapList", "gapRes")
+_GQ_FOLD_CALL_RE = re.compile(
+    r'pfFold\(\s*"gapDock"\s*,\s*"gapToggle"\s*,\s*"gapBody"\s*\)')
+_GQ_SEND_LO_RE = re.compile(r'qs\.set\(\s*"lo"\s*,')
+_GQ_SEND_HI_RE = re.compile(r'qs\.set\(\s*"hi"\s*,')
+_GQ_MODE_FALSE_RE = re.compile(r"pfGapAsk\(\s*false\s*\)")
+_GQ_MODE_TRUE_RE = re.compile(r"pfGapAsk\(\s*true\s*\)")
+# پیشوندِ دادهٔ گپ عمداً `g` است، نه `v`: قاعدهٔ آرشیو (`archive_problems`)
+# نشانگرِ رندرِ حکم را با `v.found` می‌سنجد و در همان صفحهٔ نمای اصلی است؛ اگر
+# پنلِ گپ هم `v.found` بنویسد، جهشِ «آرشیو v.found را نمی‌سنجد» بی‌صدا سبز می‌مانَد
+# (همین اتفاق یک‌بار افتاد و `archive_actual_test.py` گرفتش).
+_GQ_RELIABLE_UI_RE = re.compile(r"g\.reliable")
+# کارتِ گپ باید پیشوندِ `g.` بماند و هیچ `v.`ای نداشته باشد:
+# (۱) نشانگرِ رندرِ حکمِ آرشیو (`v.found`) در همین صفحه است و نامِ همسان
+#     کورش می‌کند (یک‌بار همان اتفاق افتاد و جهشِ آرشیو بی‌صدا سبز ماند)؛
+# (۲) `v.` جا‌مانده یعنی `ReferenceError: v is not defined` که هیچ چکِ
+#     استاتیکی نمی‌گیرد و فقط در مرورگر و به‌شکلِ کارتِ خالی دیده می‌شود.
+_GQ_BARE_V_RE = re.compile(r"(?<![A-Za-z0-9_$.])v\.[A-Za-z_]+")
+_GQ_CARD_START = "function gapCardHtml"
+_GQ_CARD_END = "function gapStateSet"
+# نامِ کوتاهِ دوازده بندِ امتیازِ تأیید (هر حذفِ خاموشِ یک معیار = حکمِ خوش‌بینانه).
+# این‌ها همان رشته‌های ثابتِ داخلِ gap_verdict‌اند؛ کوچک‌ترین ویرایشِ معیار
+# باید یا رشته را نگه دارد یا این قاعده را عمداً قرمز کند.
+_GQ_CRITERIA = (
+    "دیسپلیسمنتِ کندلِ میانی",
+    "دیسپلیسمنتِ قوی",
+    "گپِ دست‌نخورده",
+    "هم‌جهتی با بایاسِ",
+    "کانفلوئنسِ POIِ",
+    "توالیِ سوئیپ→MSS",
+    "سوئیپِ لیکوئیدیتی پیش از تولدِ گپ",
+    "سمتِ پریمیوم/دیسکانت",
+    "تولدِ گپ داخلِ کیل‌زون",
+    "هم‌پوشانی با اردر بلاکِ هم‌جهت",
+    "اندازهٔ معقولِ گپ",
+    "قابلِ اجرا بودن (فاصلهٔ قیمت)",
+)
+
 # ── قراردادِ «کرکره‌های جمعِ پیش‌فرض» (لایه‌ی ۴.۱۸) ──────────────────────────
 # خواستهٔ کاربر: بخش‌های «نگهداری» در نمای اصلی همیشه‌باز نباشند — آلارم‌ها،
 # تنظیماتِ بک‌تست، مدیریتِ ریسک و پشتیبان/انتقالِ داده هر کدام یک نوارِ کلیدپذیر
@@ -1926,6 +1984,7 @@ _FOLD_PANELS = (
     ("btPanel", "btToggle", "btBody"),
     ("riskPanel", "rkToggle", "rkBody"),
     ("bkDock", "bkToggle", "bkBody"),
+    ("gapDock", "gapToggle", "gapBody"),
 )
 _FOLD_TAG_RE = re.compile(r'<(?:div|button|h2)\b[^>]*>', re.S)
 _FOLD_BODY_HIDE_RE = re.compile(r'\.fold-body\s*\{[^}]*display\s*:\s*none', re.S)
@@ -2661,6 +2720,154 @@ def button_alive_problems(root, pages=None):
     return probs, stats
 
 
+def gap_query_problems(root, pages=None):
+    """قراردادِ «پرسشِ تأییدِ شکافِ ارزش منصفانه» (لایهٔ ۴.۲۳).
+
+    خواستهٔ کاربر: «آدرسِ گپ را در یک تایم‌فریمِ مشخص می‌دهم و اپ می‌گوید تأییدِ
+    همان گپ چقدر است و می‌شود به آن اتکا کرد یا نه.» یعنی رابط یک *پرسش* است،
+    نه فهرستِ خام. پنج چیز باید قفل بمانَد، وگرنه پرسش بی‌جواب می‌مانَد یا
+    حکمِ دروغ می‌دهد:
+      ۱) پویشِ گپ گیتِ دیسپلیسمنت ندارد (وگرنه گپِ کم‌جان پیش از تطبیق حذف
+         می‌شود و آدرسِ درستِ کاربر «پیدا نشد» می‌گیرد)؛
+      ۲) آستانه‌های تأیید سرجایشان‌اند و مقدارشان معقول است؛
+      ۳) همهٔ دوازده بندِ امتیازِ تأیید حاضرند؛
+      ۴) فقط A+/A «قابلِ اتکا» شمرده می‌شوند؛
+      ۵) اندپوینت + پنلِ کرکره‌ایِ پرسش (آدرس lo/hi، تایم‌فریم و حالتِ فهرست).
+    """
+    probs, stats = [], {"file": False, "no_scan_gate": False, "consts": False,
+                        "criteria": 0, "reliable": False, "import": False,
+                        "route": False, "ids": 0, "fold": False, "modes": 0,
+                        "ask_addr": False, "reliable_ui": False}
+    gq_src = read_text(os.path.join(root, "gap_query.py"))
+    if not gq_src:
+        probs.append("gap_query.py پیدا نشد — پرسشِ تأییدِ گپ اصلاً موتور ندارد")
+        return probs, stats
+    stats["file"] = True
+
+    # ۱) پویشِ گپ باید *بی‌گیت* باشد.
+    scan = _py_region(gq_src, "def gap_scan(", "def _overlap(")
+    if not scan:
+        probs.append("gap_query.py · تابعِ gap_scan پیدا نشد — پویشِ گپ سنجیده نمی‌شود")
+    elif _GQ_SCAN_GATE_RE.search(scan):
+        probs.append("gap_query.py · پویشِ gap_scan گیتِ دیسپلیسمنت گرفت — گپِ کم‌جان "
+                     "پیش از تطبیق حذف می‌شود و آدرسِ درستِ کاربر «پیدا نشد» می‌گیرد")
+    else:
+        stats["no_scan_gate"] = True
+
+    # ۲) ثابت‌های تأیید.
+    m_gate = _GQ_DISP_GATE_RE.search(gq_src)
+    m_strong = _GQ_DISP_STRONG_RE.search(gq_src)
+    m_match = _GQ_MATCH_MIN_RE.search(gq_src)
+    cbad = []
+    if m_gate is None or m_strong is None or m_match is None:
+        cbad.append("ثابت‌های DISP_GATE/DISP_STRONG/MATCH_MIN_OVERLAP ناقص‌اند")
+    else:
+        gate, strong, match = (float(m_gate.group(1)), float(m_strong.group(1)),
+                               float(m_match.group(1)))
+        if not (1.0 <= gate <= 2.0):
+            cbad.append("گیتِ دیسپلیسمنت از بازهٔ معقول بیرون است (%s)" % gate)
+        if strong <= gate:
+            cbad.append("آستانهٔ دیسپلیسمنتِ قوی (%s) بزرگ‌تر از گیتِ پایه (%s) نیست" % (strong, gate))
+        if not (0 < match <= 1):
+            cbad.append("آستانهٔ هم‌پوشانیِ تطبیق بیرونِ بازهٔ (۰،۱] است (%s)" % match)
+    if cbad:
+        probs.append("gap_query.py · " + "؛ ".join(cbad) + " — آستانه‌های تأیید مبنا ندارند")
+    else:
+        stats["consts"] = True
+
+    # ۳) دوازده بندِ امتیازِ تأیید.
+    verdict = _py_region(gq_src, "def gap_verdict(", "def load(")
+    if not verdict:
+        probs.append("gap_query.py · حکمِ gap_verdict پیدا نشد — پرسش حکم نمی‌دهد")
+    else:
+        missing = [a for a in _GQ_CRITERIA if a not in verdict]
+        rows = len(_GQ_ROW_RE.findall(verdict))
+        stats["criteria"] = len(_GQ_CRITERIA) - len(missing)
+        if missing:
+            probs.append("gap_query.py · %d بندِ امتیازِ تأیید از حکم افتاده (%s) — حکمِ "
+                         "بی‌سندِ خوش‌بینانه می‌شود" % (len(missing), "، ".join(missing)))
+        if rows < len(_GQ_CRITERIA):
+            probs.append("gap_query.py · حکم فقط %d ردیفِ امتیاز می‌سازد (دست‌کم %d لازم است) "
+                         "— معیارِ خاموش‌حذف‌شده" % (rows, len(_GQ_CRITERIA)))
+
+    # ۴) درجه‌های «قابلِ اتکا».
+    m_rel = _GQ_RELIABLE_RE.search(gq_src)
+    if m_rel is None:
+        probs.append("gap_query.py · فهرستِ درجه‌های قابلِ اتکا (RELIABLE_GRADES) پیدا نشد")
+    else:
+        rels = re.findall(r'"([^"]+)"', m_rel.group(1))
+        if "A+" not in rels or "A" not in rels:
+            probs.append("gap_query.py · درجه‌های قابلِ اتکا A+ و A را شامل نمی‌شوند — "
+                         "گپِ پرتأیید «غیرقابلِ اتکا» خوانده می‌شود")
+        elif any(g in rels for g in ("B", "C", "D")):
+            probs.append("gap_query.py · درجه‌های میانی به فهرستِ قابلِ اتکا راه پیدا کردند "
+                         "(%s) — اتکا بی‌سند می‌شود" % "، ".join(rels))
+        else:
+            stats["reliable"] = True
+
+    # ۵) سیم‌کشیِ اندپوینت و پنلِ پرسش.
+    app_src = read_text(os.path.join(root, "app.py"))
+    page = (pages or {}).get("HTML") or ""
+    if not app_src:
+        probs.append("app.py خوانده نشد — اندپوینت و پنلِ پرسش سنجیده نمی‌شوند")
+    else:
+        if _GQ_IMPORT_RE.search(app_src) is None:
+            probs.append("app.py · موتورِ گپ وارد نشده (import gap_query as G) — "
+                         "اندپوینتِ پرسش بی‌پاسخ می‌مانَد")
+        else:
+            stats["import"] = True
+        route = _py_region(app_src, 'if u.path == "/api/gap":', 'if u.path == "/api/health":')
+        if not route:
+            probs.append("app.py · مسیرِ /api/gap پیدا نشد — پنلِ پرسش بی‌پاسخ می‌مانَد")
+        elif "G.query(" not in route:
+            probs.append("app.py · مسیرِ /api/gap موتورِ گپ (G.query) را صدا نمی‌زند")
+        else:
+            stats["route"] = True
+
+    if not page:
+        probs.append("app.py · متنِ صفحهٔ اصلی خوانده نشد — پنلِ پرسش سنجیده نمی‌شود")
+        return probs, stats
+    miss_ids = [i for i in _GQ_PANEL_IDS if ('id="%s"' % i) not in page]
+    stats["ids"] = len(_GQ_PANEL_IDS) - len(miss_ids)
+    if miss_ids:
+        probs.append("app.py · شناسه‌های پنلِ پرسشِ گپ غایب‌اند: " + "، ".join(miss_ids))
+    if _GQ_FOLD_CALL_RE.search(page) is None:
+        probs.append("app.py · پنلِ پرسشِ گپ به مکانیکِ کرکره وصل نیست "
+                     "(pfFold(\"gapDock\",\"gapToggle\",\"gapBody\")) — همیشه‌باز می‌مانَد")
+    else:
+        stats["fold"] = True
+    modes = int(_GQ_MODE_FALSE_RE.search(page) is not None) + \
+        int(_GQ_MODE_TRUE_RE.search(page) is not None)
+    stats["modes"] = modes
+    if modes < 2:
+        probs.append("app.py · هر دو حالتِ پرسش (آدرس‌دار و «گپ‌های همین تایم‌فریم») "
+                     "سیم‌کشی نشده‌اند — یکی از دو مسیرِ پرسش مرده است")
+    if _GQ_SEND_LO_RE.search(page) is None or _GQ_SEND_HI_RE.search(page) is None:
+        probs.append("app.py · پنلِ پرسش آدرس (lo/hi) را به سرور نمی‌فرستد — پرسش همیشه "
+                     "به حالتِ فهرست می‌افتد")
+    else:
+        stats["ask_addr"] = True
+    if _GQ_RELIABLE_UI_RE.search(page) is None:
+        probs.append("app.py · حکمِ «قابلِ اتکا» (g.reliable) در پنل رندر نمی‌شود — "
+                     "کاربر نمی‌فهمد می‌شود به گپ اتکا کرد یا نه")
+    else:
+        stats["reliable_ui"] = True
+    greg = _py_region(page, _GQ_CARD_START, _GQ_CARD_END)
+    if not greg:
+        probs.append("app.py · سازندهٔ کارتِ گپ (gapCardHtml) پیدا نشد — "
+                     "رندرِ حکم سنجیده نمی‌شود")
+    else:
+        badv = sorted(set(_GQ_BARE_V_RE.findall(greg)))
+        if badv:
+            probs.append("app.py · کارتِ گپ به متغیرِ `v` برمی‌گردد (%s) — "
+                         "هم نشانگرِ رندرِ آرشیو را کور می‌کند و هم در مرورگر "
+                         "`v is not defined` می‌دهد (کارتِ خالی)"
+                         % "، ".join(badv[:3]))
+        else:
+            stats["prefix"] = True
+    return probs, stats
+
+
 def read_baseline(root=None):
     """مبنای «نسخه‌ی سالم» → (inventory, منبع).
     اول اسنپ‌شاتِ همین ماشین (~/pipfound/good)، بعد فایلِ نسخه‌بندی‌شده‌ی
@@ -2831,6 +3038,16 @@ def run_checks(root, live=False, enforce_contract=True, accept_removals=False):
     fpp, fstats = fold_panels_problems(root, pages)
     rep["dock"] = fstats
     rep["problems"] += [f"کرکره‌های نمای اصلی → {p}" for p in fpp]
+
+    # ── چکِ استاتیکِ «پرسشِ تأییدِ شکافِ ارزش منصفانه» ──
+    # خواستهٔ کاربر: کاربر آدرسِ یک گپ را در تایم‌فریمِ مشخص می‌دهد و اپ باید
+    # بگوید تأییدِ همان گپ چقدر است و می‌شود به آن اتکا کرد یا نه. اگر کسی گیتِ
+    # دیسپلیسمنت را به پویش برگرداند (پرسش «پیدا نشد» می‌گیرد)، یک بندِ امتیاز
+    # را خاموش حذف کند، یا درجه‌های میانی را «قابلِ اتکا» کند، همین‌جا گرفته
+    # می‌شود (نه روزی که کاربر بگوید «به گپِ بی‌کیفیت اتکا کردم و ضرر کردم»).
+    gqp, gqstats = gap_query_problems(root, pages)
+    rep["gapq"] = gqstats
+    rep["problems"] += [f"پرسشِ شکافِ ارزش منصفانه → {p}" for p in gqp]
 
     inv = inventory(pages)
     inv["routes"] = routes_of(root)
@@ -3054,6 +3271,18 @@ def _human(rep):
             f" · گزینه‌های پشتیبان داخلِ بدنه: {'✓' if bk.get('options_inside') else '✗'}"
             f" · خلاصهٔ وضعیت روی نوار: {'✓' if bk.get('state') else '✗'}"
             f" · یادِ وضعیت بینِ بازدیدها: {'✓' if bk.get('memory') else '✗'}")
+    gq = rep.get("gapq") or {}
+    if gq:
+        lines.append(
+            f"   پرسشِ تأییدِ شکاف (FVG): بندهای امتیاز: "
+            f"{gq.get('criteria', 0)}/{len(_GQ_CRITERIA)}"
+            f" · پویشِ بی‌گیت: {'✓' if gq.get('no_scan_gate') else '✗'}"
+            f" · آستانه‌های تأیید: {'✓' if gq.get('consts') else '✗'}"
+            f" · قابلِ اتکا فقط A+/A: {'✓' if gq.get('reliable') else '✗'}"
+            f" · اندپوینتِ /api/gap: {'✓' if gq.get('route') else '✗'}"
+            f" · پنلِ پرسش: {gq.get('ids', 0)}/{len(_GQ_PANEL_IDS)}"
+            f" · دو حالتِ پرسش: {gq.get('modes', 0)}/2"
+            f" · پیشوندِ کارت (بی`v.`): {'✓' if gq.get('prefix') else '✗'}")
     nt = rep.get("notify") or {}
     if nt:
         lines.append(

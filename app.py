@@ -30,6 +30,13 @@ _MAX_IMPORT = 16 * 1024 * 1024  # 16MB — سقفِ فایلِ پشتیبانِ 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import confluence as C
 import smc_engine as E
+# موتورِ «پرسشِ تأییدِ شکافِ ارزش منصفانه» (FVG/IFVG): کاربر آدرسِ ناحیه + تایم‌فریم
+# می‌دهد و همین‌جا نمرهٔ تأییدِ همان گپ و اتکاپذیریِ آن داوری می‌شود. محافظت‌شده تا
+# اگر این ماژول به هر دلیلی بار نشد، کلِ اپ نیفتد (اندپوینت خودش پیامِ روشن می‌دهد).
+try:
+    import gap_query as G
+except Exception:
+    G = None
 try:
     import backtest as BT
 except Exception:
@@ -1768,6 +1775,22 @@ tr.on td{background:rgba(34,197,94,.05)}
 .risk-body{padding:0 12px 10px}
 .bk-dock{padding:0;overflow:hidden}
 .bk-body{padding:0 18px 16px;border-top:1px dashed var(--line)}
+/* ⚠ مثلِ بقیهٔ بدنه‌ها عمداً هیچ `display`ی روی `.gap-body` نیست — وگرنه
+   پنهان‌بودنِ پیش‌فرضِ کرکره بی‌اثر می‌شود و پنل همیشه‌باز می‌مانَد
+   (selfcheck.fold_panels_problems همین را می‌گیرد). */
+.gap-body{padding:0 18px 16px;border-top:1px dashed var(--line)}
+.gap-body > * + *{margin-top:10px}
+.gap-grid{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.gap-ck{display:flex;align-items:flex-start;gap:8px;background:var(--panel2);
+  border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin-bottom:6px;font-size:13px}
+.gap-ck.ok{border-color:rgba(34,197,94,.35)}
+.gap-ck.no{border-color:rgba(239,68,68,.3)}
+.gap-ck .gstw{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.gap-lvl{display:flex;gap:14px;flex-wrap:wrap;font-size:13px;color:var(--muted);
+  font-variant-numeric:tabular-nums;background:var(--panel2);border:1px solid var(--line);
+  border-radius:10px;padding:9px 12px}
+.gap-lvl b{color:var(--txt)}
+.gap-near{font-size:12.5px;color:var(--muted);line-height:1.9;font-variant-numeric:tabular-nums}
 .alarm-item{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--panel2);
   border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:8px;font-size:13px}
 .alarm-item.trig{border-color:rgba(34,197,94,.5);background:rgba(34,197,94,.08)}
@@ -1997,6 +2020,43 @@ input.abnum{flex:0 0 86px;min-width:86px;text-align:center;direction:ltr;
     </div>
     <div class="riskstat" id="abStat">در حالِ خواندنِ وضعیتِ پشتیبانِ خودکار…</div>
     <div id="abList"></div>
+    </div>
+  </div>
+
+  <!-- پرسشِ «تأییدِ شکافِ ارزش منصفانه»: کاربر آدرسِ گپ (کف/سقف) را در یک
+       تایم‌فریم می‌دهد و اپ همان گپ را در دادهٔ زنده پیدا می‌کند و می‌گوید چقدر
+       تأیید دارد و می‌شود به آن اتکا کرد یا نه — یک «پرسش» است، نه فهرستِ خام. -->
+  <div class="alarms-dock fold" id="gapDock">
+    <h2 class="fold-head"><button id="gapToggle" class="fold-toggle" type="button"
+          aria-expanded="false" aria-controls="gapBody"
+          title="پرسشِ تأییدِ شکافِ ارزش منصفانه (FVG): آدرسِ گپ را با کف و سقفِ ناحیه و تایم‌فریم بده تا اپ همان گپ را در دادهٔ زنده پیدا کند و بگوید چقدر تأیید دارد و قابلِ اتکاست یا نه. برای دیدنِ کادرها روی همین نوار کلیک کن.">
+      🧩 تأییدِ شکافِ ارزش منصفانه <span class="fold-st jmsg" id="gapState">آماده</span>
+      <span class="arr" aria-hidden="true">▾</span>
+    </button></h2>
+    <div class="fold-body gap-body" id="gapBody">
+      <p class="fold-note">آدرسِ گپ را با «کف» و «سقف» بده (در همان تایم‌فریمی که روی چارت می‌بینی). اپ همان ناحیه را در دادهٔ زنده پیدا می‌کند و ۱۲ معیارِ تأیید — دیسپلیسمنتِ کندلِ میانی، تازگیِ گپ، هم‌سویی با بایاسِ تایم‌فریمِ بالا، POIِ تایم‌فریمِ بالا، توالیِ سوئیپ→MSS، سوئیپِ لیکوئیدیتی پیش از تولد، سمتِ پریمیوم/دیسکانت، کیل‌زون، اردر بلاکِ هم‌جهت، اندازهٔ معقولِ گپ و فاصلهٔ اجرایی — را نمره می‌دهد و درجه می‌دهد. اگر آدرس را نمی‌دانی، «گپ‌های همین تایم‌فریم» را بزن تا پرتأییدترین‌ها را ببینی.</p>
+      <div class="gap-grid">
+        <span class="btlbl">نماد</span>
+        <input id="gapSym" class="btinp" type="text" placeholder="مثلاً XAUUSD" autocomplete="off"
+               title="نمادی که گپ روی آن است — همان نمادِ چارت. با حروفِ بزرگ نوشته می‌شود.">
+        <span class="btlbl">تایم‌فریم</span>
+        <select id="gapTf" class="btinp" title="تایم‌فریمِ گپ — همان تایم‌فریمی که آدرس را از روی آن می‌دهی. تایم‌فریمِ بالاتر خودکار برای بایاس بررسی می‌شود.">
+          <option>1m</option><option>5m</option><option>15m</option><option>30m</option>
+          <option selected>1h</option><option>4h</option><option>1d</option><option>1w</option>
+        </select>
+      </div>
+      <div class="gap-grid">
+        <span class="btlbl">کفِ ناحیه</span>
+        <input id="gapLo" class="btinp narrow" type="number" step="any" placeholder="مثلاً 2300" autocomplete="off"
+               title="پایین‌ترین قیمتِ ناحیهٔ گپ (روی چارت). اگر جای کف/سقف را عوض کنی هم مهم نیست، خودش مرتب می‌کند.">
+        <span class="btlbl">سقفِ ناحیه</span>
+        <input id="gapHi" class="btinp narrow" type="number" step="any" placeholder="مثلاً 2312.5" autocomplete="off"
+               title="بالاترین قیمتِ ناحیهٔ گپ (روی چارت).">
+        <button id="gapGo" class="riskbtn" title="همین ناحیه را در دادهٔ زنده پیدا کن و بگو چقدر تأیید دارد و آیا می‌شود به آن اتکا کرد.">🔎 بررسیِ تأیید</button>
+        <button id="gapList" class="btsug" title="اگر آدرس نداری: گپ‌های بازِ همین نماد و تایم‌فریم را از پرتأییدترین به کم‌تأییدترین نشان می‌دهد تا یکی را انتخاب کنی.">گپ‌های همین تایم‌فریم</button>
+        <span id="gapMsg" class="jmsg"></span>
+      </div>
+      <div id="gapRes"></div>
     </div>
   </div>
 
@@ -3380,6 +3440,133 @@ pfFold("alarmsDock","alarmsToggle","alarmsBody");
 pfFold("btPanel","btToggle","btBody");
 pfFold("riskPanel","rkToggle","rkBody");
 pfFold("bkDock","bkToggle","bkBody");
+pfFold("gapDock","gapToggle","gapBody");
+
+// ── پرسشِ «تأییدِ شکافِ ارزش منصفانه» ────────────────────────────────────
+// کاربر آدرسِ ناحیهٔ گپ (کف/سقف) را در یک تایم‌فریم می‌دهد و اپ همان گپ را در
+// دادهٔ زنده پیدا می‌کند و ۱۲ معیارِ تأیید را نمره می‌دهد، درجه (A+..D) می‌دهد و
+// می‌گوید قابلِ اتکاست یا نه. خروجی یک «داوری» است، نه فهرستِ خام. حالتِ دوم
+// (بدونِ آدرس) گپ‌های بازِ همان تایم‌فریم را از پرتأییدترین می‌چیند.
+const gapGradeColor=g=>({"A+":"var(--grade-ap)","A":"var(--grade-a)",
+  "B":"var(--grade-b)","C":"var(--grade-c)"}[g]||"var(--grade-no)");
+const gapVal=v=>(v===null||v===undefined||v==="")?"—":v;
+function gapField(id){const el=document.getElementById(id);return el?el.value:"";}
+function gapChecksHtml(checks){
+  return (checks||[]).map(c=>{
+    const ok=c.status==="✓";
+    return `<div class="gap-ck ${ok?"ok":"no"}"><span>${c.status}</span>`
+      +`<span style="flex:1">${c.name}`
+      +(c.detail?` — <span class="jmsg">${c.detail}</span>`:"")+`</span>`
+      +`<span class="gstw">${gapVal(c.got)}/${gapVal(c.weight)}</span></div>`;
+  }).join("");
+}
+function gapCardHtml(g){
+  if(!g) return "";
+  if(g.ok===false) return `<div class="err">${g.error||"خطای نامشخص"}</div>`;
+  const q=g.query||{}, sc=g.score||{}, lv=g.levels||{};
+  const lvl=(g.found&&lv.entry_low!=null)
+    ? `<div class="gap-lvl">`
+      +`<span>ورود (لیمیت): <b>${lv.entry_low} – ${lv.entry_high}</b></span>`
+      +`<span>ابطال: <b>${gapVal(lv.invalidate)}</b></span>`
+      +`<span>استاپ: <b>${gapVal(lv.stop)}</b></span>`
+      +`<span>هدف: <b>${gapVal(lv.target)}</b></span>`
+      +`<span>R:R ≈ <b>${gapVal(lv.rr)}</b></span></div>`
+      +(lv.note?`<div class="gap-near">${lv.note}</div>`:"")
+    : "";
+  const near=(!g.found&&(g.nearest||[]).length)
+    ? `<div class="gap-near"><b>نزدیک‌ترین گپ‌های همین تایم‌فریم به آدرسِ تو:</b><br>`
+      + g.nearest.map(n=>`${n.bottom} – ${n.top} (${n.type==="bullish"?"صعودی":"نزولی"} · ${n.state_fa||""})`).join("<br>")
+      + `</div>`
+    : "";
+  const caps=(g.capped&&g.cap)?`<div class="badge g-amber">سقفِ اعمال‌شده: ${g.cap}</div>`:"";
+  const born=(g.gap&&g.gap.born_ts)
+    ? `<span>تولدِ گپ: <b>${new Date(g.gap.born_ts*1000).toISOString().slice(0,16).replace("T"," ")} UTC</b></span>`
+    : "";
+  return `<div class="card">
+    <div class="rhead">
+      <div class="sym">${g.symbol} · ${g.tf}${g.htf?` <span class="jmsg">(بایاسِ ${g.htf})</span>`:""}</div>
+      <span class="price">قیمت: ${gapVal(g.price)}</span>
+      <div class="spacer"></div>
+      <div class="grade" style="background:${gapGradeColor(g.grade)}">${g.grade||"—"}</div>
+    </div>
+    <div class="metaline">
+      <span>آدرسِ پرسش: <b>${q.bottom} → ${q.top}</b></span>
+      <span>وضعیتِ گپ: <b>${g.state_fa||gapVal(g.state)}</b></span>
+      <span>هم‌پوشانیِ آدرس با گپِ واقعی: <b>${Math.round((g.overlap_pct||0)*100)}٪</b></span>
+      ${born}
+    </div>
+    <div class="scorebar"><div class="scorefill" style="width:${sc.percent||0}%;background:${gapGradeColor(g.grade)}"></div></div>
+    <div class="scoretxt">امتیازِ تأیید: <b>${sc.percent}٪</b> (${gapVal(sc.got)} از ${gapVal(sc.max)})`
+      +`${(g.capped&&g.score&&g.score.grade_raw&&g.score.grade_raw!==g.grade)?` · درجهٔ خام: ${g.score.grade_raw}`:""}</div>
+    ${g.reliable?`<div class="badge g-green">✅ قابلِ اتکا برای ورود (تأییدِ کافی)</div>`
+      :`<div class="badge g-amber">⚠️ تأییدِ ناکافی — به‌تنهایی برای ورود کافی نیست</div>`}
+    ${g.verdict?`<div class="verdict">${g.verdict}</div>`:""}
+    <div style="margin-top:12px">${gapChecksHtml(g.checks)}</div>
+    ${lvl}
+    ${(g.invalidations&&g.invalidations.length)?`<div class="gap-near"><b>ابطال‌ها:</b><br>${g.invalidations.map(x=>"• "+x).join("<br>")}</div>`:""}
+    ${caps}
+    ${near}
+  </div>`;
+}
+function gapStateSet(t){
+  const el=document.getElementById("gapState"); if(el) el.textContent=t;
+}
+async function pfGapAsk(listMode){
+  const res=document.getElementById("gapRes"), msg=document.getElementById("gapMsg"),
+        go=document.getElementById("gapGo"), ls=document.getElementById("gapList"),
+        symIn=document.getElementById("gapSym");
+  const sym=(gapField("gapSym")||"").trim().toUpperCase();
+  const tf=(gapField("gapTf")||"").trim();
+  const lo=(gapField("gapLo")||"").trim(), hi=(gapField("gapHi")||"").trim();
+  if(!sym){ if(symIn) symIn.focus(); if(msg) msg.textContent="اول نماد را بده."; return; }
+  if(!listMode&&(!lo||!hi)){
+    if(msg) msg.textContent="کف و سقفِ ناحیه را بده، یا «گپ‌های همین تایم‌فریم» را بزن.";
+    return;
+  }
+  if(go) go.disabled=true; if(ls) ls.disabled=true;
+  if(msg) msg.textContent="در حالِ بررسی…";
+  if(res) res.innerHTML='<div class="status">گپ را در دادهٔ زنده می‌جوییم و معیارها را نمره می‌دهیم… <span class="spin"></span></div>';
+  try{
+    const qs=new URLSearchParams({symbol:sym, tf:tf});
+    if(!listMode){ qs.set("lo", lo); qs.set("hi", hi); }
+    const r=await fetch(`/api/gap?${qs.toString()}`,{cache:"no-store"});
+    const d=await r.json();
+    if(msg) msg.textContent="";
+    if(d.ok===false){
+      gapStateSet(d.error||"پرسش انجام نشد");
+      if(res) res.innerHTML=`<div class="err">${d.error||"پرسش انجام نشد"}</div>`;
+      return;
+    }
+    if(d.mode==="list"){
+      const gs=d.gaps||[];
+      gapStateSet(gs.length?`${d.symbol} ${d.tf}: ${gs.length} گپِ باز`
+                          :`${d.symbol} ${d.tf}: گپِ بازی نیست`);
+      if(res) res.innerHTML = gs.length
+        ? `<div class="gap-near">${d.summary||""}</div>`+gs.map(gapCardHtml).join("")
+        : `<div class="err">در ${d.tf} گپِ بازی برای ${d.symbol} پیدا نشد — این تایم‌فریم ایمبالانسِ بازِ کمی دارد.</div>`;
+    }else{
+      gapStateSet(d.found?`${d.symbol} ${d.tf}: ${d.grade||"—"} ${d.score&&d.score.percent!=null?d.score.percent+"%":""}`
+                          :`${d.symbol} ${d.tf}: گپ پیدا نشد`);
+      if(res) res.innerHTML=gapCardHtml(d);
+    }
+  }catch(err){
+    gapStateSet("ارتباط با سرور قطع شد");
+    if(res) res.innerHTML=`<div class="err">ارتباط با سرور ناموفق بود: ${err}</div>`;
+  }finally{ if(go) go.disabled=false; if(ls) ls.disabled=false; }
+}
+(function(){
+  const go=document.getElementById("gapGo"), ls=document.getElementById("gapList"),
+        sym=document.getElementById("gapSym");
+  if(go) go.onclick=()=>pfGapAsk(false);
+  if(ls) ls.onclick=()=>pfGapAsk(true);
+  // راحتیِ کاربر: اگر کادرِ نماد خالی بود، روی فوکوس نمادِ اصلیِ صفحه را پیش‌پر کن.
+  if(sym) sym.addEventListener("focus",()=>{
+    if(!sym.value.trim()){
+      const main=document.getElementById("sym");
+      if(main&&main.value) sym.value=main.value;
+    }
+  });
+})();
 const expBtn=document.getElementById("expBtn"), impBtn=document.getElementById("impBtn"), impFile=document.getElementById("impFile");
 if(expBtn) expBtn.onclick=pfExportData;
 if(impBtn&&impFile) impBtn.onclick=()=>impFile.click();
@@ -4246,6 +4433,32 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 traceback.print_exc()
                 return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
+        # پرسشِ «تأییدِ شکافِ ارزش منصفانه»: کاربر کف/سقفِ ناحیه و تایم‌فریم را
+        # می‌دهد و اپ همان گپ را در دادهٔ زنده پیدا می‌کند و می‌گوید چقدر تأیید دارد
+        # و می‌شود به آن اتکا کرد یا نه. بدونِ آدرس (lo/hi) حالتِ فهرست است:
+        # گپ‌های بازِ همان تایم‌فریم از پرتأییدترین به کم‌تأییدترین.
+        if u.path == "/api/gap":
+            q = parse_qs(u.query)
+            sym = (q.get("symbol", [""])[0]).strip()
+            tf = (q.get("tf", [""])[0]).strip()
+            lo_raw = (q.get("lo", [""])[0]).strip()
+            hi_raw = (q.get("hi", [""])[0]).strip()
+            if not sym:
+                return self._send(200, json.dumps(
+                    {"ok": False, "error": "نماد وارد نشده"}, ensure_ascii=False))
+            if G is None:
+                return self._send(200, json.dumps(
+                    {"ok": False, "error": "موتورِ گپ در دسترس نیست"},
+                    ensure_ascii=False))
+            try:
+                lo = float(lo_raw) if lo_raw else None
+                hi = float(hi_raw) if hi_raw else None
+                return self._send(200, json.dumps(
+                    G.query(sym, tf, lo, hi), ensure_ascii=False))
+            except Exception as e:
+                traceback.print_exc()
+                return self._send(200, json.dumps(
+                    {"ok": False, "error": str(e)}, ensure_ascii=False))
         if u.path == "/api/health":
             return self._send(200, json.dumps({"ok": True}))
         # اطلاعاتِ نصب روی دستگاه: آدرسِ LAN و وضعیتِ HTTPS/توکن — ارزان و محلی

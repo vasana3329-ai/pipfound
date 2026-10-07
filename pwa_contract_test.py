@@ -55,8 +55,11 @@ def check(name, cond, detail=""):
 # «پشتیبانِ خودکار» در سندباکس خطای کاذب («ماژولِ … خوانده نشد») می‌سازند.
 # `macro_context.py`/`fundamental.py` هم لازم‌اند، وگرنه قاعده‌ی «آرشیو»
 # خطای کاذبِ «macro_context.py خوانده نشد» می‌سازد (لایه‌ی ۴.۱۶).
+# `gap_query.py` هم لازم است، وگرنه قاعده‌ی «پرسشِ تأییدِ شکاف» خطای کاذبِ
+# «موتورِ گپ پیدا نشد» می‌سازد.
 COMPANIONS = ("app.py", "backup.py", "autobackup.py", "macro_context.py",
-              "fundamental.py", "sw.js", "manifest.webmanifest",
+              "fundamental.py", "gap_query.py", "sw.js",
+              "manifest.webmanifest",
               "icon-180.png", "icon-192.png", "icon-192-mask.png",
               "icon-512.png", "icon-512-mask.png")
 
