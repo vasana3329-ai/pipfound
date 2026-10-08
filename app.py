@@ -934,6 +934,177 @@ def start_fund_alarm_worker():
     return t
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  گپ‌بان — هشدارِ خودکارِ «تولدِ گپِ قابلِ اتکا» (A+/A) روی نمادِ تحتِ نظارت
+# ═══════════════════════════════════════════════════════════════════
+# خواستهٔ کاربر: «وقتی روی نمادهای تحتِ نظارت یک گپِ تازه با نمرهٔ A+ یا A ساخته
+# می‌شود هشدار بده، بدونِ اینکه خودم پرسشی بفرستم.» یعنی همان موتورِ پرسشِ گپ
+# (`gap_query`) باید خودش دوره‌ای بپرسد و فقط تولدِ گپِ قابلِ اتکا را خبر دهد.
+#
+# چهار تصمیمِ مهم که این‌جا گرفته شده و در نگهبان/آزمون قفل می‌شوند:
+#   ۱) درجه‌های هشدار از خودِ موتور خوانده می‌شوند (`RELIABLE_GRADES`)، نه یک
+#      فهرستِ موازی — وگرنه روزی که مرزِ A+ عوض شود، گپ‌بان بی‌صدا از حکمِ اپ
+#      جدا می‌افتد و برای گپِ «غیرقابلِ اتکا» هشدار می‌دهد.
+#   ۲) دورِ اول **پایه‌گذاریِ بی‌صدا** است: گپ‌های موجودِ همان لحظه در `seen`
+#      می‌نشینند و هیچ هشدار نمی‌دهند. وگرنه لحظهٔ ثبتِ نظارت، کاربر برای
+#      گپ‌های ازپیش‌موجود سیلیِ نوتیف می‌گرفت — همان شکایتی که دروازهٔ
+#      «خفه‌کردنِ نوتیفیکیشن» برایش ساخته شد.
+#   ۳) هشدار فقط برای **تولد** است، نه ارتقای درجه: گپِ B که بعداً A+ می‌شود
+#      خبر نمی‌دهد؛ چون گپِ تازه‌ای ساخته نشده (خواستهٔ کاربر «گپِ تازه» بود).
+#   ۴) کلیدِ هویت (`born_ts`+نوع+کف+سقف) نمی‌گذارد یک گپ در هر دور دوباره
+#      هشدار بدهد؛ و چون زمانِ تولد داخلِ کلید است، گپِ دیگری که روی همان قیمت
+#      ساخته شود «تازه» شمرده می‌شود.
+#
+# منطقِ تصمیم **خالص** است (`gap_watch_decide`) و I/O جدا مانده تا بشود بدونِ
+# شبکه آزمودش کرد.
+GAP_WATCH_INTERVAL = 300      # ثانیه — پویشِ گپ‌بان (کارِ سنگین‌تر از آلارمِ قیمت)
+GAP_WATCH_HITS_MAX = 20       # چند هشدارِ آخر در فایل نگه داشته شود
+
+
+def _gapwatch_grades():
+    """درجه‌هایی که هشدار می‌دهند — از خودِ موتور، نه یک فهرستِ موازی."""
+    try:
+        return tuple(G.RELIABLE_GRADES)
+    except Exception:
+        return ("A+", "A")
+
+
+def _gap_key(gap):
+    """هویتِ پایدارِ یک گپ — جلوگیری از هشدارِ تکراری در دورهای بعدی."""
+    return "%s|%s|%s|%s" % (gap.get("born_ts"), gap.get("type"),
+                            gap.get("bottom"), gap.get("top"))
+
+
+def gap_watch_decide(seen, seeded, current_all, current_reliable):
+    """تصمیمِ خالصِ گپ‌بان → (seenِ تازه، کلیدهای نیازمندِ هشدار، پایه‌گذاری‌شده؟).
+
+    بدونِ هیچ I/O، تا همان «کی باید خبر بگیرد؟» بدونِ شبکه آزمون‌پذیر باشد؛
+    کارگر فقط اجرا می‌کند.
+    `current_all`: کلیدِ همهٔ گپ‌های پویش‌شده (برای هرس).
+    `current_reliable`: کلیدِ زیرمجموعه‌ای که امروز A+/A است (برای هشدار).
+    """
+    seen = [k for k in (seen or []) if k]
+    cur = [k for k in (current_all or []) if k]
+    if not seeded:
+        # دورِ اول = پایه‌گذاریِ بی‌صدا (تصمیمِ ۲ در بالای همین بخش).
+        return (sorted(set(cur)), [], True)
+    rel = [k for k in (current_reliable or []) if k]
+    fresh = [k for k in rel if k not in set(seen)]
+    merged = seen + fresh
+    if cur:
+        # هرس فقط وقتی پویش چیزی دیده باشد: پویشِ خالی یا خرابِ گذرا نباید `seen`
+        # را پاک کند، وگرنه دورِ بعد برای همان گپ‌های قدیمی دوباره هشدار می‌رفت.
+        keep = set(cur)
+        merged = [k for k in merged if k in keep]
+    return (sorted(set(merged)), fresh, True)
+
+
+def _gap_watch_once(alarm):
+    """یک دورِ پویشِ گپ‌بان برای یک نظارت → (وصلهٔ آلارم، هشدارهای تازه).
+
+    داده **یک‌بار** خوانده می‌شود و هر گپِ بازِ همان تایم‌فریم با گامِ ۱۲بندیِ
+    حکم نمره می‌گیرد؛ پس هزینهٔ هر دور یک fetch است، نه یک fetch به‌ازای هر گپ.
+    """
+    sym = str(alarm.get("symbol") or "").strip().upper()
+    tf = str(alarm.get("tf") or "").strip().lower()
+    if not sym or tf not in G.TF_LADDER:
+        return None, []
+    bars, d = G.load(sym, tf, 300)
+    htf = G.tf_above(tf)
+    d_htf = None
+    if htf:
+        try:
+            _, d_htf = G.load(sym, htf, 300)
+        except Exception:
+            d_htf = None      # بی‌داده‌بودنِ تایم‌فریمِ بالا نباید پویش را بشکند
+    grades = _gapwatch_grades()
+    all_keys, reliable = [], []
+    for f in (d.get("FVG_unfilled") or []):
+        try:
+            v = G.gap_verdict(bars, tf, f.get("bottom"), f.get("top"),
+                              d=d, d_htf=d_htf, htf=htf, sym=sym)
+        except Exception:
+            continue
+        if not v.get("ok") or not v.get("found"):
+            continue
+        key = _gap_key(v.get("gap") or f)
+        all_keys.append(key)
+        if v.get("grade") in grades:
+            reliable.append((key, v))
+    seen, fresh, seeded = gap_watch_decide(
+        alarm.get("seen"), alarm.get("seeded"), all_keys, [k for k, _ in reliable])
+    byk = dict(reliable)
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    hits = []
+    for k in fresh:
+        v = byk.get(k) or {}
+        gp = v.get("gap") or {}
+        sc = v.get("score") or {}
+        gp_fa = "صعودی" if gp.get("type") == "bullish" else "نزولی"
+        hits.append({
+            "at": now, "key": k, "symbol": sym, "tf": tf,
+            "grade": v.get("grade"), "state_fa": v.get("state_fa"),
+            "bottom": gp.get("bottom"), "top": gp.get("top"),
+            "percent": sc.get("percent"),
+            "why": ("%s %s · گپِ %s %s–%s · %s · امتیازِ تأیید %s٪"
+                    % (sym, tf, gp_fa, gp.get("bottom"), gp.get("top"),
+                       v.get("grade"), sc.get("percent"))),
+        })
+    patch = {
+        "seen": seen, "seeded": seeded, "last_scan": now,
+        "last_price": round(bars[-1]["c"], 5),
+        "scanned": len(all_keys), "reliable_now": len(reliable),
+        "alerts": int(alarm.get("alerts") or 0) + len(hits),
+        "hits": (list(alarm.get("hits") or []) + hits)[-GAP_WATCH_HITS_MAX:],
+    }
+    return patch, hits
+
+
+def _gap_watch_worker():
+    """هر GAP_WATCH_INTERVAL ثانیه نظارت‌های گپ را می‌پوید و برای تولدِ گپِ
+    قابلِ اتکا یک نوتیفیکیشنِ نیتیو می‌فرستد (یک‌بار به‌ازای هر گپ)."""
+    while True:
+        try:
+            with _alarms_lock:
+                alarms = _load_alarms()
+            for a in [x for x in alarms
+                      if x.get("mode") == "gap" and x.get("active", True)]:
+                try:
+                    patch, hits = _gap_watch_once(a)
+                except Exception:
+                    traceback.print_exc()
+                    continue
+                if not patch:
+                    continue
+                # اول ذخیره، بعد نوتیف: اگر پروسه بینِ این دو بمیرد، یک هشدارِ
+                # گم‌شده بهتر از هشدارِ تکراریِ هر دور است. نوشتن با **بازخوانی و
+                # ادغام بر اساسِ id** است تا ویرایشِ کاربر در همان فاصله (حذف یا
+                # خاموش‌کردنِ نظارت) پاک نشود.
+                with _alarms_lock:
+                    cur = _load_alarms()
+                    found = False
+                    for x in cur:
+                        if str(x.get("id")) == str(a.get("id")):
+                            x.update(patch)
+                            found = True
+                            break
+                    if not found:
+                        continue     # کاربر همان‌موقع حذفش کرد — چیزی نمی‌نویسیم
+                    _save_alarms(cur)
+                for h in hits:
+                    _notify_mac("🧩 گپِ قابلِ اتکا — %s %s" % (h["symbol"], h["tf"]),
+                                h.get("why") or "")
+        except Exception:
+            traceback.print_exc()
+        time.sleep(GAP_WATCH_INTERVAL)
+
+
+def start_gap_watch_worker():
+    t = threading.Thread(target=_gap_watch_worker, daemon=True)
+    t.start()
+    return t
+
+
 # ── بازنگریِ کدِ در حالِ اجرا (revision) ──────────────────────────────────────
 # چرا: پایتون کد را *لحظهٔ استارت* می‌خواند. اگر بعد از ادغام، همان پروسهٔ قدیمی
 # سرو کند، رابطِ کهنه دیده می‌شود و دقیقاً شبیهِ «کلیدها گم شدند» به‌نظر می‌رسد،
@@ -2054,6 +2225,7 @@ input.abnum{flex:0 0 86px;min-width:86px;text-align:center;direction:ltr;
                title="بالاترین قیمتِ ناحیهٔ گپ (روی چارت).">
         <button id="gapGo" class="riskbtn" title="همین ناحیه را در دادهٔ زنده پیدا کن و بگو چقدر تأیید دارد و آیا می‌شود به آن اتکا کرد.">🔎 بررسیِ تأیید</button>
         <button id="gapList" class="btsug" title="اگر آدرس نداری: گپ‌های بازِ همین نماد و تایم‌فریم را از پرتأییدترین به کم‌تأییدترین نشان می‌دهد تا یکی را انتخاب کنی.">گپ‌های همین تایم‌فریم</button>
+        <button id="gapWatch" class="btsug" title="گپ‌بان: همین نماد و تایم‌فریم را زیرِ نظارت بگذار. خودِ اپ هر ۵ دقیقه پویش می‌کند و به‌محضِ تولدِ گپِ تازه با نمرهٔ A+ یا A نوتیفیکیشنِ نیتیو می‌فرستد — لازم نیست پرسشی بفرستی. دورِ اول بی‌صدا پایه‌گذاری می‌شود تا برای گپ‌های ازپیش‌موجود سیلیِ اعلان نگیری.">🔔 گپ‌بان</button>
         <span id="gapMsg" class="jmsg"></span>
       </div>
       <div id="gapRes"></div>
@@ -3326,10 +3498,35 @@ async function loadAlarms(){
     const list = await r.json();
     const box = document.getElementById("alarmsList");
     const stEl = document.getElementById("alarmsState");
-    if(stEl) stEl.textContent = list.length ? ("· "+list.length+" آلارمِ فعال") : "· بدونِ آلارم";
+    const nGap = list.filter(a=>a.mode==="gap").length, nOte = list.length - nGap;
+    if(stEl){
+      if(!list.length) stEl.textContent = "· بدونِ آلارم";
+      else if(nGap && !nOte) stEl.textContent = "· "+nGap+" گپ‌بانِ فعال";
+      else if(nGap) stEl.textContent = "· "+nOte+" آلارمِ قیمت و "+nGap+" گپ‌بان";
+      else stEl.textContent = "· "+nOte+" آلارمِ فعال";
+    }
     if(!list.length){box.innerHTML='<div class="aempty">هنوز آلارمی نگذاشته‌ای.</div>';return;}
     box.innerHTML = list.map(a=>{
       const trig = a.triggered;
+      // گپ‌بان‌ها ساختارِ دیگری دارند: آدرس ندارند، تایم‌فریم و وضعیتِ پویش و
+      // آخرین هشدار دارند — جدا رندر می‌شوند تا مثلِ آلارمِ قیمتِ ناقص به‌نظر نرسند.
+      if(a.mode==="gap"){
+        const hits=a.hits||[], last=hits.length?hits[hits.length-1]:null;
+        const seeded=a.seeded
+          ? `پایه‌گذاری شد (${a.scanned||0} گپ دید · ${a.reliable_now||0} قابلِ اتکا)`
+          : "دورِ اول: پایه‌گذاریِ بی‌صدا — هنوز هشداری ندارد";
+        const scanline=a.last_scan ? `آخرین پویش: ${a.last_scan}` : "در انتظارِ اولین پویش (تا ۵ دقیقه)";
+        const px=a.last_price!=null ? `<span class="apx">فعلی: ${fmt(a.last_price)}</span>` : "";
+        return `<div class="alarm-item">
+          <span class="asym">${a.symbol}</span>
+          <span class="arng">گپ‌بان · تایم‌فریم ${a.tf||"—"}</span>
+          ${px}
+          <span class="astat"><span class="pill waiting">👁 زیرِ نظارت</span></span>
+          <button class="adel" data-id="${a.id}" title="این نظارتِ گپ را حذف کن؛ دیگر پویش نمی‌شود.">حذف</button>
+          <div class="arng" style="width:100%">${scanline} · ${seeded}${a.alerts?` · 🧩 هشدارها: ${a.alerts}`:""}</div>
+          ${last?`<div class="arng" style="width:100%">🔔 آخرین گپِ قابلِ اتکا (${last.at||""}): <b>${last.grade||"—"}</b> — ${last.why||""}</div>`:""}
+        </div>`;
+      }
       const dirFa = (a.direction==="صعودی"||a.direction===1)?"خرید":((a.direction==="نزولی"||a.direction===-1)?"فروش":"—");
       const pill = trig
         ? `<span class="pill hit">✅ رسید!</span>`
@@ -3511,6 +3708,33 @@ function gapCardHtml(g){
 function gapStateSet(t){
   const el=document.getElementById("gapState"); if(el) el.textContent=t;
 }
+// ── گپ‌بان: نظارتِ پس‌زمینه روی یک نماد+تایم‌فریم ─────────────────────────
+// خواستهٔ کاربر: «بدونِ اینکه پرسشی بفرستم، وقتی روی نمادِ تحتِ نظارت گپِ تازه
+// با نمرهٔ A+/A ساخته شد خبرم کن.» این دکمه نظارت را می‌سازد و کارِ پویش دستِ
+// سرور است (کارگرِ گپ‌بان) — صفحه لازم نیست باز بماند.
+async function pfGapWatch(){
+  const msg=document.getElementById("gapMsg"), wb=document.getElementById("gapWatch"),
+        symIn=document.getElementById("gapSym");
+  const sym=(gapField("gapSym")||"").trim().toUpperCase();
+  const tf=(gapField("gapTf")||"").trim();
+  if(!sym){ if(symIn) symIn.focus(); if(msg) msg.textContent="اول نماد را بده."; return; }
+  if(wb) wb.disabled=true;
+  if(msg){ msg.textContent="در حالِ ثبتِ نظارتِ گپ…"; msg.className="jmsg"; }
+  try{
+    const r=await fetch("/api/alarm",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({symbol:sym, mode:"gap", tf:tf})});
+    const j=await r.json();
+    if(j.error){ if(msg){ msg.textContent="خطا: "+j.error; msg.className="jmsg bad"; } }
+    else{
+      if(msg){
+        msg.textContent=`👁 ${sym} ${tf} زیرِ نظارتِ گپ رفت — دورِ اول بی‌صدا پایه‌گذاری می‌شود و از این به بعد هر گپِ تازه با نمرهٔ A+ یا A نوتیف می‌دهد. (در بخشِ «آلارم‌های فعال» می‌بینی‌اش.)`;
+        msg.className="jmsg good";
+      }
+      loadAlarms();
+    }
+  }catch(err){ if(msg){ msg.textContent="ارتباط ناموفق: "+err; msg.className="jmsg bad"; } }
+  finally{ if(wb) wb.disabled=false; }
+}
 async function pfGapAsk(listMode){
   const res=document.getElementById("gapRes"), msg=document.getElementById("gapMsg"),
         go=document.getElementById("gapGo"), ls=document.getElementById("gapList"),
@@ -3556,9 +3780,10 @@ async function pfGapAsk(listMode){
 }
 (function(){
   const go=document.getElementById("gapGo"), ls=document.getElementById("gapList"),
-        sym=document.getElementById("gapSym");
+        wb=document.getElementById("gapWatch"), sym=document.getElementById("gapSym");
   if(go) go.onclick=()=>pfGapAsk(false);
   if(ls) ls.onclick=()=>pfGapAsk(true);
+  if(wb) wb.onclick=pfGapWatch;
   // راحتیِ کاربر: اگر کادرِ نماد خالی بود، روی فوکوس نمادِ اصلیِ صفحه را پیش‌پر کن.
   if(sym) sym.addEventListener("focus",()=>{
     if(!sym.value.trim()){
@@ -4954,8 +5179,40 @@ class Handler(BaseHTTPRequestHandler):
                 elif mode == "price":
                     alarm["target"] = d.get("target")
                     alarm["cross"] = d.get("cross", "any")
+                elif mode == "gap":
+                    # نظارتِ گپ‌بان: نماد + تایم‌فریم، بدونِ آدرس. هر ۵ دقیقه خودش
+                    # پویش می‌کند و برای «تولدِ گپِ A+/A» هشدار می‌دهد.
+                    if G is None:
+                        return self._send(200, json.dumps(
+                            {"error": "موتورِ گپ بار نشد — نظارتِ گپ ممکن نیست"}, ensure_ascii=False))
+                    tf = str(d.get("tf") or "").strip().lower()
+                    if tf not in G.TF_LADDER:
+                        return self._send(200, json.dumps(
+                            {"error": "تایم‌فریمِ نامعتبر برای گپ‌بان: %s — معتبرها: %s"
+                                       % (tf or "(خالی)", "، ".join(G.TF_LADDER.keys()))},
+                            ensure_ascii=False))
+                    alarm["tf"] = tf
+                    # درجه‌های هشدار همان `RELIABLE_GRADES`ِ موتور است (A+/A).
+                    # عمداً کلیدِ «درجهٔ دلخواه» گذاشته نشد تا تنظیمی نداشته باشیم
+                    # که کاری نکند یا مرزِ «قابلِ اتکا» را از حکمِ اپ جدا کند.
+                    alarm["seeded"] = False   # دورِ اول بی‌صدا پایه‌گذاری می‌کند
+                    alarm["seen"] = []
+                    alarm["hits"] = []
+                    alarm["alerts"] = 0
+                    alarm["triggered"] = False   # گپ‌بان یک‌بارمصرف نیست
                 with _alarms_lock:
                     alarms = _load_alarms()
+                    if mode == "gap":
+                        # دو نظارتِ یکسان روی یک نماد/تایم‌فریم یعنی دو نوتیفِ
+                        # تکراری برای هر گپِ تازه؛ کاربر هم یک بار این را خواسته.
+                        dup = [x for x in alarms
+                               if x.get("mode") == "gap" and x.get("active", True)
+                               and str(x.get("symbol")) == sym
+                               and str(x.get("tf")) == alarm.get("tf")]
+                        if dup:
+                            return self._send(200, json.dumps(
+                                {"error": "%s %s از قبل زیرِ نظارتِ گپ است"
+                                          % (sym, alarm.get("tf"))}, ensure_ascii=False))
                     # شناسهٔ یکتا: time.time()×۱۰۰۰ برای دو آلارمِ پشت‌سرهم می‌تواند
                     # یکی باشد — آن‌وقت حذفِ یکی هر دو را می‌برد و انتقالِ داده هم
                     # آنها را «تکراری» می‌دید. پس در برخورد، پسوندِ یکتا می‌گیرد.
@@ -5125,6 +5382,7 @@ def main():
             _TLS_PORT = None
     start_alarm_worker()
     start_fund_alarm_worker()
+    start_gap_watch_worker()
     start_autobackup_worker()
     print(f"✅ pipfound روی {url} بالا آمد.")
     if a.lan:

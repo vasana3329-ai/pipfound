@@ -2868,6 +2868,180 @@ def gap_query_problems(root, pages=None):
     return probs, stats
 
 
+# ── قراردادِ «گپ‌بان» — هشدارِ خودکارِ تولدِ گپِ قابلِ اتکا (لایهٔ ۴.۲۴) ────
+# خواستهٔ کاربر: «وقتی روی نمادِ تحتِ نظارت یک گپِ تازه با نمرهٔ A+/A ساخته می‌شود
+# هشدار بده، بدونِ اینکه خودم پرسشی بفرستم.» یعنی موتورِ پرسشِ گپ باید خودش
+# دوره‌ای بپرسد. پنج چیز باید قفل بماند، وگرنه هشدار یا نمی‌آید یا دروغ است:
+#   ۱) درجه‌های هشدار از خودِ موتور (`RELIABLE_GRADES`) خوانده می‌شوند، نه یک
+#      فهرستِ موازی — وگرنه روزی که مرزِ A+ عوض شود، گپ‌بان از حکمِ اپ جدا می‌افتد؛
+#   ۲) دورِ اول **بی‌صدا** پایه‌گذاری می‌کند — وگرنه لحظهٔ ثبتِ نظارت، کاربر برای
+#      گپ‌های ازپیش‌موجود سیلیِ نوتیف می‌گیرد؛
+#   ۳) پایه‌گذاری از **همهٔ** گپ‌های پویش‌شده است، نه فقط A+/A — وگرنه گپِ B که
+#      بعداً A+ می‌شود «تولد» شمرده می‌شود و هشدارِ دروغ می‌رود؛
+#   ۴) پیش از نوتیف ذخیره می‌شود (هشدارِ گم‌شده بهتر از هشدارِ تکراریِ هر دور)؛
+#   ۵) اندپوینت تایم‌فریمِ نامعتبر را رد می‌کند و نظارتِ تکراری روی یک نماد/تایم‌فریم
+#      را نمی‌پذیرد (وگرنه هر گپِ تازه دو نوتیف می‌گیرد).
+_GA_INTERVAL_RE = re.compile(r"^GAP_WATCH_INTERVAL\s*=\s*(\d+)", re.M)
+_GA_HITS_CAP_RE = re.compile(r"GAP_WATCH_HITS_MAX\s*=\s*(\d+)")
+_GA_HITS_USE_RE = re.compile(r"\[-GAP_WATCH_HITS_MAX:\]")
+_GA_GRADES_RE = re.compile(r"G\.RELIABLE_GRADES")
+_GA_DECIDE_CALL_RE = re.compile(
+    r'gap_watch_decide\(\s*alarm\.get\("seen"\)\s*,\s*alarm\.get\("seeded"\)\s*,\s*(\w+)\s*,')
+_GA_FILTER_RE = re.compile(r'if\s+v\.get\("grade"\)\s+in\s+grades\s*:')
+_GA_START_RE = re.compile(r"^\s*start_gap_watch_worker\(\)\s*$", re.M)
+_GA_DEF_RE = re.compile(r"def start_gap_watch_worker\(\):")
+_GA_THREAD_RE = re.compile(r"threading\.Thread\(target=_gap_watch_worker")
+_GA_ROUTE_TF_RE = re.compile(r"tf\s+not\s+in\s+G\.TF_LADDER")
+_GA_ROUTE_DUP_RE = re.compile(r"از قبل زیرِ نظارتِ گپ است")
+_GA_UI_BTN_RE = re.compile(r'id="gapWatch"')
+_GA_UI_WIRE_RE = re.compile(r"wb\.onclick=pfGapWatch")
+_GA_UI_FN_RE = re.compile(r"async function pfGapWatch\(")
+_GA_LIST_GAP_RE = re.compile(r'if\(a\.mode==="gap"\)\{')
+_GA_SEED_RET_RE = re.compile(r"return\s*\(.*\)")
+# نشانه‌های رندرِ نظارتِ گپ در فهرستِ آلارم‌ها: تایم‌فریم، وضعیتِ پایه‌گذاری و
+# تاریخچهٔ هشدارها — اگر اینها بیفتند، کاربر «کور» می‌ماند (نمی‌داند چه چیزی
+# زیرِ نظارت است، پویش شده یا نه، و آخرین گپِ قابلِ اتکا کِی بوده).
+_GA_LIST_MARKS = ("a.tf", "a.seeded", "a.hits")
+
+
+def gap_alert_problems(root, pages=None):
+    """قراردادِ «گپ‌بان» (لایهٔ ۴.۲۴) — هشدارِ خودکارِ تولدِ گپِ قابلِ اتکا (A+/A).
+
+    خواستهٔ کاربر: «بدونِ فرستادنِ پرسش، وقتی روی نمادِ تحتِ نظارت یک گپِ تازه با
+    نمرهٔ A+ یا A ساخته می‌شود هشدار بده.» اینجا همان پنج قفلِ بالا سنجیده می‌شود
+    (درجه‌ها از موتور، پایه‌گذاریِ بی‌صدا از همهٔ گپ‌ها، فقط تولدِ قابلِ اتکا،
+    ذخیره پیش از نوتیف، و اندپوینت/کارگرِ ثبت‌شده) به‌علاوهٔ کنترل و رندرِ رابط.
+    """
+    probs, stats = [], {"interval": False, "hits_cap": False, "grades_from_engine": False,
+                        "silent_seed": False, "seed_all": False, "birth_only": False,
+                        "save_first": False, "worker": False, "route": False, "ui": 0}
+    app_src = read_text(os.path.join(root, "app.py"))
+    page = (pages or {}).get("HTML") or ""
+    if not app_src:
+        probs.append("app.py خوانده نشد — گپ‌بان سنجیده نمی‌شود")
+        return probs, stats
+
+    # ۱) گامِ پویش و سقفِ تاریخچهٔ هشدارها.
+    m = _GA_INTERVAL_RE.search(app_src)
+    if m is None:
+        probs.append("app.py · گامِ پویشِ گپ‌بان (GAP_WATCH_INTERVAL) پیدا نشد — "
+                     "کارگر بی‌گام است یا گامش جایی قفل نشده")
+    elif not (60 <= int(m.group(1)) <= 3600):
+        probs.append("app.py · گامِ پویشِ گپ‌بان بیرونِ بازهٔ معقول است (%s ثانیه) — "
+                     "یا منبعِ داده را می‌خورد یا هشدار بی‌فایده دیر می‌رسد" % m.group(1))
+    else:
+        stats["interval"] = True
+    m = _GA_HITS_CAP_RE.search(app_src)
+    if m is None or _GA_HITS_USE_RE.search(app_src) is None:
+        probs.append("app.py · سقفِ تاریخچهٔ هشدارهای گپ (GAP_WATCH_HITS_MAX) غایب است — "
+                     "فایلِ آلارم‌ها با هر گپِ تازه بی‌مرز رشد می‌کند")
+    else:
+        stats["hits_cap"] = True
+
+    # ۲) درجه‌های هشدار باید از خودِ موتور بیایند، نه یک فهرستِ موازی.
+    gfn = _py_region(app_src, "def _gapwatch_grades(", "def _gap_key(")
+    if not gfn or _GA_GRADES_RE.search(gfn) is None:
+        probs.append("app.py · درجه‌های هشدارِ گپ‌بان از خودِ موتور خوانده نمی‌شوند "
+                     "(G.RELIABLE_GRADES) — فهرستِ موازی با حکمِ اپ از هم می‌پاشد")
+    else:
+        stats["grades_from_engine"] = True
+
+    # ۳) پایه‌گذاریِ بی‌صدا و از *همهٔ* گپ‌ها + فیلترِ فقط‌قابلِ‌اتکا.
+    decide = _py_region(app_src, "def gap_watch_decide(", "def _gap_watch_once(")
+    if not decide:
+        probs.append("app.py · تصمیمِ خالصِ گپ‌بان (gap_watch_decide) پیدا نشد — "
+                     "قاعدهٔ «کِی هشدار؟» سنجیده نمی‌شود")
+    else:
+        i = decide.find("if not seeded")
+        seg = decide[i:i + 400] if i >= 0 else ""
+        m_ret = _GA_SEED_RET_RE.search(seg)
+        ret = m_ret.group(0) if m_ret else ""
+        # عمداً *خطِ return* سنجیده می‌شود، نه یک پنجرهٔ متنی: در پنجره، `[]`
+        # پایین‌تر در `(current_reliable or [])` هم هست و جهشِ «پایه‌گذاریِ
+        # پرسروصدا» بی‌صدا سبز می‌ماند (همین جهش در آزمون گرفته شد).
+        if i < 0 or "[]" not in ret or ", True)" not in ret:
+            probs.append("app.py · دورِ اولِ گپ‌بان بی‌صدا پایه‌گذاری نمی‌کند — لحظهٔ "
+                         "ثبتِ نظارت، کاربر برای گپ‌های ازپیش‌موجود سیلیِ نوتیف می‌گیرد")
+        else:
+            stats["silent_seed"] = True
+    once = _py_region(app_src, "def _gap_watch_once(", "def _gap_watch_worker(")
+    if not once:
+        probs.append("app.py · پویشِ یک‌دورِ گپ‌بان (_gap_watch_once) پیدا نشد — "
+                     "هشدارِ تولد سنجیده نمی‌شود")
+    else:
+        m = _GA_DECIDE_CALL_RE.search(once)
+        if m is None or m.group(1) != "all_keys":
+            probs.append("app.py · پایه‌گذاریِ گپ‌بان از همهٔ گپ‌های پویش‌شده نیست "
+                         "(باید all_keys باشد، نه فقط گپ‌های قابلِ اتکا) — گپِ B که بعداً "
+                         "A+ می‌شود «تولد» شمرده می‌شود و هشدارِ دروغ می‌رود")
+        else:
+            stats["seed_all"] = True
+        if _GA_FILTER_RE.search(once) is None:
+            probs.append("app.py · فیلترِ «فقط گپِ قابلِ اتکا» از پویشِ گپ‌بان افتاده — "
+                         "برای گپِ کم‌ارزش هم هشدار می‌رود")
+        else:
+            stats["birth_only"] = True
+
+    # ۴) ترتیبِ ذخیره→نوتیف + کارگرِ تعریف/رشته/ثبت‌شده.
+    worker = _py_region(app_src, "def _gap_watch_worker(", "def start_gap_watch_worker(")
+    if not worker:
+        probs.append("app.py · کارگرِ گپ‌بان (_gap_watch_worker) پیدا نشد — هیچ پویشِ "
+                     "دوره‌ای وجود ندارد")
+    else:
+        i_save = worker.find("_save_alarms(cur)")
+        i_notify = worker.find("_notify_mac(")
+        if i_save < 0 or i_notify < 0 or i_save > i_notify:
+            probs.append("app.py · گپ‌بان پیش از ذخیره نوتیف می‌فرستد (یا ذخیره/نوتیفِ "
+                         "کارگر ناقص است) — مرگِ پروسه یعنی هشدارِ تکراریِ هر دور")
+        else:
+            stats["save_first"] = True
+    if (_GA_DEF_RE.search(app_src) is None or _GA_THREAD_RE.search(app_src) is None
+            or _GA_START_RE.search(app_src) is None):
+        probs.append("app.py · کارگرِ گپ‌بان تعریف/رشته/ثبت نشده (start_gap_watch_worker) — "
+                     "نظارتِ گپ هرگز پویش نمی‌شود")
+    else:
+        stats["worker"] = True
+
+    # ۵) اندپوینت: پذیرشِ mode=gap + اعتبارسنجیِ تایم‌فریم + ردِ نظارتِ تکراری.
+    route = _py_region(app_src, 'if u.path == "/api/alarm":', 'if u.path != "/api/journal":')
+    rbad = []
+    if not route:
+        rbad.append("مسیرِ /api/alarm پیدا نشد")
+    else:
+        if 'mode == "gap"' not in route:
+            rbad.append("شاخهٔ mode=gap ندارد — نظارتِ گپ ساخته نمی‌شود")
+        if _GA_ROUTE_TF_RE.search(route) is None:
+            rbad.append("تایم‌فریم را با نردبانِ موتور (G.TF_LADDER) نمی‌سنجد")
+        if _GA_ROUTE_DUP_RE.search(route) is None:
+            rbad.append("نظارتِ تکراری روی یک نماد/تایم‌فریم را رد نمی‌کند")
+    if rbad:
+        probs.append("app.py · اندپوینتِ نظارتِ گپ: " + "؛ ".join(rbad))
+    else:
+        stats["route"] = True
+
+    # ۶) رابط: کنترلِ ثبتِ نظارت + رندرِ نظارت‌ها در فهرستِ آلارم‌ها.
+    if not page:
+        probs.append("app.py · متنِ صفحه خوانده نشد — کنترلِ گپ‌بان سنجیده نمی‌شود")
+        return probs, stats
+    if (_GA_UI_BTN_RE.search(page) and _GA_UI_WIRE_RE.search(page)
+            and _GA_UI_FN_RE.search(page)):
+        stats["ui"] += 1
+    else:
+        probs.append("app.py · کنترلِ گپ‌بان در پنلِ گپ نیست (id=gapWatch + اتصالِ "
+                     "pfGapWatch) — کاربر نمی‌تواند نمادی را زیرِ نظارت بگذارد")
+    list_fn = _py_region(page, "async function loadAlarms(", "loadAlarms();")
+    miss = [x for x in _GA_LIST_MARKS if x not in list_fn]
+    if list_fn and _GA_LIST_GAP_RE.search(list_fn) and not miss \
+            and 'class="adel"' in list_fn:
+        stats["ui"] += 1
+    else:
+        probs.append("app.py · نظارت‌های گپ در فهرستِ آلارم‌ها رندر نمی‌شوند (یا تایم‌فریم/"
+                     "وضعیتِ پایه‌گذاری/تاریخچهٔ هشدار/کلیدِ حذف ندارند: %s) — کاربر "
+                     "نمی‌داند چه چیزی زیرِ نظارت است و نمی‌تواند برش دارد"
+                     % ("، ".join(miss) or "شاخهٔ gap"))
+    return probs, stats
+
+
 def read_baseline(root=None):
     """مبنای «نسخه‌ی سالم» → (inventory, منبع).
     اول اسنپ‌شاتِ همین ماشین (~/pipfound/good)، بعد فایلِ نسخه‌بندی‌شده‌ی
@@ -3048,6 +3222,15 @@ def run_checks(root, live=False, enforce_contract=True, accept_removals=False):
     gqp, gqstats = gap_query_problems(root, pages)
     rep["gapq"] = gqstats
     rep["problems"] += [f"پرسشِ شکافِ ارزش منصفانه → {p}" for p in gqp]
+
+    # ── چکِ استاتیکِ «گپ‌بان» (هشدارِ خودکارِ تولدِ گپِ قابلِ اتکا) ──
+    # خواستهٔ کاربر: بدونِ فرستادنِ پرسش، وقتی روی نمادِ تحتِ نظارت گپِ تازه با
+    # نمرهٔ A+/A ساخته می‌شود هشدار بگیرد. اگر کسی پایه‌گذاریِ بی‌صدا، فیلترِ درجه،
+    # ترتیبِ ذخیره→نوتیف یا ردِ نظارتِ تکراری را بردارد، همین‌جا گرفته می‌شود (نه
+    # روزی که کاربر بگوید «سیلیِ نوتیف گرفتم» یا «برای گپِ بی‌مقدار هشدار داد»).
+    gapa, gastats = gap_alert_problems(root, pages)
+    rep["gapalert"] = gastats
+    rep["problems"] += [f"گپ‌بانِ هشدارِ خودکار → {p}" for p in gapa]
 
     inv = inventory(pages)
     inv["routes"] = routes_of(root)
@@ -3283,6 +3466,17 @@ def _human(rep):
             f" · پنلِ پرسش: {gq.get('ids', 0)}/{len(_GQ_PANEL_IDS)}"
             f" · دو حالتِ پرسش: {gq.get('modes', 0)}/2"
             f" · پیشوندِ کارت (بی`v.`): {'✓' if gq.get('prefix') else '✗'}")
+    ga = rep.get("gapalert") or {}
+    if ga:
+        lines.append(
+            f"   گپ‌بانِ هشدارِ خودکار (فقط A+/A): گامِ پویش: {'✓' if ga.get('interval') else '✗'}"
+            f" · درجه‌ها از موتور: {'✓' if ga.get('grades_from_engine') else '✗'}"
+            f" · پایه‌گذاریِ بی‌صدا: {'✓' if ga.get('silent_seed') and ga.get('seed_all') else '✗'}"
+            f" · فقط تولدِ قابلِ اتکا: {'✓' if ga.get('birth_only') else '✗'}"
+            f" · ذخیره→نوتیف: {'✓' if ga.get('save_first') else '✗'}"
+            f" · کارگر/اندپوینت: {'✓' if ga.get('worker') and ga.get('route') else '✗'}"
+            f" · سقفِ تاریخچه: {'✓' if ga.get('hits_cap') else '✗'}"
+            f" · UI: {ga.get('ui', 0)}/2")
     nt = rep.get("notify") or {}
     if nt:
         lines.append(
