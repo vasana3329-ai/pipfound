@@ -38,12 +38,13 @@ const REQUIRED = ["go", "bt", "sym", "syms", "styles", "chips", "refreshBtn",
   "rkStat", "rkSave", "installBtn", "bkDock", "bkToggle", "bkBody", "bkState",
   "alarmsToggle", "alarmsBody", "btToggle", "btBody", "rkToggle", "rkBody",
   "gapDock", "gapToggle", "gapBody", "gapSym", "gapTf", "gapLo", "gapHi",
-  "gapGo", "gapList", "gapRes"];
+  "gapGo", "gapList", "gapWatch", "gapRes"];
 const HANDLER_IDS = new Set(["rkSave", "installBtn"]);   // وایر داخلِ IIFE — با CDP سنجیده می‌شود
 /* کنترل‌هایی که اپ با `.onclick =` به آن‌ها هندلر می‌دهد؛ اگر این‌ها تابع نباشند
    یعنی بلوکِ اسکریپت اجرا نشده یا نیمه‌کاره مرده است. */
 const WIRED = ["go", "refreshBtn", "bt", "setupsBtn", "fundBtn", "archiveBtn",
-  "rkSave", "bkToggle", "alarmsToggle", "btToggle", "rkToggle", "gapToggle"];
+  "rkSave", "bkToggle", "alarmsToggle", "btToggle", "rkToggle", "gapToggle",
+  "gapWatch"];
 const LISTENER_ONLY = ["sbBtn", "styles", "installBtn"];
 
 const problems = [];
@@ -1962,6 +1963,104 @@ function loadPuppeteer() {
     }
   } catch (e) {
     fail("بررسیِ پرسشِ تأییدِ شکافِ ارزش منصفانه ممکن نشد: " + e.message);
+  }
+
+  /* ۶.۱۵) گپ‌بان: نظارتِ پس‌زمینه روی نماد+تایم‌فریم — خواستهٔ کاربر «اگر روی
+     نمادِ تحتِ نظارتم گپِ تازهٔ A+/A ساخته شد هشدار بده، بی‌اینکه خودم پرسشی
+     بفرستم». این باند دو چیز را در مرورگرِ واقعی می‌سنجد:
+       ۱) کلیک روی دکمهٔ گپ‌بان همان نماد+تایم‌فریمِ کادر را (نرمال‌شده) با
+          `mode:"gap"` به /api/alarm می‌فرستد؛
+       ۲) نظارتِ گپ در فهرستِ آلارم‌ها درست رندر می‌شود: عنوانِ گپ‌بان، تایم‌فریم،
+          شمارِ هشدارها، آخرین گپِ قابلِ اتکا و کلیدِ حذف.
+     هر دو با استابِ fetch سنجیده می‌شوند تا به آلارم‌های واقعیِ کاربر دست نزنیم. */
+  try {
+    const gw = await page.evaluate(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const out = {};
+      const wb = document.getElementById("gapWatch");
+      const body = document.getElementById("gapBody"), tog = document.getElementById("gapToggle");
+      out.hasBtn = !!wb;
+      out.handler = typeof ((wb || {}).onclick);
+      if (!wb || !body || !tog) return out;
+      if (getComputedStyle(body).display === "none") { tog.click(); await wait(150); }
+      // عمداً با فاصله و حروفِ کوچک: نرمال‌سازیِ نماد باید ثابت شود.
+      document.getElementById("gapSym").value = "  btcusdt  ";
+      document.getElementById("gapTf").value = "15m";
+      const realFetch = window.fetch;
+      let posted = null;
+      const stubAlarms = [{
+        id: "gw-1", symbol: "BTCUSDT", mode: "gap", tf: "15m", active: true,
+        triggered: false, seeded: true, scanned: 3, reliable_now: 1, alerts: 2,
+        last_price: 82385.7, last_scan: "2026-10-08 16:20:32",
+        hits: [{ at: "2026-10-08 16:20:32", key: "k", symbol: "BTCUSDT", tf: "15m",
+                 grade: "A+", bottom: 82763.03, top: 83041.68, percent: 85.2,
+                 why: "BTCUSDT 15m · گپِ نزولی 82763.03–83041.68 · A+ · امتیازِ تأیید 85.2٪" }],
+      }];
+      window.fetch = (u, o) => {
+        const url = String(u);
+        if (url.indexOf("/api/alarm") === 0 && o && o.method === "POST") {
+          posted = JSON.parse(o.body);
+          return Promise.resolve({ ok: true,
+            json: () => Promise.resolve({ added: "gw-1", symbol: "BTCUSDT" }) });
+        }
+        if (url.indexOf("/api/alarms") === 0) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(stubAlarms) });
+        }
+        return realFetch(u, o);
+      };
+      try {
+        wb.click();
+        for (let i = 0; i < 20; i++) { if (posted) break; await wait(100); }
+        out.posted = posted;
+        await wait(80);
+        const row = document.querySelector("#alarmsList .alarm-item");
+        out.rowText = row ? row.textContent.replace(/\s+/g, " ").trim() : "";
+        out.hasDel = !!(row && row.querySelector(".adel"));
+        out.state = (document.getElementById("alarmsState") || {}).textContent || "";
+        out.msg = (document.getElementById("gapMsg") || {}).textContent || "";
+      } finally {
+        window.fetch = realFetch;
+      }
+      return out;
+    });
+    const before = problems.length;
+    if (!gw.hasBtn)
+      fail("گپ‌بان: دکمهٔ گپ‌بان (#gapWatch) در پنلِ گپ نیست");
+    else if (gw.handler !== "function")
+      fail("گپ‌بان: هندلرِ دکمهٔ گپ‌بان تابع نیست (سیم‌کشی نشده)");
+    if (gw.posted == null)
+      fail("گپ‌بان: کلیک روی دکمه هیچ درخواستی به /api/alarm نفرستاد");
+    else {
+      if (gw.posted.mode !== "gap")
+        fail(`گپ‌بان: حالتِ درخواست باید gap باشد، نه ${gw.posted.mode}`);
+      if (gw.posted.symbol !== "BTCUSDT")
+        fail(`گپ‌بان: نماد نرمال نشد («${gw.posted.symbol}»)`);
+      if (gw.posted.tf !== "15m")
+        fail(`گپ‌بان: تایم‌فریمِ درخواست «${gw.posted.tf}» است (باید 15m باشد)`);
+    }
+    if (!gw.rowText)
+      fail("گپ‌بان: نظارتِ گپ در فهرستِ آلارم‌ها رندر نشد (ردیفی نیست)");
+    else {
+      if (!/گپ‌بان/.test(gw.rowText))
+        fail(`گپ‌بان: ردیفِ نظارت عنوانِ گپ‌بان ندارد («${gw.rowText.slice(0, 80)}»)`);
+      if (!/15m/.test(gw.rowText))
+        fail("گپ‌بان: تایم‌فریم در ردیفِ نظارت دیده نمی‌شود");
+      if (!/A\+/.test(gw.rowText))
+        fail("گپ‌بان: آخرین گپِ قابلِ اتکا (A+) در ردیفِ نظارت دیده نمی‌شود");
+      if (!/هشدارها/.test(gw.rowText))
+        fail("گپ‌بان: شمارِ هشدارها در ردیفِ نظارت دیده نمی‌شود");
+    }
+    if (!gw.hasDel)
+      fail("گپ‌بان: ردیفِ نظارت کلیدِ حذف ندارد");
+    if (!/گپ‌بانِ فعال/.test(gw.state))
+      fail(`گپ‌بان: شمارندهٔ نوارِ آلارم‌ها گپ‌بان را نشمرد («${gw.state}»)`);
+    if (!/زیرِ نظارتِ گپ رفت/.test(gw.msg))
+      fail(`گپ‌بان: پیامِ موفقیتِ ثبتِ نظارت نیامد («${gw.msg.slice(0, 60)}»)`);
+    if (problems.length === before)
+      notes.push(`گپ‌بان: دکمه ✓ · POST mode=gap (${gw.posted.symbol} ${gw.posted.tf}) ✓ · `
+        + "ردیفِ نظارت با تایم‌فریم + شمارِ هشدارها + آخرین گپِ A+ + کلیدِ حذف ✓");
+  } catch (e) {
+    fail("بررسیِ گپ‌بان ممکن نشد: " + e.message);
   }
 
   /* ۱۰) اسکرین‌شات برای بازبینیِ انسانی. */
