@@ -1692,11 +1692,19 @@ function loadPuppeteer() {
           { status: 200, headers: { "Content-Type": "application/json" } }));
       };
       let stubTitle = String(key).split("|").slice(1).join("|") || "PF TEST FLIP";
+      // ایزوِ *درخواست‌شده* را برمی‌گردانیم، نه ایزوِ کارتِ اول. گذرِ اول یک کارت
+      // بیشتر ندارد و این تفاوت دیده نمی‌شود؛ ولی در گذرِ دوم (عنوانِ عوض‌شده)
+      // اگر همان ایزوِ اول برگردد، `flipEvent` کارت را با کلیدِ «ایزوی اشتباه +
+      // عنوانِ تازه» بازمی‌سازد و `waitFlip`ِ ایزوی درست هرگز نمی‌رسد — آن‌وقت
+      // هم کارت «گم» به‌نظر می‌رسد و هم سطرِ DATA زیرِ کلیدِ نادرست می‌نشیند.
+      // روی CI همین شد: «تازه=0 کهنه=0» (خطای هارنس بود، نه اپ).
       window.fetch = (u, o) => {
         const uu = String(u);
         if (uu.indexOf("event=") >= 0) {
           if (!out.flipUrl) out.flipUrl = uu;
-          return stubFor(iso, stubTitle);
+          const m = uu.match(/[?&]event=([^&]*)/);
+          const reqIso = m ? decodeURIComponent(m[1]) : iso;
+          return stubFor(reqIso, stubTitle);
         }
         return realFetch(u, o);
       };
