@@ -58,8 +58,11 @@ ANCHORS = {
 # فایل‌های همراهی که اپِ واقعی در همین پوشه دارد (سرویس‌ورکر، مانیفست، آیکون‌ها).
 # محیطِ جهش باید مثلِ مخزن باشد: نگهبان حالا وعده‌های سرویس‌ورکر/مانیفست را با
 # فایل‌های واقعی مقابله می‌کند و در sandboxِ بره «وعدهی بی‌فایل» خطای کاذب می‌دهد.
+# `gap_query.py` هم لازم است، وگرنه قاعده‌ی «پرسشِ تأییدِ شکاف» در سندباکس
+# خطای کاذبِ «موتورِ گپ پیدا نشد» می‌سازد.
 COMPANION_ASSETS = ("backup.py", "autobackup.py", "macro_context.py",
-                    "fundamental.py", "sw.js", "manifest.webmanifest",
+                    "fundamental.py", "gap_query.py", "sw.js",
+                    "manifest.webmanifest",
                     "icon-180.png", "icon-192.png", "icon-192-mask.png",
                     "icon-512.png", "icon-512-mask.png")
 

@@ -36,12 +36,14 @@ const REQUIRED = ["go", "bt", "sym", "syms", "styles", "chips", "refreshBtn",
   "setupsPanel", "alarmsDock", "tvBox", "shotGrid", "lightbox", "revChip",
   "dataChip", "riskPanel", "rkBalance", "rkRisk", "rkDaily", "rkOpen",
   "rkStat", "rkSave", "installBtn", "bkDock", "bkToggle", "bkBody", "bkState",
-  "alarmsToggle", "alarmsBody", "btToggle", "btBody", "rkToggle", "rkBody"];
+  "alarmsToggle", "alarmsBody", "btToggle", "btBody", "rkToggle", "rkBody",
+  "gapDock", "gapToggle", "gapBody", "gapSym", "gapTf", "gapLo", "gapHi",
+  "gapGo", "gapList", "gapRes"];
 const HANDLER_IDS = new Set(["rkSave", "installBtn"]);   // وایر داخلِ IIFE — با CDP سنجیده می‌شود
 /* کنترل‌هایی که اپ با `.onclick =` به آن‌ها هندلر می‌دهد؛ اگر این‌ها تابع نباشند
    یعنی بلوکِ اسکریپت اجرا نشده یا نیمه‌کاره مرده است. */
 const WIRED = ["go", "refreshBtn", "bt", "setupsBtn", "fundBtn", "archiveBtn",
-  "rkSave", "bkToggle", "alarmsToggle", "btToggle", "rkToggle"];
+  "rkSave", "bkToggle", "alarmsToggle", "btToggle", "rkToggle", "gapToggle"];
 const LISTENER_ONLY = ["sbBtn", "styles", "installBtn"];
 
 const problems = [];
@@ -1150,6 +1152,7 @@ function loadPuppeteer() {
       { box: "btPanel", toggle: "btToggle", body: "btBody", inner: "btFrom" },
       { box: "riskPanel", toggle: "rkToggle", body: "rkBody", inner: "rkSave" },
       { box: "bkDock", toggle: "bkToggle", body: "bkBody", inner: "expBtn" },
+      { box: "gapDock", toggle: "gapToggle", body: "gapBody", inner: "gapGo" },
     ];
     const folds = await page.evaluate(async (specs) => {
       const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -1689,11 +1692,19 @@ function loadPuppeteer() {
           { status: 200, headers: { "Content-Type": "application/json" } }));
       };
       let stubTitle = String(key).split("|").slice(1).join("|") || "PF TEST FLIP";
+      // ایزوِ *درخواست‌شده* را برمی‌گردانیم، نه ایزوِ کارتِ اول. گذرِ اول یک کارت
+      // بیشتر ندارد و این تفاوت دیده نمی‌شود؛ ولی در گذرِ دوم (عنوانِ عوض‌شده)
+      // اگر همان ایزوِ اول برگردد، `flipEvent` کارت را با کلیدِ «ایزوی اشتباه +
+      // عنوانِ تازه» بازمی‌سازد و `waitFlip`ِ ایزوی درست هرگز نمی‌رسد — آن‌وقت
+      // هم کارت «گم» به‌نظر می‌رسد و هم سطرِ DATA زیرِ کلیدِ نادرست می‌نشیند.
+      // روی CI همین شد: «تازه=0 کهنه=0» (خطای هارنس بود، نه اپ).
       window.fetch = (u, o) => {
         const uu = String(u);
         if (uu.indexOf("event=") >= 0) {
           if (!out.flipUrl) out.flipUrl = uu;
-          return stubFor(iso, stubTitle);
+          const m = uu.match(/[?&]event=([^&]*)/);
+          const reqIso = m ? decodeURIComponent(m[1]) : iso;
+          return stubFor(reqIso, stubTitle);
         }
         return realFetch(u, o);
       };
@@ -1706,11 +1717,12 @@ function loadPuppeteer() {
         if (b) b.setAttribute("data-in-s", "0");
       };
       const waitFlip = async (k) => {
-        for (let i = 0; i < 40; i++) {
+        // سقفِ ۱۲ثانیه‌ای: زیرِ بارِ CI سوییچ ممکن است دیرتر از ۴ثانیه سرِ جایش بنشیند.
+        for (let i = 0; i < 80; i++) {
           const nc = Array.from(document.querySelectorAll("#list .ev"));
           const now = nc.find((c) => c.dataset.key === k);
           if (now && now.querySelector(".scard.res")) break;
-          await wait(100);
+          await wait(150);
         }
       };
       const snap = (k) => {
@@ -1781,10 +1793,13 @@ function loadPuppeteer() {
         fail(`سوییچِ لحظه‌ای: کارتِ پیشِ‌رو باید پیش از سوییچ دو سناریو داشته باشد (${flip.condBefore})`);
       if (flip.flipUrl.indexOf("event=") < 0)
         fail("سوییچِ لحظه‌ای: درخواستِ سوییچ پارامترِ `event=` نداشت — " + flip.flipUrl);
-      if (!/اعلام شد/.test(flip.after))
-        fail(`سوییچِ لحظه‌ای: کارت پس از لحظهٔ اعلام سوییچ نکرد («${flip.after}») — قبلاً «${flip.before}»`);
-      if (flip.condAfter !== 0)
-        fail(`سوییچِ لحظه‌ای: ${flip.condAfter} کارتِ شرطی زیرِ رویدادِ اعلام‌شده ماند`);
+      // `snap()` نشانِ پس‌از‌سوییچ را `badge`/`cond` می‌دهد؛ پیش‌تر همین دو جا با
+      // نامِ غلطِ `after`/`condAfter` خوانده می‌شدند و چون باند در تقویم‌های بی‌خبر
+      // «سنجیده نمی‌شد»، هیچ‌وقت این نامِ غلط لو نمی‌رفت (تا دورِ ۱۱ که شد).
+      if (!/اعلام شد/.test(flip.badge))
+        fail(`سوییچِ لحظه‌ای: کارت پس از لحظهٔ اعلام سوییچ نکرد («${flip.badge}») — قبلاً «${flip.before}»`);
+      if (flip.cond !== 0)
+        fail(`سوییچِ لحظه‌ای: ${flip.cond} کارتِ شرطی زیرِ رویدادِ اعلام‌شده ماند`);
       if (flip.res !== 1)
         fail("سوییچِ لحظه‌ای: کارتِ «نتیجهٔ اعلام‌شده» پس از سوییچ رندر نشد");
       if (!flip.imp)
@@ -1811,7 +1826,7 @@ function loadPuppeteer() {
       }
       if (problems.length === before)
         notes.push(`سوییچِ لحظه‌ای: کارتِ پیشِ‌رو («${flip.before}») در لحظهٔ صفر بدونِ `
-          + `بازسازیِ فهرست به «${flip.after}» سوییچ شد ✓ — نتیجه + تأثیر: ${flip.imp}`);
+          + `بازسازیِ فهرست به «${flip.badge}» سوییچ شد ✓ — نتیجه + تأثیر: ${flip.imp}`);
     }
   } catch (e) {
     fail("بررسیِ سوییچِ لحظه‌ایِ اعلام ممکن نشد: " + e.message);
@@ -1821,6 +1836,132 @@ function loadPuppeteer() {
     } catch (e) {
       notes.push("بازگشت به صفحهٔ اصلی بعد از باندِ سوییچِ لحظه‌ای ممکن نشد: " + e.message);
     }
+  }
+
+  /* ۶.۱۴) پرسشِ تأییدِ شکافِ ارزش منصفانه (FVG): کاربر آدرسِ گپ + تایم‌فریم را
+     می‌دهد و اپ همان گپِ واقعی را با ۱۲ بندِ تأیید نمره می‌دهد و می‌گوید می‌شود
+     به آن اتکا کرد یا نه. آدرس از خودِ موتور گرفته می‌شود تا سنجش به تقویمِ
+     بازار وابسته نباشد؛ اگر نمادِ جاری گپ نداشت، نردبانی (نمادِ جاری/۱ساعت،
+     بعد BTCUSDT) دنبالِ دادهٔ واقعی می‌رود و مسیرِ «نمی‌خورد» در هر حال سنجیده
+     می‌شود — باند روی «دادهٔ خالی» سبز نمی‌شود. */
+  try {
+    const gq = await page.evaluate(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const out = { ok: true, err: "", closedAtLoad: null, opened: null, cards: 0,
+                    grade: "", pct: null, checks: 0, reliable: false, state: "",
+                    askedAddr: null, notFound: "", near: 0, nearSaid: false,
+                    verdict: "", tf: "", pickSym: "" };
+      const body = document.getElementById("gapBody");
+      const tog = document.getElementById("gapToggle");
+      if (!body || !tog) { out.ok = false; out.err = "پنلِ پرسش (gapToggle/gapBody) در صفحه نیست"; return out; }
+      out.closedAtLoad = getComputedStyle(body).display === "none";
+      tog.click();
+      await wait(150);
+      out.opened = getComputedStyle(body).display !== "none";
+
+      const sym = ((document.getElementById("sym") || {}).value || "").trim();
+      /* گپِ باز در دادهٔ واقعی کم‌یاب است: اگر نمادِ جاری در ۱۵m گپی نداشت،
+         تایم‌فریمِ بالاتر و بعد BTCUSDT را هم می‌پرسیم تا این باند روی «دادهٔ
+         خالی» سنجیده نشود. مسیرِ «نمی‌خورد» در هر حال سنجیده می‌شود. */
+      let tf = "15m", pick = null, pickSym = sym;
+      for (const [s, t] of [[sym, "15m"], [sym, "1h"], ["BTCUSDT", "15m"]]) {
+        if (!s) continue;
+        const rr = await fetch(`/api/gap?symbol=${encodeURIComponent(s)}&tf=${t}`, { cache: "no-store" });
+        const dd = await rr.json().catch(() => null);
+        if (dd && dd.ok && (dd.gaps || []).length) { pick = dd; pickSym = s; tf = t; break; }
+      }
+      out.tf = tf;
+      out.pickSym = pickSym;
+
+      /* آدرسِ عمداً بی‌ربط — مستقل از این‌که گپی بود یا نه: نباید گپِ الکی بسازد. */
+      const askIrrelevant = async () => {
+        document.getElementById("gapSym").value = pickSym;
+        document.getElementById("gapTf").value = tf;
+        document.getElementById("gapLo").value = "500";
+        document.getElementById("gapHi").value = "501";
+        document.getElementById("gapGo").click();
+        for (let i = 0; i < 80; i++) {
+          const v = document.querySelector("#gapRes .card .verdict");
+          if (v && /آدرس/.test(v.textContent || "")) break;
+          if (document.querySelector("#gapRes .err")) break;
+          await wait(250);
+        }
+        const vt = ((document.querySelector("#gapRes .card .verdict") || {}).textContent || "");
+        out.notFound = vt.slice(0, 70);
+        out.near = document.querySelectorAll("#gapRes .card .gap-near").length;
+        // حکمِ آدرسِ بی‌ربط وقتی گپِ نزدیکی دارد می‌گوید «نزدیک‌ترین…» — پس
+        // رندرِ فهرستِ نزدیک‌ترین‌ها با متنِ حکم مقابله می‌شود (نه با حدسِ داده).
+        out.nearSaid = /نزدیک‌ترین/.test(vt);
+      };
+
+      if (!pick) { out.cards = 0; await askIrrelevant(); return out; }
+      const g = pick.gaps[0];
+      out.askedAddr = `${g.gap.bottom}–${g.gap.top}`;
+
+      document.getElementById("gapSym").value = pickSym;
+      document.getElementById("gapTf").value = tf;
+      document.getElementById("gapLo").value = String(g.gap.bottom);
+      document.getElementById("gapHi").value = String(g.gap.top);
+      document.getElementById("gapGo").click();
+      for (let i = 0; i < 80; i++) {
+        if (document.querySelector("#gapRes .gap-ck") || document.querySelector("#gapRes .err")) break;
+        await wait(250);
+      }
+      out.cards = document.querySelectorAll("#gapRes .card").length;
+      const card = document.querySelector("#gapRes .card");
+      if (card) {
+        out.grade = ((card.querySelector(".grade") || {}).textContent || "").trim();
+        const st = ((card.querySelector(".scoretxt") || {}).textContent || "");
+        const m = st.match(/([\d.]+)\u066a/);
+        out.pct = m ? parseFloat(m[1]) : null;
+        out.checks = card.querySelectorAll(".gap-ck").length;
+        out.reliable = !!card.querySelector(".badge.g-green");
+        out.verdict = ((card.querySelector(".verdict") || {}).textContent || "").slice(0, 90);
+      }
+      out.state = ((document.getElementById("gapState") || {}).textContent || "").trim();
+
+      await askIrrelevant();
+      return out;
+    });
+    const before = problems.length;
+    if (!gq.ok) fail("پرسشِ گپ: " + gq.err);
+    else {
+      if (gq.closedAtLoad !== true)
+        fail("پرسشِ گپ: پنل باید همان اول جمع باشد (کرکره‌ی جمعِ پیش‌فرض)");
+      if (gq.opened !== true)
+        fail("پرسشِ گپ: کلیک روی نوارِ پنل آن را باز نکرد");
+      if (!gq.cards)
+        notes.push("پرسشِ گپ: در این پنجره روی «" + gq.pickSym + " " + gq.tf
+          + "» گپِ بازی نبود — فقط مسیرِ «نمی‌خورد» سنجیده شد "
+          + "(فهرستِ نزدیک‌ترین‌ها چیزِ واقعی برای پیشنهاد نداشت)");
+      else {
+        if (!gq.grade || gq.grade === "—")
+          fail(`پرسشِ گپ: کارتِ حکم درجه ندارد («${gq.grade}»)`);
+        if (gq.checks !== 12)
+          fail(`پرسشِ گپ: ${gq.checks} بندِ امتیاز رندر شد (باید ۱۲ بند باشد)`);
+        if (!(gq.pct > 0))
+          fail(`پرسشِ گپ: درصدِ امتیازِ تأیید سنجیده نشد (${gq.pct})`);
+        if (!gq.verdict)
+          fail("پرسشِ گپ: متنِ حکم در کارت نیامد");
+        if (gq.reliable !== ["A+", "A"].includes(gq.grade))
+          fail(`پرسشِ گپ: برچسبِ «قابلِ اتکا» با درجه نمی‌خواند (درجه=${gq.grade}، `
+            + `قابلِ اتکا=${gq.reliable})`);
+      }
+      if (!/آدرس/.test(gq.notFound))
+        fail(`پرسشِ گپ: آدرسِ بی‌ربط (۵۰۰–۵۰۱) حکمِ «نمی‌خورد» نگرفت («${gq.notFound}»)`);
+      if (gq.nearSaid && !gq.near)
+        fail("پرسشِ گپ: حکمِ آدرسِ بی‌ربط «نزدیک‌ترین گپ‌ها» را وعده داده ولی "
+          + "فهرستی رندر نشد");
+      if (!gq.nearSaid)
+        notes.push("پرسشِ گپ: در این پنجره هیچ گپِ نزدیکی هم نبود — "
+          + "فهرستِ نزدیک‌ترین‌ها چیزی برای نشان‌دادن نداشت");
+      if (problems.length === before)
+        notes.push(`پرسشِ گپ: آدرسِ ${gq.askedAddr} (${gq.state}) ⇒ درجهٔ ${gq.grade} · `
+          + `${gq.pct}٪ · ${gq.checks}/۱۲ بند · ${gq.reliable ? "قابلِ اتکا" : "تأییدِ ناکافی"}`
+          + " ✓ — و آدرسِ بی‌ربط رد شد ✓");
+    }
+  } catch (e) {
+    fail("بررسیِ پرسشِ تأییدِ شکافِ ارزش منصفانه ممکن نشد: " + e.message);
   }
 
   /* ۱۰) اسکرین‌شات برای بازبینیِ انسانی. */

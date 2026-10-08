@@ -105,10 +105,13 @@ def mutate(**subs):
 # خطای کاذب می‌سازد: (۱) لنگرهایی که هارنسِ بصری پین کرده «کدِ مرده» به‌نظر
 # می‌رسند؛ (۲) نگهبانِ تازه‌ی «قراردادِ PWA» فایلِ همراهِ app.py را نمی‌بیند و
 # «وعده‌ی بی‌فایل» گزارش می‌کند.
+# `gap_query.py` هم لازم است، وگرنه قاعده‌ی «پرسشِ تأییدِ شکاف» در سندباکس
+# خطای کاذبِ «موتورِ گپ پیدا نشد» می‌سازد.
 COMPANION_ASSETS = ("ui_visual_check.cjs", "backup.py", "autobackup.py",
-                    "macro_context.py", "fundamental.py", "sw.js",
-                    "manifest.webmanifest", "icon-180.png", "icon-192.png",
-                    "icon-192-mask.png", "icon-512.png", "icon-512-mask.png")
+                    "macro_context.py", "fundamental.py", "gap_query.py",
+                    "sw.js", "manifest.webmanifest", "icon-180.png",
+                    "icon-192.png", "icon-192-mask.png", "icon-512.png",
+                    "icon-512-mask.png")
 
 
 def wiring_needles(r):
