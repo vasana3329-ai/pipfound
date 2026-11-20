@@ -12,7 +12,8 @@
 
 هستهٔ تحلیل همان confluence.py + smc_engine.py + macro_context.py است.
 """
-import sys, os, json, argparse, traceback, threading, time, datetime, re, hashlib, subprocess
+import sys, os, json, argparse, traceback, threading, time, datetime, re, hashlib, subprocess, hmac
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -63,9 +64,17 @@ try:
 except Exception:
     AB = None
 
-# ماژولِ ژورنال از پوشه‌ی همسایه‌ی trade-journal
-_JRN_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__)))), "trade-journal", "scripts")
+# ماژولِ ژورنال: اول بستهٔ `deps/trade-journal` کنارِ همین اپ (چیدمانِ کپی/بکاپ)،
+# بعد پوشهٔ همسایه‌ی trade-journal (چیدمانِ اصلیِ مهارت). بدونِ این ترتیب، نسخهٔ کپی
+# بی‌صدا ماژولِ قدیمیِ بیرون از خودش را بار می‌کرد و رفتارش با نسخهٔ اصلی یکی نبود.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_JRN_CANDIDATES = [
+    os.path.join(os.path.dirname(_HERE), "deps", "trade-journal", "scripts"),
+    os.path.join(os.path.dirname(os.path.dirname(_HERE)), "trade-journal", "scripts"),
+]
+_JRN_DIR = next((p for p in _JRN_CANDIDATES
+                 if os.path.isfile(os.path.join(p, "journal.py"))),
+                _JRN_CANDIDATES[-1])
 sys.path.insert(0, _JRN_DIR)
 try:
     import journal as J
@@ -517,10 +526,64 @@ def _risk_block(symbol, r):
     return blk
 
 
+def _bg(fn, *a, **kw):
+    """اجرای بی‌صدا در یک نخِ دیمن — برای «گرم‌کردنِ کش»، بدونِ بلوکه‌کردنِ پاسخ.
+
+    چرا دیمن و نه ThreadPoolExecutor: یک استخرِ پروسه‌ای برای هر درخواست ساخته
+    نمی‌شود (نخ‌های بی‌کارِ استخر تجمع می‌کنند) و نخِ دیمن نه خروجِ اپ را معطل
+    می‌کند و نه خطای شبکه‌اش به کاربر می‌رسد؛ این کار فقط یک بهینه‌سازی است.
+    """
+    def _run():
+        try:
+            fn(*a, **kw)
+        except Exception:
+            pass
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t
+
+
+def _feed_warm():
+    """تقویمِ اقتصادی + ستونِ Actual را در پس‌زمینه گرم می‌کند.
+
+    صفحهٔ فاندمنتال به همین دو منبع وابسته است؛ اگر لحظهٔ اولین کلیکِ کاربر
+    تازه بخواهند بیایند، صفحه ثانیه‌ها بی‌محتوا می‌مانْد. با گرم‌شدنِ بوت (و هر
+    تحلیل)، هم کشِ دیسک و هم حافظهٔ درون‌پروسه آماده است.
+    """
+    if M is None:
+        return
+    try:
+        w = getattr(M, "warm", None)
+        if callable(w):
+            w()
+        else:
+            M.get_calendar()
+    except Exception:
+        pass
+
+
+def _smt_partner_prefetch(symbol, tf, limit=200):
+    """کندلِ نمادِ جفتِ SMT را از قبل می‌گیرد تا چکِ SMT منتظرِ دانلود نمانَد."""
+    try:
+        if SMT is None:
+            return
+        ps = SMT.partners((symbol or "").strip().upper()) or []
+        if not ps:
+            return
+        E.fetch(ps[0], tf, limit)
+    except Exception:
+        pass
+
+
 def analyze(symbol, style):
     """اجرای اسکنر برای یک نماد + سبک و برگرداندنِ دیکشنریِ کامل."""
     sty = STYLES.get(style, STYLES["day"])
     tfs = sty["tfs"]
+    # ⚡ پیش‌گرمِ موازی: تا اسکنِ تایم‌فریم‌ها در جریان است، تقویم/Actual و
+    # کندلِ نمادِ جفتِ SMT هم در پس‌زمینه گرفته می‌شوند — سه کارِ مستقلِ شبکه‌ای
+    # که قبلاً پشتِ‌سرِهم اجرا می‌شدند و «تحلیل کن» را بی‌خروجی نگه می‌داشتند.
+    _bg(_feed_warm)
+    _bg(_smt_partner_prefetch, symbol, tfs[-1])
     r = C.score(symbol.strip().upper(), tfs)
     r["style"] = sty["label"]
     r["style_key"] = style if style in STYLES else "day"
@@ -546,51 +609,76 @@ def analyze(symbol, style):
                     f"و نزدیکِ ۰۹:۰۰ برگرد و مراحلِ سوئیپ→ام‌اس‌اس→فیرولیوگپ را روی چارتِ ۱ دقیقه دنبال کن.")
         except Exception:
             pass
-    # macro gate (اختیاری)
-    macro = None
-    if M is not None:
+    # ── گیتِ ماکرو + SMT: هر دو «شبکه‌اند» و به هم وابسته نیستند → هم‌زمان ──
+    # ریشهٔ «تحلیلِ کند»: این دو بلوک سری بودند و هر کدام منتظرِ شبکه می‌ماندند
+    # (تقویمِ سرد تا ۲ تلاشِ ۱۲ ثانیه‌ای، و پس از آن دانلودِ نمادِ جفتِ SMT).
+    # حالا هر دو در یک استخرِ دو‌نخی می‌روند؛ همان منطق، همان کلیدهای خروجی.
+    _dir = 1 if (r.get("bias_by_tf") or {}).get(tfs[0]) == "صعودی" else (
+        -1 if (r.get("bias_by_tf") or {}).get(tfs[0]) == "نزولی" else 0)
+
+    def _macro_part():
+        """بلوکِ ماکرو (اختیاری) — خطا/نبودِ منبع = None (نه شکستِ تحلیل)."""
+        if M is None:
+            return None
         try:
             b = M.build(symbol) if hasattr(M, "build") else None
-            if isinstance(b, dict):
-                macro = {}
-                g = b.get("news_gate") or {}
-                macro["gate"] = g.get("status")
-                macro["advice"] = g.get("advice")
-                up = b.get("upcoming_high_impact_48h") or []
-                titles = []
-                for e in up[:5]:
-                    if isinstance(e, dict):
-                        t = e.get("title") or e.get("event")
-                        if t:
-                            titles.append(t)
-                    elif isinstance(e, str):
-                        titles.append(e)
-                if titles:
-                    macro["upcoming"] = titles
-                sess = b.get("active_sessions")
-                if sess:
-                    macro["sessions"] = sess
+        except Exception:
+            return None
+        if not isinstance(b, dict):
+            return None
+        out = {}
+        g = b.get("news_gate") or {}
+        out["gate"] = g.get("status")
+        out["advice"] = g.get("advice")
+        up = b.get("upcoming_high_impact_48h") or []
+        titles = []
+        for e in up[:5]:
+            if isinstance(e, dict):
+                t = e.get("title") or e.get("event")
+                if t:
+                    titles.append(t)
+            elif isinstance(e, str):
+                titles.append(e)
+        if titles:
+            out["upcoming"] = titles
+        sess = b.get("active_sessions")
+        if sess:
+            out["sessions"] = sess
+        return out
+
+    def _smt_part():
+        """SMT دایورجنس (ستاپِ چهارم): جفتِ همبستهٔ نماد روی تایم‌فریمِ ورودِ سبک.
+
+        عمداً همین‌جاست نه در confluence: به دانلودِ نمادِ دوم نیاز دارد (شبکه)
+        و بک‌تست نباید به‌خاطرِ SMT عوض شود. هر خطایی = بدونِ SMT، نه شکست.
+        """
+        try:
+            if _dir:
+                def _smt_fetch(sym):
+                    _src, _sym, _disp, _bars = E.fetch(sym, tfs[-1], 200)
+                    return _bars
+                return SMT.check_for(symbol.strip().upper(), _dir, fetch_fn=_smt_fetch)
+            return {"available": bool(SMT.partners(symbol.strip().upper())),
+                    "partners": SMT.partners(symbol.strip().upper()), "checked": None}
+        except Exception as _e:
+            return {"available": False, "partners": [], "checked": None,
+                    "error": str(_e)}
+
+    macro = None
+    smt_block = None
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="pipfound-ana") as _ex:
+        _fmacro = _ex.submit(_macro_part)
+        _fsmt = _ex.submit(_smt_part)
+        try:
+            macro = _fmacro.result()
         except Exception:
             macro = None
+        try:
+            smt_block = _fsmt.result()
+        except Exception as _e:
+            smt_block = {"available": False, "partners": [], "checked": None,
+                         "error": str(_e)}
     r["macro"] = macro
-    # SMT دایورجنس (ستاپِ چهارم): جفتِ همبستهٔ نماد را روی تایم‌فریمِ ورودِ سبک
-    # می‌سنجد. عمداً همین‌جاست نه در confluence: به دانلودِ نمادِ دوم نیاز دارد
-    # (شبکه) و بک‌تست نباید به‌خاطرِ SMT عوض شود. هر خطایی = بدونِ SMT، نه شکست.
-    smt_block = None
-    try:
-        _dir = 1 if (r.get("bias_by_tf") or {}).get(tfs[0]) == "صعودی" else (
-            -1 if (r.get("bias_by_tf") or {}).get(tfs[0]) == "نزولی" else 0)
-        if _dir:
-            def _smt_fetch(sym):
-                _src, _sym, _disp, _bars = E.fetch(sym, tfs[-1], 200)
-                return _bars
-            smt_block = SMT.check_for(symbol.strip().upper(), _dir, fetch_fn=_smt_fetch)
-        else:
-            smt_block = {"available": bool(SMT.partners(symbol.strip().upper())),
-                         "partners": SMT.partners(symbol.strip().upper()), "checked": None}
-    except Exception as _e:
-        smt_block = {"available": False, "partners": [], "checked": None,
-                     "error": str(_e)}
     r["smt"] = smt_block
     # چراغِ زنده‌ی چهار ستاپِ اسکلپ (سبز/زرد/قرمز) — از روی چک‌لیستِ همان تحلیل
     try:
@@ -757,6 +845,18 @@ def _notify_mac(title, message):
         pass
 
 
+def _alarm_num(v):
+    """عددِ آلارم را با تحملِ دادهٔ قدیمی برمی‌گرداند.
+
+    مرزِ متنی/خالی (`"150.0"`، `null`) نباید وسطِ حلقهٔ کارگر استثنا بدهد — وگرنه
+    یک آلارمِ بد، بررسیِ بقیهٔ آلارم‌ها را هم در همان دور می‌خوابانَد.
+    """
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _alarm_worker():
     """هر ۹۰ ثانیه آلارم‌های فعال را بررسی می‌کند؛ اگر قیمتِ زنده داخلِ OTE بیفتد
     یا از حدِ تعیین‌شده رد شود، آن آلارم را triggered علامت می‌زند."""
@@ -768,20 +868,27 @@ def _alarm_worker():
             for a in alarms:
                 if a.get("triggered") or not a.get("active", True):
                     continue
-                sym = a["symbol"]
+                sym = str(a.get("symbol") or "").strip()
+                if not sym:
+                    continue
                 px = _live_price(sym)
                 if px is None:
                     continue
+                # فقط وقتی قیمت واقعاً تکان خورده «تغییر» حساب می‌شود؛ وگرنه
+                # هر دور ۹۰ ثانیه‌ای بی‌دلیل کلِ alarms.json روی دیسک بازنویسی می‌شد.
+                _prev_px = _alarm_num(a.get("last_price"))
                 a["last_price"] = round(px, 5)
                 a["last_check"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                if _prev_px is None or abs(_prev_px - px) > max(1e-9, abs(px) * 1e-4):
+                    changed = True
                 hit = False
-                if a["mode"] == "ote":
-                    lo, hi = a.get("low"), a.get("high")
-                    if lo is not None and hi is not None and lo <= px <= hi:
+                if a.get("mode") == "ote":
+                    lo, hi = _alarm_num(a.get("low")), _alarm_num(a.get("high"))
+                    if lo is not None and hi is not None and lo <= hi and lo <= px <= hi:
                         hit = True
                         a["hit_reason"] = f"قیمت {round(px,5)} واردِ ناحیه‌ی OTE ({lo}–{hi}) شد"
-                elif a["mode"] == "price":
-                    tgt = a.get("target")
+                elif a.get("mode") == "price":
+                    tgt = _alarm_num(a.get("target"))
                     d = a.get("cross", "any")
                     if tgt is not None:
                         if (d == "above" and px >= tgt) or (d == "below" and px <= tgt) \
@@ -792,11 +899,10 @@ def _alarm_worker():
                     a["triggered"] = True
                     a["triggered_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
                     changed = True
-                    _notify_mac(
-                        f"pipfound — {sym} به ناحیه‌ی OTE رسید",
-                        a.get("hit_reason", f"قیمت {round(px,5)}"))
-                else:
-                    changed = True
+                    _nt = (f"pipfound — {sym} به هدفِ قیمتی رسید"
+                           if a.get("mode") == "price"
+                           else f"pipfound — {sym} به ناحیه‌ی OTE رسید")
+                    _notify_mac(_nt, a.get("hit_reason", f"قیمت {round(px,5)}"))
             if changed:
                 with _alarms_lock:
                     _save_alarms(alarms)
@@ -809,6 +915,10 @@ def _alarm_worker():
 #  اسکرین‌شاتِ چارت — آپلود، فهرست، نمایش
 # ═══════════════════════════════════════════════════════════════════
 _shots_lock = threading.Lock()
+# `/api/selfcheck` کلِ چک‌ها (شاملِ سینتکسِ JS با node) را اجرا می‌کند؛ بدونِ کش،
+# هر درخواست چند ثانیه CPU می‌گیرد. نتیجه ۶۰ ثانیه معتبر است (فایل‌ها را خودِ اپ
+# هنگامِ تغییر ری‌استارت می‌کند، پس این تأخیر کدِ کهنه را پنهان نمی‌کند).
+_SC_CACHE = {"rep": None, "ts": 0.0}
 
 
 def _shots_meta_file():
@@ -2722,19 +2832,40 @@ const dirClass = d => d==="صعودی"?"up":d==="نزولی"?"down":"flat";
 const gradeColor = g => ({"A+":"var(--grade-ap)","A":"var(--grade-a)","B":"var(--grade-b)","C":"var(--grade-c)"}[g]||"var(--grade-no)");
 const stColor = s => s==="✓"?"var(--good)":s==="◐"?"var(--half)":s==="✗"?"var(--bad)":"var(--muted)";
 
+// ⏱️ درخواستِ JSON با «ساعتِ زنده» + سقفِ زمانی.
+// چرا: کلیکِ «تحلیل کن» چهار تایم‌فریم + تقویم را می‌خواند؛ اگر این میانه یک
+// منبع کند/قطع باشد، کاربر پشتِ یک اسپینرِ بی‌پیام می‌مانْد و نمی‌دانست «در
+// جریان است» یا «مرده» — دقیقاً حسِ «زمانِ طولانی بدونِ خروجی و نتیجه».
+// حالا ثانیه‌ها شمرده می‌شود و پس از سقف، پیامِ صریح با راهِ ادامه می‌آید.
+const ANALYZE_TIMEOUT_MS=180000;
+async function jfetch(url, ms, onTick){
+  const t0=Date.now();
+  const AC=(typeof AbortController==="function")?new AbortController():null;
+  const tick=onTick?setInterval(()=>onTick(Math.floor((Date.now()-t0)/1000)),500):null;
+  const to=AC?setTimeout(()=>AC.abort(),ms):null;
+  if(onTick) onTick(0);
+  try{ const r=await fetch(url, AC?{signal:AC.signal}:undefined); return await r.json(); }
+  finally{ if(tick)clearInterval(tick); if(to)clearTimeout(to); }
+}
+
 async function run(){
   const sym=symIn.value.trim();
   if(!sym){symIn.focus();return;}
   goBtn.disabled=true;
-  res.innerHTML='<div class="status">در حالِ تحلیلِ دیتای زنده… <span class="spin"></span></div>';
+  const paint=s=>{
+    const hint = s>=15 ? " — شبکه کند است؛ همان چهار تایم‌فریم موازی خوانده می‌شوند" : "";
+    res.innerHTML=`<div class="status">در حالِ تحلیلِ دیتای زنده… ${s} ثانیه${hint} <span class="spin"></span></div>`;
+  };
   try{
-    const r=await fetch(`/api/analyze?symbol=${encodeURIComponent(sym)}&style=${style}`);
-    const d=await r.json();
+    const d=await jfetch(`/api/analyze?symbol=${encodeURIComponent(sym)}&style=${style}`,
+                         ANALYZE_TIMEOUT_MS, paint);
     if(d.error){res.innerHTML=`<div class="err">خطا در تحلیلِ «${sym}»: ${d.error}</div>`;return;}
     render(d);
     showLiveChart(d.symbol);
   }catch(err){
-    res.innerHTML=`<div class="err">ارتباط با سرور ناموفق بود: ${err}</div>`;
+    res.innerHTML = (err && err.name==="AbortError")
+      ? `<div class="err">تحلیل بیش از ${Math.round(ANALYZE_TIMEOUT_MS/1000)} ثانیه طول کشید و قطع شد — یعنی شبکه‌ی همین لحظه کند است. یک‌بارِ دیگر بزن؛ داده‌ی خوانده‌شده حالا کش شده و همان کلیک دوم سریع است.</div>`
+      : `<div class="err">ارتباط با سرور ناموفق بود: ${err}</div>`;
   }finally{goBtn.disabled=false;}
 }
 
@@ -3295,8 +3426,11 @@ if(archiveBtn){
   archiveBtn.onclick=async ()=>{
     archiveBtn.disabled=true;
     try{
-      const r=await fetch("/api/fundamental-archive?hours=6");
-      const data=await r.json();
+      archiveBtn.textContent="⏳ در حالِ خواندنِ آرشیو…";
+      // سقفِ زمانیِ همان درخواست (مثلِ فید): دکمه هیچ‌وقت در «در حالِ خواندن»
+      // گیر نمی‌ماند — یا آرشیو می‌آید یا پیامِ روشن می‌گیریم.
+      const data=await jfetch("/api/fundamental-archive?hours=6", 60000);
+      archiveBtn.textContent="📁 آرشیو اخبار ۶ ساعتِ گذشته";
       if(data.error){
         openModal("📁 آرشیو اقتصادی", `<div class="arc-empty">خطا: ${data.error}</div>`);
         return;
@@ -3333,9 +3467,13 @@ if(archiveBtn){
       openModal(`📁 آرشیو اقتصادی — ۶ ساعتِ اخیر (${data.count||0} خبر)`,
         rows + `<div class="arc-note">در این پنجره فقط «نتیجه» می‌آید: عددِ اعلام‌شدهٔ واقعی (Actual) + جهتِ آن برای ارز، و بعد «تأثیرِ همین نتیجه» روی جفت‌ارزها/طلا — چون خبر اعلام شده، گزارهٔ شرطیِ «اگر بالاتر از انتظار شد → …» این‌جا جایی ندارد. اگر عددی نیاید یعنی منبعِ اعلام‌شده در دسترس نبوده یا این خبر عددی نداشته (سخنرانی و …).</div>`);
     }catch(err){
-      openModal("📁 آرشیو اقتصادی", `<div class="arc-empty">ارتباط ناموفق: ${err}</div>`);
+      const cut=(err && err.name==="AbortError");
+      openModal("📁 آرشیو اقتصادی", `<div class="arc-empty">`+
+        (cut ? "آرشیو در ۶۰ ثانیه برنگشت (منبع کند/در دسترس نیست) — یک‌بارِ دیگر بزن."
+             : `ارتباط ناموفق: ${err}`) + `</div>`);
     }finally{
       archiveBtn.disabled=false;
+      archiveBtn.textContent="📁 آرشیو اخبار ۶ ساعتِ گذشته";
     }
   };
 }
@@ -4356,15 +4494,35 @@ function tickBadges(){
 async function load(){
   // فقط بارِ اول جای‌گیرِ بارگذاری می‌گذارد؛ بازخوانیِ دوره‌ای نباید فهرستِ
   // کاربر را یک لحظه خالی کند (همان چیزی که مثلِ «رفرشِ صفحه» حس می‌شود).
-  if(!DATA) $("#list").innerHTML='<div class="empty">در حالِ بارگذاریِ تقویم…</div>';
+  const paint=s=>{ if(!DATA) $("#list").innerHTML=`<div class="empty">در حالِ بارگذاریِ تقویم… ${s} ثانیه</div>`; };
+  if(!DATA) paint(0);
   try{
-    const r=await fetch("/api/fundamental?hours="+horHours+"&past="+pastHours);
-    DATA=await r.json();
+    DATA=await jget("/api/fundamental?hours="+horHours+"&past="+pastHours, paint);
     T0=Date.now();
     render();
   }catch(err){
-    $("#list").innerHTML=`<div class="err">ارتباط ناموفق: ${err}</div>`;
+    const msg=(err && err.name==="AbortError")
+      ? `فید در ${Math.round(FEED_TIMEOUT_MS/1000)} ثانیه برنگشت (منبع کند/در دسترس نیست).`
+      : `ارتباط ناموفق: ${err}`;
+    $("#list").innerHTML=`<div class="err">${msg} <button type="button" onclick="load()">تلاشِ دوباره</button></div>`;
   }
+}
+
+// ⏱️ درخواستِ JSON با ساعتِ زنده + سقفِ زمانی (۹۰ ثانیه).
+// چرا: تقویم/ستونِ Actual در حالتِ سرد چند ثانیه‌ای می‌آیند؛ اگر آن میانه شبکه
+// کند باشد، صفحهٔ فاندمنتال بی‌نهایت «در حالِ بارگذاری» می‌مانْد و کاربر فقط
+// انتظار و اسپینرِ بی‌پیام می‌دید. حالا ثانیه‌ها شمرده می‌شود و پس از سقف، پیامِ
+// روشن + دکمهٔ تلاشِ دوباره می‌آید (اعلام وابستگی به تعریفِ تابع ندارد —
+// `jget` declaration است و در همین اسکوپ hoist می‌شود).
+const FEED_TIMEOUT_MS=90000;
+async function jget(url, onTick){
+  const t0=Date.now();
+  const AC=(typeof AbortController==="function")?new AbortController():null;
+  const tick=onTick?setInterval(()=>onTick(Math.floor((Date.now()-t0)/1000)),500):null;
+  const to=AC?setTimeout(()=>AC.abort(),FEED_TIMEOUT_MS):null;
+  if(onTick) onTick(0);
+  try{ const r=await fetch(url, AC?{signal:AC.signal}:undefined); return await r.json(); }
+  finally{ if(tick)clearInterval(tick); if(to)clearTimeout(to); }
 }
 
 // ⏱️ سوییچِ لحظه‌ایِ اعلام: کارتِ پیشِ‌رو درست وقتی شمارشِ معکوسش به صفر
@@ -4382,8 +4540,7 @@ async function flipEvent(key){
   if(!iso || !card) return;
   card.dataset.flip="1";
   try{
-    const r=await fetch(`/api/fundamental?event=${encodeURIComponent(iso)}&hours=${horHours}&past=${pastHours}`);
-    const d=await r.json();
+    const d=await jget(`/api/fundamental?event=${encodeURIComponent(iso)}&hours=${horHours}&past=${pastHours}`);
     const ev=(d && d.event)||null;
     if(!ev || ev.passed!==true){
       // سرور می‌گوید هنوز اعلام نشده (یا رویداد از پنجره بیرون رفته) ⇒ هیچ
@@ -4546,19 +4703,23 @@ def _check_auth(self, qs):
     مسیرهای آزاد: ورود (?token=) و سلامتِ سرور."""
     if not _ACCESS_TOKEN:
         return True
+    def _same(a):
+        """مقایسهٔ ثابت‌زمان (`==` روی رشته زودتر برمی‌گردد و زمانِ پاسخ لو می‌دهد)."""
+        return hmac.compare_digest(str(a or ""), str(_ACCESS_TOKEN))
+
     cookies = (self.headers.get("Cookie") or "")
     m = re.search(rf"{ _ACCESS_COOKIE }=([A-Za-z0-9_\-]+)", cookies)
-    if m and m.group(1) == _ACCESS_TOKEN:
+    if m and _same(m.group(1)):
         return True
-    if (qs.get("token", [""])[0]) == _ACCESS_TOKEN:
+    if _same(qs.get("token", [""])[0]):
         return True
     auth = self.headers.get("Authorization") or ""
-    if auth.startswith("Bearer ") and auth[7:] == _ACCESS_TOKEN:
+    if auth.startswith("Bearer ") and _same(auth[7:]):
         return True
     return False
 
 
-def _auth_page(self):
+def _auth_page(self, tried=False):
     """صفحهٔ ورودِ توکن — بعد از ورود، کوکیِ یک‌ساله ست می‌شود."""
     html = ("<!doctype html><html lang=\"fa\" dir=\"rtl\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
@@ -4577,7 +4738,7 @@ def _auth_page(self):
             "<p>این سرور روی شبکهٔ خانه باز است؛ توکنِ دسترسی که هنگامِ بالا آمدن در ترمینال چاپ شده را وارد کن.</p>"
             "<form method=\"GET\" action=\"/\"><input name=\"token\" placeholder=\"توکنِ دسترسی\" autofocus>"
             "<button>ورود</button></form>"
-            "<div class=\"err\">" + ("توکن درست نیست — دوباره تلاش کن" if "token" in (self.path or "") else "") + "</div>"
+            "<div class=\"err\">" + ("توکن درست نیست — دوباره تلاش کن" if tried else "") + "</div>"
             "</div></body></html>")
     return self._send(200, html, "text/html; charset=utf-8")
 
@@ -4615,13 +4776,14 @@ class Handler(BaseHTTPRequestHandler):
                 # ورود موفق → کوکی بده و بدونِ token در URL برو (توکن در هیستوری نمی‌ماند)
                 self.send_response(302)
                 self.send_header("Location", "/")
+                _sec = "; Secure" if _TLS_PORT else ""   # فقط روی HTTPS، تا روی HTTP دور ریخته نشود
                 self.send_header("Set-Cookie",
-                                 f"{_ACCESS_COOKIE}={_ACCESS_TOKEN}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax")
+                                 f"{_ACCESS_COOKIE}={_ACCESS_TOKEN}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax{_sec}")
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
             if not _check_auth(self, qs):
-                return _auth_page(self)
+                return _auth_page(self, bool((qs.get("token") or [""])[0]))
         if u.path in ("/", "/index.html"):
             tvmap = {
                 "BTCUSDT": "BINANCE:BTCUSDT", "ETHUSDT": "BINANCE:ETHUSDT",
@@ -4648,7 +4810,6 @@ class Handler(BaseHTTPRequestHandler):
             q = parse_qs(u.query)
             sym = (q.get("symbol", [""])[0]).strip()
             style = (q.get("style", ["day"])[0]).strip()
-            print(f"[analyze] {sym} · {style}", flush=True)   # ردیابیِ موقت
             if not sym:
                 return self._send(400, json.dumps({"error": "نماد وارد نشده"}, ensure_ascii=False))
             try:
@@ -4698,12 +4859,16 @@ class Handler(BaseHTTPRequestHandler):
             with _last_seen_lock:
                 seen = dict(_LAST_SEEN)
             item = None
-            if sym and sym in seen:
-                item = seen[sym]
+            if sym:
+                # نمادِ تحلیل‌نشده نباید «دادهٔ نمادِ دیگر» بگیرد: سنِ یک نماد به
+                # اسمِ نمادِ دیگر، گمراه‌کننده و خطرناک است. صریح خالی برمی‌گردد.
+                item = seen.get(sym)
             elif seen:
                 item = max(seen.values(), key=lambda x: x.get("at", ""))
             out = {
                 "ok": True,
+                "requested": sym or None,
+                "found": item is not None,
                 "server_utc": datetime.datetime.fromtimestamp(
                     now, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                 "et_now": E.et_of(now).strftime("%Y-%m-%d %H:%M"),
@@ -4752,6 +4917,8 @@ class Handler(BaseHTTPRequestHandler):
                 hours = int(parse_qs(u.query).get("hours", ["180"])[0])
             except Exception:
                 hours = 180
+            # سقف/کفِ سخت: hoursِ بزرگ افقِ بی‌مرز و hoursِ منفی فیدِ خالی می‌ساخت.
+            hours = max(1, min(hours, 720))
             # پنجرهٔ گذشتهٔ فید (۶/۱۲/۲۴ ساعت) — `FUND.past_window` هر ورودیِ
             # دیگری را به نزدیک‌ترین مقدارِ مجاز قطعی می‌کند (کوئری در دستِ کاربر).
             try:
@@ -4790,12 +4957,21 @@ class Handler(BaseHTTPRequestHandler):
                 walk = int(q.get("walk", ["2000"])[0])
             except Exception:
                 walk = 2000
+            # سقفِ سخت: walkِ بزرگ = پیمایشِ کلِ تاریخ روی یک تردِ سرور (دقیقه‌ها)،
+            # و walkِ منفی = «۰ معامله»ی گمراه‌کننده به‌جای خطا. سقف = پیش‌فرضِ
+            # مستندِ همین اندپوینت (۲۰۰۰) تا درخواستِ بیمارگونه ممکن نباشد.
+            walk = max(100, min(walk, 2000))
             if not sym:
                 return self._send(400, json.dumps({"error": "نماد وارد نشده"}, ensure_ascii=False))
             if BT is None:
                 return self._send(200, json.dumps({"error": "موتورِ بک‌تست در دسترس نیست"}, ensure_ascii=False))
             try:
-                gr = tuple(g.strip() for g in grades.split(",") if g.strip())
+                # فقط درجه‌های شناخته‌شده: ورودیِ نامعتبر نباید به «۰ معامله»ی
+                # بی‌صدا تبدیل شود (کاربر فکر می‌کند استراتژی سود ندارد).
+                gr = tuple(g.strip().upper() for g in grades.split(",")
+                           if g.strip().upper() in ("A+", "A", "B", "C"))
+                if not gr:
+                    gr = ("A+", "A", "B")
                 if side not in ("both", "long", "short"):
                     side = "both"
                 try:
@@ -4856,6 +5032,7 @@ class Handler(BaseHTTPRequestHandler):
                 walk = int(q.get("walk", ["600"])[0])
             except Exception:
                 walk = 600
+            walk = max(100, min(walk, 2000))   # همان سقفِ /api/backtest
             if not sym:
                 return self._send(400, json.dumps({"error": "نماد وارد نشده"}, ensure_ascii=False))
             if BT is None or not hasattr(BT, "suggest_range"):
@@ -4910,6 +5087,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(500, json.dumps({"error": str(e)}))
         # 🩺 سلامتِ اپ: سینتکس + قراردادِ «هیچ کلیدی گم نشود» + وجودِ اسنپ‌شات
         if u.path == "/api/selfcheck":
+            _now = time.time()
+            if _SC_CACHE["rep"] is not None and _now - _SC_CACHE["ts"] < 60:
+                return self._send(200, json.dumps(_SC_CACHE["rep"], ensure_ascii=False))
             try:
                 import selfcheck as SC
                 _root = os.path.dirname(os.path.abspath(__file__))
@@ -4918,6 +5098,7 @@ class Handler(BaseHTTPRequestHandler):
                 rep["log"] = SC.LOG
             except Exception as e:
                 rep = {"ok": False, "problems": [f"selfcheck در دسترس نیست: {e}"]}
+            _SC_CACHE["rep"], _SC_CACHE["ts"] = rep, _now
             return self._send(200, json.dumps(rep, ensure_ascii=False))
         # PWA: مانیفست، سرویس‌ورکر و آیکون‌ها — از روی دیسک، بدونِ وابستگیِ بیرونی
         if u.path in ("/manifest.webmanifest", "/sw.js", "/icon-180.png",
@@ -4952,6 +5133,7 @@ class Handler(BaseHTTPRequestHandler):
                 hours = abs(int(parse_qs(u.query).get("hours", ["6"])[0]))
             except Exception:
                 hours = 6
+            hours = max(1, min(hours, 720))   # آرشیو هم سقف دارد (۳۰ روز)
             try:
                 if hasattr(FUND, "archive"):
                     res = FUND.archive(hours=hours)
@@ -5012,7 +5194,16 @@ class Handler(BaseHTTPRequestHandler):
             if len(raw) > _MAX_UPLOAD:
                 return self._send(200, json.dumps({"error": "فایل خیلی بزرگ است (سقف ۱۲ مگابایت)"}, ensure_ascii=False))
             os.makedirs(SHOTS_DIR, exist_ok=True)
-            sid = str(int(time.time() * 1000))
+            # شناسهٔ یکتا: دو آپلود در یک میلی‌ثانیه نباید فایل/متادیتای هم را
+            # بازنویسی کنند (همان درسی که در آلارم‌ها با پسوندِ یکتا حل شد).
+            base = str(int(time.time() * 1000))
+            with _shots_lock:
+                taken = {str(s.get("id")) for s in _load_shots()}
+            taken |= {os.path.splitext(f)[0] for f in os.listdir(SHOTS_DIR)}
+            sid, n = base, 1
+            while sid in taken:
+                sid = f"{base}-{n}"
+                n += 1
             fname = f"{sid}.{ext}"
             with open(os.path.join(SHOTS_DIR, fname), "wb") as f:
                 f.write(raw)
@@ -5159,7 +5350,11 @@ class Handler(BaseHTTPRequestHandler):
                 sym = str(d.get("symbol", "")).strip().upper()
                 if not sym:
                     return self._send(200, json.dumps({"error": "نماد خالی است"}, ensure_ascii=False))
-                mode = d.get("mode", "ote")
+                mode = str(d.get("mode") or "ote").strip().lower()
+                if mode not in ("ote", "price", "gap"):
+                    return self._send(200, json.dumps(
+                        {"error": "نوعِ آلارم نامعتبر است — معتبرها: ote، price، gap"},
+                        ensure_ascii=False))
                 alarm = {
                     "id": "",   # پایین‌تر، داخلِ قفل و یکتا پر می‌شود
                     "symbol": sym,
@@ -5172,13 +5367,29 @@ class Handler(BaseHTTPRequestHandler):
                     "last_price": None,
                 }
                 if mode == "ote":
-                    alarm["low"] = d.get("low")
-                    alarm["high"] = d.get("high")
-                    if alarm["low"] is None or alarm["high"] is None:
-                        return self._send(200, json.dumps({"error": "محدوده‌ی OTE نامعتبر است"}, ensure_ascii=False))
+                    # عددی‌سازی سخت‌گیرانه: مرزِ متنی در کارگر با قیمت مقایسه می‌شد
+                    # و TypeError می‌داد (کلِ حلقهٔ آلارم‌ها می‌خوابید).
+                    lo, hi = _alarm_num(d.get("low")), _alarm_num(d.get("high"))
+                    if lo is None or hi is None:
+                        return self._send(200, json.dumps(
+                            {"error": "محدوده‌ی OTE نامعتبر است — کف و سقف باید عدد باشند"},
+                            ensure_ascii=False))
+                    if lo > hi:
+                        lo, hi = hi, lo
+                    if lo == hi:
+                        return self._send(200, json.dumps(
+                            {"error": "کف و سقفِ ناحیه‌ی OTE یکی است — ناحیه‌ی معتبر بده"},
+                            ensure_ascii=False))
+                    alarm["low"], alarm["high"] = lo, hi
                 elif mode == "price":
-                    alarm["target"] = d.get("target")
-                    alarm["cross"] = d.get("cross", "any")
+                    tgt = _alarm_num(d.get("target"))
+                    if tgt is None:
+                        return self._send(200, json.dumps(
+                            {"error": "قیمتِ هدفِ آلارم نامعتبر است — یک عدد بده"},
+                            ensure_ascii=False))
+                    cross = str(d.get("cross") or "any").strip().lower()
+                    alarm["target"] = tgt
+                    alarm["cross"] = cross if cross in ("any", "above", "below") else "any"
                 elif mode == "gap":
                     # نظارتِ گپ‌بان: نماد + تایم‌فریم، بدونِ آدرس. هر ۵ دقیقه خودش
                     # پویش می‌کند و برای «تولدِ گپِ A+/A» هشدار می‌دهد.
@@ -5384,6 +5595,10 @@ def main():
     start_fund_alarm_worker()
     start_gap_watch_worker()
     start_autobackup_worker()
+    # 🔥 پیش‌گرمِ بوت: تقویمِ اقتصادی و ستونِ Actual در پس‌زمینه — تا اولین کلیکِ
+    # «فاندمنتال»/«تحلیل کن» بعد از هر بالا‌آوردن (یا ری‌استارتِ خودکارِ کد)
+    # هزینهٔ شبکه را ندهد. خطا/نبودِ شبکه بی‌صدا نادیده گرفته می‌شود.
+    _bg(_feed_warm)
     print(f"✅ pipfound روی {url} بالا آمد.")
     if a.lan:
         info = _install_info()
