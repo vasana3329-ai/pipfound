@@ -1,5 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  قالبِ LaunchAgent — این فایل خودش نصب نمی‌شود.
+  install.sh مقدارِ __ROOT__ را با مسیرِ همین پوشهٔ pipfound پر می‌کند و نسخهٔ نهایی را
+  در ~/Library/LaunchAgents/com.pipfound.server.plist می‌گذارد.
+-->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -7,7 +12,7 @@
 
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/valiazadi/.hermes/hermes-agent/venv/bin/python3</string>
+    <string>__ROOT__/.venv/bin/python3</string>
     <string>-u</string>
     <string>app.py</string>
     <string>--port</string>
@@ -16,7 +21,7 @@
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/valiazadi/.hermes/skills/trading/smc-ict-analysis/scripts</string>
+  <string>__ROOT__/scripts</string>
 
   <key>RunAtLoad</key>
   <true/>

@@ -7,9 +7,10 @@ from PIL import Image, ImageDraw, ImageFont
 HOME = os.path.expanduser("~")
 DESKTOP = os.path.join(HOME, "Desktop")
 APP = os.path.join(DESKTOP, "pipfound.app")
-SCRIPTS = os.path.join(HOME, ".hermes", "skills", "trading",
-                       "smc-ict-analysis", "scripts")
-VENV_PY = os.path.join(HOME, ".hermes", "hermes-agent", "venv", "bin", "python3")
+# پوشهٔ مستقلِ pipfound (این ریپو) — هیچ وابستگی‌ای به ~/.hermes ندارد
+SCRIPTS = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(SCRIPTS)
+VENV_PY = os.path.join(ROOT, ".venv", "bin", "python3")
 PORT = 8787
 
 # ---------- 1) آیکون ----------
