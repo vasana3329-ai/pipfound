@@ -1,0 +1,5632 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+اپلیکیشنِ تحلیلِ SMC/ICT — محیطِ ساده‌ی وب (لوکال، فقط stdlib، بدونِ API key).
+
+اجرا:
+    python3 app.py                # روی http://127.0.0.1:8787
+    python3 app.py --port 9000
+
+فقط نامِ نماد را بنویس (XAUUSD, EURUSD, BTCUSDT, XAGUSD, ...) و سبک را انتخاب کن؛
+کارتِ کاملِ معامله را با امتیاز، تایم‌فریمِ ورود، پلنِ عددی و درجه می‌دهد.
+
+هستهٔ تحلیل همان confluence.py + smc_engine.py + macro_context.py است.
+"""
+import sys, os, json, argparse, traceback, threading, time, datetime, re, hashlib, subprocess, hmac
+from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
+
+HOME = os.path.expanduser("~")
+ALARMS_FILE = os.path.join(HOME, "pipfound", "alarms.json")
+# وضعیتِ داده‌ی آخرین تحلیل‌ها — روی دیسک نگه داشته می‌شود چون خودِ اپ با هر تغییرِ
+# کد ری‌استارتِ درجا می‌کند و اگر در حافظه بماند، چیپِ «سنِ داده» بعد از هر ادغام خالی می‌شود.
+DATA_SEEN_FILE = os.path.join(HOME, "pipfound", "data_seen.json")
+SHOTS_DIR = os.path.join(HOME, "pipfound", "screenshots")
+_ALLOWED_IMG = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "webp": "image/webp", "gif": "image/gif"}
+_MAX_UPLOAD = 12 * 1024 * 1024  # 12MB
+_MAX_IMPORT = 16 * 1024 * 1024  # 16MB — سقفِ فایلِ پشتیبانِ JSON (برون‌بری/درون‌بری)
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import confluence as C
+import smc_engine as E
+# موتورِ «پرسشِ تأییدِ شکافِ ارزش منصفانه» (FVG/IFVG): کاربر آدرسِ ناحیه + تایم‌فریم
+# می‌دهد و همین‌جا نمرهٔ تأییدِ همان گپ و اتکاپذیریِ آن داوری می‌شود. محافظت‌شده تا
+# اگر این ماژول به هر دلیلی بار نشد، کلِ اپ نیفتد (اندپوینت خودش پیامِ روشن می‌دهد).
+try:
+    import gap_query as G
+except Exception:
+    G = None
+try:
+    import backtest as BT
+except Exception:
+    BT = None
+try:
+    import macro_context as M
+except Exception:
+    M = None
+try:
+    import fundamental as FUND
+except Exception:
+    FUND = None
+try:
+    import risk as RK          # مدلِ ریسک: سایزِ پوزیشن، سقفِ روزانه، هم‌بستگی
+    import smt as SMT          # SMT دایورجنس: شکستِ همبستگیِ دو نمادِ همبسته
+except Exception:
+    RK = None
+try:
+    import backup as BK        # برون‌بری/درون‌بریِ دادهٔ کاربر (ژورنال/آلارم/تنظیمات)
+except Exception:
+    BK = None
+try:
+    import autobackup as AB    # پشتیبانِ خودکارِ زمان‌بندی‌شده + نگه‌داشتِ چند نسخهٔ اخیر
+except Exception:
+    AB = None
+
+# ماژولِ ژورنال: اول بستهٔ `deps/trade-journal` کنارِ همین اپ (چیدمانِ کپی/بکاپ)،
+# بعد پوشهٔ همسایه‌ی trade-journal (چیدمانِ اصلیِ مهارت). بدونِ این ترتیب، نسخهٔ کپی
+# بی‌صدا ماژولِ قدیمیِ بیرون از خودش را بار می‌کرد و رفتارش با نسخهٔ اصلی یکی نبود.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_JRN_CANDIDATES = [
+    os.path.join(os.path.dirname(_HERE), "deps", "trade-journal", "scripts"),
+    os.path.join(os.path.dirname(os.path.dirname(_HERE)), "trade-journal", "scripts"),
+]
+_JRN_DIR = next((p for p in _JRN_CANDIDATES
+                 if os.path.isfile(os.path.join(p, "journal.py"))),
+                _JRN_CANDIDATES[-1])
+sys.path.insert(0, _JRN_DIR)
+try:
+    import journal as J
+except Exception:
+    J = None
+
+# ── مسیرِ دفترِ معاملات (ژورنال): قابلِ تنظیم و بی‌نیاز از پوشه‌های محافظت‌شده ──
+# ترتیبِ انتخاب: PIPFOUND_JOURNAL_CSV → PIPFOUND_JOURNAL_DIR/journal.csv → ~/pipfound/journal.csv
+# چرا: جاب‌های launchd (مثلِ پیش‌نمایش) اجازه‌ی نوشتن در ~/Desktop و ~/Documents را
+# ندارند (محدودیتِ TCC مک). مسیرِ پیش‌فرض بیرونِ آن‌هاست و دفترهای قدیمی هم یک‌بار،
+# فقط با افزودنِ ردیف‌های غایب (بدونِ تغییر یا پاک‌کردنِ فایلِ قدیمی)، منتقل می‌شوند.
+def _journal_path():
+    f = os.environ.get("PIPFOUND_JOURNAL_CSV")
+    if f:
+        return os.path.expanduser(f)
+    d = os.environ.get("PIPFOUND_JOURNAL_DIR")
+    if d:
+        return os.path.join(os.path.expanduser(d), "journal.csv")
+    return os.path.join(HOME, "pipfound", "journal.csv")
+
+
+_JR_FILE = _journal_path()
+_JR_LEGACY = [os.path.join(HOME, "Desktop", "trading-journal", "journal.csv")]
+
+
+# ستون‌های دفتر — همان‌های `trade-journal/scripts/journal.py` (در نوشتارگرِ داخلی به کار می‌روند)
+_JR_FIELDS = ["id", "datetime", "symbol", "direction", "session", "tf", "htf_bias",
+              "entry", "sl", "tp", "rr", "risk_pct", "setup", "poi", "reason",
+              "status", "result", "exit", "realized_r", "mistake", "lesson", "notes"]
+
+
+class _JournalFallback:
+    """نوشتارگرِ داخلیِ ژورنال — فقط وقتی ماژولِ sibling پیدا نشود.
+
+    قبلاً در آن حالت، ثبت در ژورنال بی‌صدا از کار می‌افتاد (پوشهٔ مهارت جابه‌جا شده بود،
+    یا روی ماشینی دیگر). ستون‌ها و رفتارِ افزودن همان ماژولِ اصلی است تا رفت‌وبرگشت
+    در هر دو حالت یکسان باشد و CI هم بتواند همین مسیر را واقعاً تست کند.
+    """
+
+    name = "fallback"
+    FIELDS = _JR_FIELDS
+
+    def _read(self, path):
+        return _journal_rows(path) or []
+
+    def cmd_add(self, a):
+        import csv as _csv
+        import datetime as _dt
+        rows = self._read(a.file)
+        ids = [int(r["id"]) for r in rows if str(r.get("id", "")).isdigit()]
+        nid = str(max(ids) + 1) if ids else "1"
+        row = {f: "" for f in _JR_FIELDS}
+        row.update({
+            "id": nid,
+            "datetime": getattr(a, "datetime", None) or _dt.datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "symbol": str(getattr(a, "symbol", "") or "").upper(),
+            "direction": getattr(a, "direction", "") or "",
+            "session": getattr(a, "session", "") or "",
+            "tf": getattr(a, "tf", "") or "",
+            "htf_bias": getattr(a, "htf_bias", "") or "",
+            "entry": getattr(a, "entry", "") or "",
+            "sl": getattr(a, "sl", "") or "",
+            "tp": getattr(a, "tp", "") or "",
+            "rr": getattr(a, "rr", "") or "",
+            "risk_pct": getattr(a, "risk_pct", "") or "",
+            "setup": getattr(a, "setup", "") or "",
+            "poi": getattr(a, "poi", "") or "",
+            "reason": getattr(a, "reason", "") or "",
+            "status": getattr(a, "status", "") or "open",
+            "result": getattr(a, "result", None) or "",
+            "exit": getattr(a, "exit", None) or "",
+            "realized_r": getattr(a, "realized_r", None) or "",
+            "mistake": getattr(a, "mistake", None) or "",
+            "lesson": getattr(a, "lesson", None) or "",
+            "notes": getattr(a, "notes", "") or "",
+        })
+        d = os.path.dirname(a.file)
+        if d and not os.path.exists(d):
+            os.makedirs(d, exist_ok=True)
+        with open(a.file, "w", newline="", encoding="utf-8") as fh:
+            w = _csv.DictWriter(fh, fieldnames=_JR_FIELDS)
+            w.writeheader()
+            for r in rows:
+                w.writerow({f: r.get(f, "") for f in _JR_FIELDS})
+            w.writerow(row)
+        print(json.dumps({"added": row["id"], "symbol": row["symbol"], "file": a.file},
+                         ensure_ascii=False))
+
+
+_JR = J if J is not None else _JournalFallback()
+_JR_IMPL = "ماژولِ trade-journal" if J is not None else "نوشتارگرِ داخلی"
+
+
+def _journal_fields():
+    return list(getattr(_JR, "FIELDS", None) or _JR_FIELDS)
+
+
+def _journal_rows(path):
+    """ردیف‌های یک دفترِ CSV — None اگر فایل نبود یا خوانده نشد."""
+    import csv as _csv
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        with open(path, newline="", encoding="utf-8") as fh:
+            return [r for r in _csv.DictReader(fh) if (r.get("symbol") or "").strip()]
+    except Exception:
+        return None
+
+
+def _journal_migrate(path):
+    """ردیف‌های دفترهای قدیمی (Desktop/Documents) را یک‌بار به فایلِ فعلی می‌آورد.
+
+    بی‌خطر و تکرارپذیر: فایلِ قدیمی هیچ‌وقت پاک/عوض نمی‌شود، ردیفِ تکراری اضافه نمی‌شود
+    و شناسه‌ی تازه با یادداشتِ شماره‌ی قبلی داده می‌شود. با env صریح، دست به هیچ فایلی نمی‌زند.
+    """
+    import csv as _csv
+    if os.environ.get("PIPFOUND_JOURNAL_CSV"):
+        return 0
+    fields = _journal_fields()
+    rows = _journal_rows(path) or []
+
+    def key(r):
+        return (r.get("datetime", ""), r.get("symbol", ""),
+                r.get("direction", ""), str(r.get("entry", "")))
+
+    have = {key(r) for r in rows}
+    ids = [int(r["id"]) for r in rows if str(r.get("id", "")).isdigit()]
+    nid = (max(ids) + 1) if ids else 1
+    added = 0
+    for lp in _JR_LEGACY:
+        lp = os.path.expanduser(lp)
+        if not os.path.exists(lp) or os.path.abspath(lp) == os.path.abspath(path):
+            continue
+        for r in (_journal_rows(lp) or []):
+            k = key(r)
+            if k in have:
+                continue
+            nr = {f: r.get(f, "") for f in fields}
+            nr["id"] = str(nid)
+            nid += 1
+            nr["notes"] = (str(nr.get("notes", "")) +
+                           f" · از دفترِ قدیمیِ {lp} (شماره‌ی قبلی {r.get('id', '?')})").strip(" ·")
+            rows.append(nr)
+            have.add(k)
+            added += 1
+    if added:
+        d = os.path.dirname(path)
+        if d and not os.path.exists(d):
+            os.makedirs(d, exist_ok=True)
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            w = _csv.DictWriter(fh, fieldnames=fields)
+            w.writeheader()
+            for r in rows:
+                w.writerow({f: r.get(f, "") for f in fields})
+    return added
+
+
+def _journal_write(rows, fields=None):
+    """بازنویسیِ اتمیکِ کلِ دفتر (temp + os.replace) — مسیرِ درون‌بری.
+
+    چرا اتمیک: اگر وسطِ بازنویسی خطایی بخورد، دفترِ کاربر نباید بریده بمانَد؛
+    فایلِ موقت کنارِ دفتر نوشته می‌شود و فقط در پایان `os.replace` جای اصلی را
+    می‌گیرد (همان الگویی که `_save_alarms`/`save_settings` دارند).
+    """
+    import csv as _csv
+    fields = list(fields or _journal_fields())
+    path = _JR_FILE
+    d = os.path.dirname(path)
+    if d and not os.path.exists(d):
+        os.makedirs(d, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", newline="", encoding="utf-8") as fh:
+        w = _csv.DictWriter(fh, fieldnames=fields)
+        w.writeheader()
+        for r in rows:
+            w.writerow({f: (r.get(f, "") or "") for f in fields})
+    os.replace(tmp, path)
+    return path
+
+
+def _backup_bundle():
+    """بستهٔ برون‌بری: ژورنال + آلارم‌ها + تنظیمات (آمادهٔ JSON)."""
+    if BK is None:
+        raise RuntimeError("ماژولِ پشتیبان بار نشد")
+    return BK.build(_journal_rows(_JR_FILE) or [], _journal_fields(),
+                    _load_alarms(), _risk_settings())
+
+
+def _backup_by_name(name):
+    """محتوای یک نسخهٔ پشتیبانِ ذخیره‌شده را با نامش برمی‌گرداند (یا None).
+
+    نام با الگوی سختِ `AB.is_backup_name` سنجیده می‌شود تا `?file=../../…`
+    هیچ‌وقت از پوشهٔ پشتیبان بیرون نزند — خواندنِ فایلِ دلخواهِ سیستم از راهِ
+    همین پارامتر بدترین نوعِ شکاف است و این‌جا بسته می‌شود.
+    """
+    if AB is None or not AB.is_backup_name(name):
+        return None
+    p = os.path.join(AB.backup_dir(), name)
+    if not os.path.isfile(p):
+        return None
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _autobackup_record(res):
+    """نتیجهٔ یک اسنپ‌شات را در حالت (state) ثبت می‌کند."""
+    st = AB.load_state()
+    return AB.save_state({
+        "last_run": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "last_run_ts": time.time(),
+        "last_file": res.get("name"),
+        "last_bytes": res.get("bytes") or 0,
+        "runs": int(st.get("runs") or 0) + 1,
+        "last_error": None,
+    })
+
+
+def _autobackup_run_now():
+    """یک اسنپ‌شاتِ فوری می‌گیرد و ثبت می‌کند — همان کاری که زمان‌بند می‌کند.
+
+    بسته از همان `_backup_bundle()` می‌آید که `GET /api/export` می‌دهد؛ پس
+    فایلِ پشتیبانِ خودکار **دقیقاً** همان چیزی است که `POST /api/import`
+    می‌خوانَد و نسخهٔ خودکار هرگز به قالبِ ناسازگار تبدیل نمی‌شود.
+    """
+    res = AB.snapshot(_backup_bundle(), keep=AB.load_settings()["keep"])
+    _autobackup_record(res)
+    return res
+
+
+def _autobackup_status():
+    """وضعیتِ کاملِ پشتیبانِ خودکار (تنظیمات، نسخه‌ها، نوبتِ بعدی)."""
+    cfg = AB.load_settings()
+    st = AB.load_state()
+    bks = AB.list_backups()
+    now = time.time()
+    last = AB.effective_last_run(st.get("last_run_ts"), bks)
+    pending = AB.due(last, now, cfg["interval_h"], cfg["enabled"])
+    nxt = None
+    if cfg["enabled"]:
+        if pending:
+            nxt = 0.0
+        elif last is not None:
+            nxt = max(0.0, (last + cfg["interval_h"] * 3600.0 - now) / 3600.0)
+    return {
+        "ok": True, "settings": cfg, "state": st, "dir": AB.backup_dir(),
+        "count": len(bks), "total_bytes": sum((b.get("bytes") or 0) for b in bks),
+        "due_now": bool(pending),
+        "next_in_h": None if nxt is None else round(nxt, 2),
+        "backups": [{"name": b["name"], "at": b["at"], "bytes": b["bytes"],
+                     "age_h": round((now - b["mtime"]) / 3600.0, 2)} for b in bks],
+    }
+
+
+def _autobackup_worker():
+    """هر دقیقه می‌سنجد آیا نوبتِ نسخهٔ تازه است (بدونِ cron و ابزارِ بیرونی).
+
+    چرا داخلِ همین پروسه: داده و تنظیمات همه این‌جاست و «هیچ‌وقت بی‌پشتیبان
+    نماندن» نباید به نصبِ ابزارِ سیستمی گره بخورد. اگر حالت گم/خراب شود،
+    سنِ تازه‌ترین فایلِ موجود ملاک است (`AB.effective_last_run`) تا با هر
+    ری‌استارتِ اپ یک نسخهٔ اضافه ساخته نشود و نسخه‌های سالمِ قدیمی هرس نشوند.
+    """
+    while True:
+        try:
+            cfg = AB.load_settings()
+            if cfg.get("enabled"):
+                st = AB.load_state()
+                last = AB.effective_last_run(st.get("last_run_ts"), AB.list_backups())
+                if AB.due(last, time.time(), cfg["interval_h"], True):
+                    res = _autobackup_run_now()
+                    extra = (f" · {res['deleted']} نسخهٔ قدیمی هرس شد"
+                             if res.get("deleted") else "")
+                    print(f"📦 پشتیبانِ خودکار: {res['name']} "
+                          f"({res['bytes']} بایت · نگه‌داشتِ {res['kept']} نسخه{extra})")
+        except Exception as e:
+            try:
+                AB.save_state(dict(AB.load_state(), last_error=str(e)))
+            except Exception:
+                pass
+            traceback.print_exc()
+        time.sleep(60)
+
+
+def start_autobackup_worker():
+    t = threading.Thread(target=_autobackup_worker, daemon=True)
+    t.start()
+    return t
+
+
+try:
+    _JR_MOVED = _journal_migrate(_JR_FILE)
+except Exception as _e:
+    _JR_MOVED = 0
+    print(f"📓 ژورنال: انتقالِ ردیف‌های قدیمی انجام نشد ({_e})")
+
+# سبکِ معامله → تایم‌فریم‌ها (HTF اول). engine از این‌ها پشتیبانی می‌کند:
+# 1m 5m 15m 30m 1h 4h 1d 1w
+STYLES = {
+    "scalp": {"label": "اسکالپ",   "tfs": ["1h", "30m", "15m", "5m"],  "entry_tf": "5m"},
+    "day":   {"label": "روزانه",    "tfs": ["1d", "4h", "1h", "15m"],   "entry_tf": "15m"},
+    "swing": {"label": "سوینگ",     "tfs": ["1w", "1d", "4h", "1h"],    "entry_tf": "1h"},
+    # Silver Bullet نیویورک: اسکلپِ ۱ دقیقه‌ای که فقط در پنجره‌ی ۰۹:۰۰–۱۱:۰۰ ET
+    # (اوجِ فعالیتِ اندازه‌گیری‌شده‌ی روز) معنا دارد. استکِ بایاسِ ۱۵m/۵m، ورود ۱m.
+    "sb_ny": {"label": "سیلوربولت نیویورک", "tfs": ["15m", "5m", "1m"], "entry_tf": "1m"},
+}
+
+# انتخابِ سریعِ نماد — دسته‌بندیِ کارآمد در همان کادرِ جستجو.
+# هر گروه = یک ردیفِ چیپ با برچسبِ فارسی؛ همین فهرست اتوکامپلیت را هم می‌سازد.
+# عمداً فقط نمادهایی که مسیرِ دانلودشان تست شده: جفت‌ارزهای مهم، کامودیتی،
+# اندیکس، و استاک (تکر‌های مگاکپ). کریپتو چیپ ندارد ولی با تایپ کار می‌کند.
+SYMBOL_GROUPS = [
+    ("جفت‌ارزهای مهم", ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD",
+                          "USDCHF", "NZDUSD", "EURJPY", "GBPJPY"]),
+    ("کامودیتی", ["XAUUSD", "XAGUSD", "WTI", "BRENT", "NATGAS", "COPPER"]),
+    ("اندیکس", ["SPX500", "NAS100", "US30", "GER40", "UK100", "JP225"]),
+    ("استاک", ["NVDA", "AAPL", "MSFT", "TSLA", "AMZN", "GOOGL", "META"]),
+]
+
+# نمادهای پیشنهادی برای اتوکامپلیت = همه‌ی چیپ‌ها + کریپتو (که چیپ ندارد)
+SUGGESTIONS = ([s for _, syms in SYMBOL_GROUPS for s in syms]
+               + ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT"])
+
+
+def _setup_statuses(r):
+    """ارزیابیِ زنده‌ی سه ستاپِ اسکلپ از روی چک‌لیستِ گریدر — چراغِ سبز/زرد/قرمز.
+
+      🟢 سبز  = تأییدِ قوی: شرط‌های کلیدیِ ستاپ همین حالا برقرارند.
+      🟡 زرد  = انتظار: بایاس هست ولی قیمت هنوز به محل/تریگر نرسیده.
+      🔴 قرمز = شرایطِ ستاپ نیست.
+
+    این تابع قضاوت جدیدی نمی‌سازد؛ فقط همان ردیف‌های چک‌لیستِ confluence را
+    به سه ستاپِ منوی اسکلپ ترجمه می‌کند (صفر تکرارِ منطق).
+    """
+    rows = {c["name"]: c["status"] for c in (r.get("checklist") or [])}
+    bias   = rows.get("بایاسِ تایم‌فریم بالا واضح") == "✓"
+    align  = rows.get("هم‌راستاییِ چند تایم‌فریم", "✗") in ("✓", "◐")
+    zone   = rows.get("پریمیوم/دیسکانتِ درست") == "✓"
+    ote_in = rows.get("ناحیه‌ی OTE (۰.۶۲–۰.۷۹ فیب)") == "✓"
+    sweep  = rows.get("سوئیپِ لیکوئیدیتیِ تازه (تریگر)") == "✓"
+    choch  = rows.get("چاکِ ساختاری روی LTF") == "✓"
+    seqok  = rows.get("توالیِ سوئیپ→ام‌اس‌اس") != "✗"
+    disp   = rows.get("دیسپلیسمنت (حرکتِ نهادی)") == "✓"
+    poi    = rows.get("نقطه‌ی ورود (اردر بلاک/فیرولیوگپ)") == "✓"
+    htconf = rows.get("کانفلوئنسِ POIِ تایم‌فریم بالا") == "✓"
+    rr_ok  = rows.get("امکانِ RR ≥ ۱:۲") == "✓"
+
+    out = []
+    # ستاپ ۱ — پولبک به OTE در امتداد روند
+    if bias and zone and ote_in and (sweep or choch) and disp and seqok and rr_ok:
+        out.append({"state": "green", "why": "قیمت در OTE + تریگرِ سوئیپ/چاک + دیسپلیسمنت — همه‌ی شرط‌ها برقرار"})
+    elif bias and (zone or ote_in):
+        out.append({"state": "yellow",
+                    "why": "روند هست ولی قیمت هنوز در OTE نیست یا تریگر نیامده — منتظرِ پولبک/سوئیپ بمان"})
+    else:
+        out.append({"state": "red", "why": "بایاسِ واضح یا موقعیتِ درستِ قیمت نیست — ستاپ فعلاً منتفی"})
+
+    # ستاپ ۲ — سوئیپِ سشن → برگشت از زون HTF
+    if htconf and (choch or disp) and sweep:
+        out.append({"state": "green", "why": "قیمت در زونِ تایمِ بالا + سوئیپ و برگشتِ تأییدشده"})
+    elif htconf or (bias and poi):
+        out.append({"state": "yellow",
+                    "why": "قیمت نزدیک/داخلِ زونِ HTF است — صبر برای میتیگیتِ ۳۰٪ و MSS"})
+    else:
+        out.append({"state": "red", "why": "قیمت به هیچ زونِ عرضه/تقاضای تایمِ بالا نچسبیده"})
+
+    # ستاپ ۳ — ادامه‌دهنده پس از BOS
+    if align and disp and poi:
+        out.append({"state": "green", "why": "BOS هم‌جهت + دیسپلیسمنت + POIِ مبدأ آماده‌ی پولبک"})
+    elif align and disp:
+        out.append({"state": "yellow",
+                    "why": "شکستِ ساختار انجام شد — منتظرِ پولبک به مبدأِ حرکت (اردربلاک/FVG)"})
+    else:
+        out.append({"state": "red", "why": "BOS دیسپلیسمنت‌دارِ تازه‌ای در جهتِ روند نیست"})
+
+    # ستاپ ۴ — سوئیپ + SMT دایورجنس (ویدیوی Smart Risk 2026): از بلوکِ SMTِ
+    # همان تحلیل می‌خواند؛ اگر جفتِ همبسته یا داده‌ای نبود، صادقانه زرد/قرمز.
+    smt = (r.get("smt") or {}).get("checked") or {}
+    if smt.get("diverged"):
+        if smt.get("sweep"):
+            out.append({"state": "green",
+                        "why": smt.get("reason", "SMT تأیید شد") + " — سوئیپ هم روی همان نماد انجام شده"})
+        else:
+            out.append({"state": "yellow",
+                        "why": (smt.get("reason", "SMT") ) + " — اما سوئیپِ سمتِ این نماد تازه نیست؛ ورود را روی نمادِ سوئیپ‌کننده بگیر"})
+    elif smt.get("available") is False:
+        out.append({"state": "red",
+                    "why": "این نماد جفتِ همبسته‌ی شناخته‌شده ندارد (جدولِ SMT) — ستاپ قابلِ ارزیابی نیست"})
+    else:
+        out.append({"state": "red",
+                    "why": smt.get("reason") or "SMT دایورجنس بین دو جفتِ همبسته دیده نشد"})
+    return out
+
+
+def _risk_settings():
+    """تنظیماتِ ریسکِ کاربر؛ اگر ماژول بار نشده باشد، پیش‌فرض‌های همان ماژول.
+
+    مرجعِ واحدِ مسیر/پیش‌فرض‌ها خودِ `risk.py` است (نه یک کپیِ دوم در app) تا دو
+    جای مختلف دو جوابِ متفاوت ندهند. مسیر با `PIPFOUND_RISK_FILE` قابلِ جابه‌جایی است.
+    """
+    if RK is None:
+        return {"balance": 10000.0, "account_ccy": "USD", "risk_pct": 1.0,
+                "daily_loss_limit_pct": 3.0, "max_open_risk_pct": 5.0,
+                "usd_per_quote": {}}
+    try:
+        return RK.load_settings()
+    except Exception:
+        return RK.DEFAULTS
+
+
+def _risk_block(symbol, r):
+    """بلوکِ ریسک برای یک تحلیل + اعمالِ «گیتِ سقفِ ضررِ روزانه».
+
+    عمداً در همین حلقه (app) و نه در `confluence.py` محاسبه می‌شود: این بلوک به
+    تنظیماتِ کاربر و دفترِ معاملات نیاز دارد؛ اگر داخلِ گریدر برود، نتیجه‌ی
+    بک‌تست هم عوض می‌شود در حالی که بک‌تست اصلاً سرمایه/دفتر ندارد.
+
+    گیت: وقتی سقفِ ضررِ روزانه پر شده یا مجموعِ ریسکِ باز از سقف گذشته باشد،
+    پلن دیگر «سیگنالِ ورود» نیست — مثلِ حالتِ «بازار بسته» درجه سقف می‌خورد و
+    مهرِ ورود صادر نمی‌شود، ولی خودِ پلن برای آماده‌سازی می‌ماند.
+    """
+    if RK is None:
+        return None
+    try:
+        st = RK.load_settings()
+        rows = _journal_rows(_JR_FILE) or []
+        blk = RK.evaluate(symbol, (r or {}).get("plan"), st, rows)
+    except Exception:
+        traceback.print_exc()
+        return None
+    plan = (r or {}).get("plan")
+    if blk.get("blocked") and plan:
+        reason = blk.get("block_reason") or "محدودیتِ ریسک"
+        plan["executable_now"] = False
+        plan["blocked_reason"] = reason
+        plan["risk_blocked"] = True
+        if r.get("grade") in ("A+", "A", "B"):
+            r["grade"] = "C"
+        r["verdict"] = ("⛔ " + reason +
+                        " — طبقِ همین سقف، ورودِ جدید مجاز نیست. " +
+                        (r.get("verdict") or ""))
+        es = r.get("entry_stamp")
+        if isinstance(es, dict):
+            es["stamped"] = False
+            rs = es.setdefault("reasons", [])
+            if reason not in rs:
+                rs.insert(0, reason)
+    return blk
+
+
+def _bg(fn, *a, **kw):
+    """اجرای بی‌صدا در یک نخِ دیمن — برای «گرم‌کردنِ کش»، بدونِ بلوکه‌کردنِ پاسخ.
+
+    چرا دیمن و نه ThreadPoolExecutor: یک استخرِ پروسه‌ای برای هر درخواست ساخته
+    نمی‌شود (نخ‌های بی‌کارِ استخر تجمع می‌کنند) و نخِ دیمن نه خروجِ اپ را معطل
+    می‌کند و نه خطای شبکه‌اش به کاربر می‌رسد؛ این کار فقط یک بهینه‌سازی است.
+    """
+    def _run():
+        try:
+            fn(*a, **kw)
+        except Exception:
+            pass
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t
+
+
+def _feed_warm():
+    """تقویمِ اقتصادی + ستونِ Actual را در پس‌زمینه گرم می‌کند.
+
+    صفحهٔ فاندمنتال به همین دو منبع وابسته است؛ اگر لحظهٔ اولین کلیکِ کاربر
+    تازه بخواهند بیایند، صفحه ثانیه‌ها بی‌محتوا می‌مانْد. با گرم‌شدنِ بوت (و هر
+    تحلیل)، هم کشِ دیسک و هم حافظهٔ درون‌پروسه آماده است.
+    """
+    if M is None:
+        return
+    try:
+        w = getattr(M, "warm", None)
+        if callable(w):
+            w()
+        else:
+            M.get_calendar()
+    except Exception:
+        pass
+
+
+def _smt_partner_prefetch(symbol, tf, limit=200):
+    """کندلِ نمادِ جفتِ SMT را از قبل می‌گیرد تا چکِ SMT منتظرِ دانلود نمانَد."""
+    try:
+        if SMT is None:
+            return
+        ps = SMT.partners((symbol or "").strip().upper()) or []
+        if not ps:
+            return
+        E.fetch(ps[0], tf, limit)
+    except Exception:
+        pass
+
+
+def analyze(symbol, style):
+    """اجرای اسکنر برای یک نماد + سبک و برگرداندنِ دیکشنریِ کامل."""
+    sty = STYLES.get(style, STYLES["day"])
+    tfs = sty["tfs"]
+    # ⚡ پیش‌گرمِ موازی: تا اسکنِ تایم‌فریم‌ها در جریان است، تقویم/Actual و
+    # کندلِ نمادِ جفتِ SMT هم در پس‌زمینه گرفته می‌شوند — سه کارِ مستقلِ شبکه‌ای
+    # که قبلاً پشتِ‌سرِهم اجرا می‌شدند و «تحلیل کن» را بی‌خروجی نگه می‌داشتند.
+    _bg(_feed_warm)
+    _bg(_smt_partner_prefetch, symbol, tfs[-1])
+    r = C.score(symbol.strip().upper(), tfs)
+    r["style"] = sty["label"]
+    r["style_key"] = style if style in STYLES else "day"
+    r["entry_tf"] = sty["entry_tf"]
+    # گیتِ زمانیِ سیلوربولت: در حالتِ sb_ny اگر خارج از پنجره‌ی ۰۹:۰۰–۱۱:۰۰ ET باشیم،
+    # هیچ پلنِ ورودی نباید نمایش داده شود (استراتژی فقط در این پنجره معتبر است).
+    # این گیت جدا از منطقِ نمره است — فقط اجرای زنده را قفلِ زمانی می‌کند.
+    if style == "sb_ny":
+        try:
+            _w = E.silver_bullet_window()
+            if not _w.get("in_window"):
+                r["plan"] = None
+                if r.get("entry_stamp"):
+                    r["entry_stamp"]["stamped"] = False
+                    r["entry_stamp"].setdefault("reasons", []).insert(
+                        0, "خارج از پنجره‌ی ۰۹:۰۰–۱۱:۰۰ ET — سیلوربولت فقط در این پنجره ورود می‌دهد")
+                # verdict هم باید صادقانه بگوید چرا ورود ممنوع است، نه فقط درباره‌ی زون حرف بزند
+                _h, _m = _w.get("et_hour", 0), _w.get("et_minute", 0)
+                r["verdict"] = (
+                    f"⏳ سیلوربولتِ نیویورک فقط بینِ ۰۹:۰۰ تا ۱۱:۰۰ به‌وقتِ نیویورک ورود می‌دهد. "
+                    f"الان {_h:02d}:{_m:02d} ET است — خارج از پنجره؛ تحلیلِ ساختاری بالا فقط برای "
+                    f"بایاس‌گیریِ قبل از پنجره است (روندِ روز + لیکوئیدیتی‌های هدف را علامت بزن) "
+                    f"و نزدیکِ ۰۹:۰۰ برگرد و مراحلِ سوئیپ→ام‌اس‌اس→فیرولیوگپ را روی چارتِ ۱ دقیقه دنبال کن.")
+        except Exception:
+            pass
+    # ── گیتِ ماکرو + SMT: هر دو «شبکه‌اند» و به هم وابسته نیستند → هم‌زمان ──
+    # ریشهٔ «تحلیلِ کند»: این دو بلوک سری بودند و هر کدام منتظرِ شبکه می‌ماندند
+    # (تقویمِ سرد تا ۲ تلاشِ ۱۲ ثانیه‌ای، و پس از آن دانلودِ نمادِ جفتِ SMT).
+    # حالا هر دو در یک استخرِ دو‌نخی می‌روند؛ همان منطق، همان کلیدهای خروجی.
+    _dir = 1 if (r.get("bias_by_tf") or {}).get(tfs[0]) == "صعودی" else (
+        -1 if (r.get("bias_by_tf") or {}).get(tfs[0]) == "نزولی" else 0)
+
+    def _macro_part():
+        """بلوکِ ماکرو (اختیاری) — خطا/نبودِ منبع = None (نه شکستِ تحلیل)."""
+        if M is None:
+            return None
+        try:
+            b = M.build(symbol) if hasattr(M, "build") else None
+        except Exception:
+            return None
+        if not isinstance(b, dict):
+            return None
+        out = {}
+        g = b.get("news_gate") or {}
+        out["gate"] = g.get("status")
+        out["advice"] = g.get("advice")
+        up = b.get("upcoming_high_impact_48h") or []
+        titles = []
+        for e in up[:5]:
+            if isinstance(e, dict):
+                t = e.get("title") or e.get("event")
+                if t:
+                    titles.append(t)
+            elif isinstance(e, str):
+                titles.append(e)
+        if titles:
+            out["upcoming"] = titles
+        sess = b.get("active_sessions")
+        if sess:
+            out["sessions"] = sess
+        return out
+
+    def _smt_part():
+        """SMT دایورجنس (ستاپِ چهارم): جفتِ همبستهٔ نماد روی تایم‌فریمِ ورودِ سبک.
+
+        عمداً همین‌جاست نه در confluence: به دانلودِ نمادِ دوم نیاز دارد (شبکه)
+        و بک‌تست نباید به‌خاطرِ SMT عوض شود. هر خطایی = بدونِ SMT، نه شکست.
+        """
+        try:
+            if _dir:
+                def _smt_fetch(sym):
+                    _src, _sym, _disp, _bars = E.fetch(sym, tfs[-1], 200)
+                    return _bars
+                return SMT.check_for(symbol.strip().upper(), _dir, fetch_fn=_smt_fetch)
+            return {"available": bool(SMT.partners(symbol.strip().upper())),
+                    "partners": SMT.partners(symbol.strip().upper()), "checked": None}
+        except Exception as _e:
+            return {"available": False, "partners": [], "checked": None,
+                    "error": str(_e)}
+
+    macro = None
+    smt_block = None
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="pipfound-ana") as _ex:
+        _fmacro = _ex.submit(_macro_part)
+        _fsmt = _ex.submit(_smt_part)
+        try:
+            macro = _fmacro.result()
+        except Exception:
+            macro = None
+        try:
+            smt_block = _fsmt.result()
+        except Exception as _e:
+            smt_block = {"available": False, "partners": [], "checked": None,
+                         "error": str(_e)}
+    r["macro"] = macro
+    r["smt"] = smt_block
+    # چراغِ زنده‌ی چهار ستاپِ اسکلپ (سبز/زرد/قرمز) — از روی چک‌لیستِ همان تحلیل
+    try:
+        r["setup_statuses"] = _setup_statuses(r)
+    except Exception:
+        r["setup_statuses"] = None
+    # پنجره‌ی Silver Bullet نیویورک (۰۹:۰۰–۱۱:۰۰ ET) — برای گیتِ زمانیِ استراتژیِ sb_ny
+    # و نمایشِ تایمرِ آلارمِ ساعتِ ۹ در UI.
+    try:
+        r["sb_window"] = E.silver_bullet_window()
+    except Exception:
+        r["sb_window"] = None
+    # ── مدلِ ریسک: سایزِ پوزیشن + سقفِ ضررِ روزانه + هشدارِ هم‌بستگی ──
+    # بعد از همه‌ی گیت‌ها می‌آید تا پلنِ نهایی (و درجه‌ای که ممکن است سقف خورده
+    # باشد) را ببیند؛ خودش هم می‌تواند درجه را سقف بزند.
+    r["risk"] = _risk_block(symbol, r)
+    r["is_sb_mode"] = (style == "sb_ny")
+    return r
+
+
+# آخرین وضعیتِ داده‌ی هر نماد (از آخرین تحلیل) → برای اندپوینتِ /api/data_status.
+# چرا: چیپِ «سنِ داده» باید ارزشپیش از هر تحلیلی هم چیزی بگوید، و نمی‌خواهیم برای
+# هر بارِ لودِ صفحه چند تایم‌فریم را از نو دانلود کنیم (محدودیتِ نرخ).
+_last_seen_lock = threading.Lock()
+
+
+def _load_seen():
+    """آخرین وضعیتِ داده‌ی تحلیل‌ها را از دیسک می‌خواند (خرابی/نبود ⇒ دیکشنریِ خالی)."""
+    try:
+        with open(DATA_SEEN_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+_LAST_SEEN = _load_seen()
+
+
+def _save_seen():
+    """نوشتنِ اتمیک؛ خطا نباید تحلیل را بشکند (این فقط یک نشانگر است)."""
+    try:
+        os.makedirs(os.path.dirname(DATA_SEEN_FILE), exist_ok=True)
+        tmp = DATA_SEEN_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_LAST_SEEN, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, DATA_SEEN_FILE)
+    except Exception:
+        pass
+
+
+def _remember_analysis(symbol, style, r):
+    """خلاصه‌ی بلوکِ داده‌ی یک تحلیلِ تازه را نگه می‌دارد (فقط برای /api/data_status)."""
+    try:
+        d = (r or {}).get("data") or {}
+        if not d:
+            return
+        key = (symbol or "").strip().upper()
+        with _last_seen_lock:
+            _LAST_SEEN[key] = {
+                "symbol": key, "style": style,
+                "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "state": d.get("state"), "reason": d.get("reason"),
+                "tf": d.get("tf"), "last_bar_ts": d.get("last_bar_ts"),
+                "tf_seconds": d.get("bar_seconds"),
+                "symbol_class": d.get("symbol_class"), "source": d.get("source"),
+            }
+            if len(_LAST_SEEN) > 40:
+                for k in sorted(_LAST_SEEN, key=lambda k: _LAST_SEEN[k].get("at", ""))[:10]:
+                    _LAST_SEEN.pop(k, None)
+            _save_seen()
+    except Exception:
+        pass
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  سیستمِ آلارمِ زنده روی ناحیه‌ی OTE
+# ═══════════════════════════════════════════════════════════════════
+# نمادهای پشتیبانی‌شده برای آلارم (نقره/طلا/EURUSD/BTC + چند تای دیگر)
+ALARM_SYMBOLS = ["XAUUSD", "XAGUSD", "EURUSD", "BTCUSDT", "GBPUSD", "ETHUSDT"]
+
+_alarms_lock = threading.Lock()
+
+
+def _load_alarms():
+    try:
+        with open(ALARMS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _save_alarms(alarms):
+    os.makedirs(os.path.dirname(ALARMS_FILE), exist_ok=True)
+    tmp = ALARMS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(alarms, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, ALARMS_FILE)
+
+
+def _live_price(symbol):
+    """قیمتِ زنده‌ی نماد را از موتور می‌گیرد (آخرین کندلِ ۵m).
+
+    `unclosed=True` مهم است: این‌جا برخلافِ تحلیل، **خودِ کندلِ در حالِ تشکیل**
+    همان قیمتِ زنده است (آلارم باید ببیند «الان» قیمت کجاست، نه کلوزِ ۵ دقیقه پیش).
+    """
+    try:
+        src, sym, disp, bars = E.fetch(symbol.strip().upper(), "5m", 3, unclosed=True)
+        if bars:
+            return float(bars[-1]["c"])
+    except Exception:
+        pass
+    return None
+
+
+def compute_ote_for(symbol, style):
+    """ناحیه‌ی OTE + جهت + قیمتِ فعلی را برای یک نماد برمی‌گرداند (برای آلارم)."""
+    sty = STYLES.get(style, STYLES["day"])
+    r = C.score(symbol.strip().upper(), sty["tfs"])
+    return {
+        "symbol": symbol.strip().upper(),
+        "direction": r.get("direction"),
+        "grade": r.get("grade"),
+        "last_price": r.get("last_price"),
+        "ote": r.get("ote"),
+    }
+
+
+# ── دروازهٔ «خفه‌کردنِ نوتیفیکیشن» — چرا لازم شد ─────────────────────────────
+# کارگرِ آلارمِ فاندمنتال **سرِ بوت و در همان اولین دور** خبرِ ۲۳–۲۵ ساعتِ آینده را
+# می‌بیند و نوتیفِ *واقعیِ مک* می‌فرستد. هر نمونهٔ تستی که با HOMEِ تازه بالا می‌آید
+# یعنی «فایلِ dedupe وجود ندارد» ⇒ هر تست و هر ری‌استارتِ execv دوباره نوتیف می‌زند،
+# یعنی تست‌ها روی دسکتاپِ کاربر پشتِ‌سرِهم نوتیف می‌فرستادند (شکایتِ واقعیِ کاربر).
+# قرارداد: پیش‌فرض روشن است؛ فقط با `PIPFOUND_NOTIFY=0` (یا off/false/no) خفه می‌شود
+# و اپِ زنده دست‌نخورده می‌مانَد. قاعدهٔ نگهبان (selfcheck.notify_problems) هم قفل
+# می‌کند که هیچ مسیرِ تستی/هارنسی این کلید را جا نگذارد.
+_NOTIFY_OFF_VALUES = {"0", "off", "false", "no", "خاموش"}
+
+
+def _notify_muted():
+    """آیا نوتیفیکیشنِ نیتیوِ مک خفه شده است؟ (پیش‌فرض: روشن/فعال)."""
+    try:
+        return (os.environ.get("PIPFOUND_NOTIFY") or "").strip().lower() in _NOTIFY_OFF_VALUES
+    except Exception:
+        return False
+
+
+def _notify_mac(title, message):
+    """نوتیفیکیشنِ نیتیوِ مک (بدونِ وابستگی).
+
+    اگر `PIPFOUND_NOTIFY` خاموش باشد، هیچ فرایندی spawn نمی‌شود (تست‌ها/هارنس‌ها).
+    """
+    if _notify_muted():
+        return
+    try:
+        import subprocess
+        t = title.replace('"', "'")
+        m = message.replace('"', "'")
+        subprocess.run(
+            ["osascript", "-e",
+             f'display notification "{m}" with title "{t}" sound name "Glass"'],
+            capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+
+def _alarm_num(v):
+    """عددِ آلارم را با تحملِ دادهٔ قدیمی برمی‌گرداند.
+
+    مرزِ متنی/خالی (`"150.0"`، `null`) نباید وسطِ حلقهٔ کارگر استثنا بدهد — وگرنه
+    یک آلارمِ بد، بررسیِ بقیهٔ آلارم‌ها را هم در همان دور می‌خوابانَد.
+    """
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _alarm_worker():
+    """هر ۹۰ ثانیه آلارم‌های فعال را بررسی می‌کند؛ اگر قیمتِ زنده داخلِ OTE بیفتد
+    یا از حدِ تعیین‌شده رد شود، آن آلارم را triggered علامت می‌زند."""
+    while True:
+        try:
+            with _alarms_lock:
+                alarms = _load_alarms()
+            changed = False
+            for a in alarms:
+                if a.get("triggered") or not a.get("active", True):
+                    continue
+                sym = str(a.get("symbol") or "").strip()
+                if not sym:
+                    continue
+                px = _live_price(sym)
+                if px is None:
+                    continue
+                # فقط وقتی قیمت واقعاً تکان خورده «تغییر» حساب می‌شود؛ وگرنه
+                # هر دور ۹۰ ثانیه‌ای بی‌دلیل کلِ alarms.json روی دیسک بازنویسی می‌شد.
+                _prev_px = _alarm_num(a.get("last_price"))
+                a["last_price"] = round(px, 5)
+                a["last_check"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                if _prev_px is None or abs(_prev_px - px) > max(1e-9, abs(px) * 1e-4):
+                    changed = True
+                hit = False
+                if a.get("mode") == "ote":
+                    lo, hi = _alarm_num(a.get("low")), _alarm_num(a.get("high"))
+                    if lo is not None and hi is not None and lo <= hi and lo <= px <= hi:
+                        hit = True
+                        a["hit_reason"] = f"قیمت {round(px,5)} واردِ ناحیه‌ی OTE ({lo}–{hi}) شد"
+                elif a.get("mode") == "price":
+                    tgt = _alarm_num(a.get("target"))
+                    d = a.get("cross", "any")
+                    if tgt is not None:
+                        if (d == "above" and px >= tgt) or (d == "below" and px <= tgt) \
+                           or (d == "any" and abs(px - tgt) <= abs(tgt) * 0.0003):
+                            hit = True
+                            a["hit_reason"] = f"قیمت {round(px,5)} به هدفِ {tgt} رسید"
+                if hit:
+                    a["triggered"] = True
+                    a["triggered_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                    changed = True
+                    _nt = (f"pipfound — {sym} به هدفِ قیمتی رسید"
+                           if a.get("mode") == "price"
+                           else f"pipfound — {sym} به ناحیه‌ی OTE رسید")
+                    _notify_mac(_nt, a.get("hit_reason", f"قیمت {round(px,5)}"))
+            if changed:
+                with _alarms_lock:
+                    _save_alarms(alarms)
+        except Exception:
+            traceback.print_exc()
+        time.sleep(90)
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  اسکرین‌شاتِ چارت — آپلود، فهرست، نمایش
+# ═══════════════════════════════════════════════════════════════════
+_shots_lock = threading.Lock()
+# `/api/selfcheck` کلِ چک‌ها (شاملِ سینتکسِ JS با node) را اجرا می‌کند؛ بدونِ کش،
+# هر درخواست چند ثانیه CPU می‌گیرد. نتیجه ۶۰ ثانیه معتبر است (فایل‌ها را خودِ اپ
+# هنگامِ تغییر ری‌استارت می‌کند، پس این تأخیر کدِ کهنه را پنهان نمی‌کند).
+_SC_CACHE = {"rep": None, "ts": 0.0}
+
+
+def _shots_meta_file():
+    return os.path.join(SHOTS_DIR, "index.json")
+
+
+def _load_shots():
+    try:
+        with open(_shots_meta_file(), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _save_shots(shots):
+    os.makedirs(SHOTS_DIR, exist_ok=True)
+    tmp = _shots_meta_file() + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(shots, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, _shots_meta_file())
+
+
+def _tv_symbol(symbol):
+    """نگاشتِ نمادِ داخلی به نمادِ ویجتِ TradingView."""
+    s = (symbol or "").strip().upper()
+    crypto = {"BTCUSDT": "BINANCE:BTCUSDT", "ETHUSDT": "BINANCE:ETHUSDT",
+              "SOLUSDT": "BINANCE:SOLUSDT", "BNBUSDT": "BINANCE:BNBUSDT",
+              "XRPUSDT": "BINANCE:XRPUSDT", "DOGEUSDT": "BINANCE:DOGEUSDT"}
+    metals = {"XAUUSD": "OANDA:XAUUSD", "XAGUSD": "OANDA:XAGUSD",
+              "XPTUSD": "OANDA:XPTUSD", "XPDUSD": "OANDA:XPDUSD",
+              "GOLD": "OANDA:XAUUSD"}
+    oil = {"WTI": "TVC:USOIL", "BRENT": "TVC:UKOIL"}
+    if s in crypto:
+        return crypto[s]
+    if s in metals:
+        return metals[s]
+    if s in oil:
+        return oil[s]
+    # فارکسِ استاندارد ۶ حرفی → FX_IDC
+    if len(s) == 6 and s.isalpha():
+        return "FX_IDC:" + s
+    return s
+
+
+def start_alarm_worker():
+    t = threading.Thread(target=_alarm_worker, daemon=True)
+    t.start()
+    return t
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  آلارمِ فاندمنتال — نوتیفیکیشنِ نیتیو ~۲۴ ساعت پیش از هر خبرِ پرتأثیر (یک‌بار)
+# ═══════════════════════════════════════════════════════════════════
+_FUND_FIRED_FILE = os.path.join(HOME, "pipfound", "fund_alarms_fired.json")
+_fund_lock = threading.Lock()
+
+
+def _load_fired():
+    try:
+        with open(_FUND_FIRED_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+    except Exception:
+        return set()
+
+
+def _save_fired(fired):
+    try:
+        os.makedirs(os.path.dirname(_FUND_FIRED_FILE), exist_ok=True)
+        tmp = _FUND_FIRED_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(sorted(fired), f)
+        os.replace(tmp, _FUND_FIRED_FILE)
+    except Exception:
+        pass
+
+
+def _fund_alarm_worker():
+    """هر ۱۰ دقیقه اخبارِ پرتأثیر را می‌سنجد؛ برای خبری که بینِ ۲۳ تا ۲۵ ساعتِ آینده
+    است، یک‌بار نوتیفیکیشنِ نیتیوِ مک می‌فرستد (ساعتِ اعلام به‌وقتِ تهران + جهتِ اثر)."""
+    if FUND is None:
+        return
+    while True:
+        try:
+            with _fund_lock:
+                fired = _load_fired()
+            data = FUND.build(hours=48)
+            changed = False
+            for e in (data.get("events") or []):
+                if e.get("impact") != "High":
+                    continue
+                h = e.get("in_hours", 999)
+                key = e.get("iso", "") + "|" + (e.get("title") or "")
+                if key in fired:
+                    continue
+                # پنجره‌ی ~۲۴ ساعت پیش از خبر (۲۳–۲۵ ساعت مانده)
+                if 23 <= h <= 25:
+                    a = e.get("analysis") or {}
+                    ttl = e.get("title_fa") or e.get("title") or "خبرِ اقتصادی"
+                    ccy = e.get("country_fa") or e.get("country") or ""
+                    beat = (a.get("beat") or {})
+                    gold = (beat.get("gold") or ["", "", ""])
+                    msg = (f"{e.get('tehran','')} — {ccy}. "
+                           f"عددِ قوی‌تر → {beat.get('ccy_dir','')}، "
+                           f"طلا/نقره {gold[1]}. برای تحلیلِ کامل کلیدِ 📰 فاندمنتال را بزن.")
+                    _notify_mac(f"📰 فردا: {ttl}", msg)
+                    fired.add(key)
+                    changed = True
+            # پاک‌سازیِ کلیدهای قدیمی (خبرهایی که گذشته‌اند) تا فایل بی‌نهایت رشد نکند
+            if changed:
+                live = {e.get("iso", "") + "|" + (e.get("title") or "")
+                        for e in (data.get("events") or [])}
+                fired = {k for k in fired if k in live}
+                with _fund_lock:
+                    _save_fired(fired)
+        except Exception:
+            traceback.print_exc()
+        time.sleep(600)
+
+
+def start_fund_alarm_worker():
+    t = threading.Thread(target=_fund_alarm_worker, daemon=True)
+    t.start()
+    return t
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  گپ‌بان — هشدارِ خودکارِ «تولدِ گپِ قابلِ اتکا» (A+/A) روی نمادِ تحتِ نظارت
+# ═══════════════════════════════════════════════════════════════════
+# خواستهٔ کاربر: «وقتی روی نمادهای تحتِ نظارت یک گپِ تازه با نمرهٔ A+ یا A ساخته
+# می‌شود هشدار بده، بدونِ اینکه خودم پرسشی بفرستم.» یعنی همان موتورِ پرسشِ گپ
+# (`gap_query`) باید خودش دوره‌ای بپرسد و فقط تولدِ گپِ قابلِ اتکا را خبر دهد.
+#
+# چهار تصمیمِ مهم که این‌جا گرفته شده و در نگهبان/آزمون قفل می‌شوند:
+#   ۱) درجه‌های هشدار از خودِ موتور خوانده می‌شوند (`RELIABLE_GRADES`)، نه یک
+#      فهرستِ موازی — وگرنه روزی که مرزِ A+ عوض شود، گپ‌بان بی‌صدا از حکمِ اپ
+#      جدا می‌افتد و برای گپِ «غیرقابلِ اتکا» هشدار می‌دهد.
+#   ۲) دورِ اول **پایه‌گذاریِ بی‌صدا** است: گپ‌های موجودِ همان لحظه در `seen`
+#      می‌نشینند و هیچ هشدار نمی‌دهند. وگرنه لحظهٔ ثبتِ نظارت، کاربر برای
+#      گپ‌های ازپیش‌موجود سیلیِ نوتیف می‌گرفت — همان شکایتی که دروازهٔ
+#      «خفه‌کردنِ نوتیفیکیشن» برایش ساخته شد.
+#   ۳) هشدار فقط برای **تولد** است، نه ارتقای درجه: گپِ B که بعداً A+ می‌شود
+#      خبر نمی‌دهد؛ چون گپِ تازه‌ای ساخته نشده (خواستهٔ کاربر «گپِ تازه» بود).
+#   ۴) کلیدِ هویت (`born_ts`+نوع+کف+سقف) نمی‌گذارد یک گپ در هر دور دوباره
+#      هشدار بدهد؛ و چون زمانِ تولد داخلِ کلید است، گپِ دیگری که روی همان قیمت
+#      ساخته شود «تازه» شمرده می‌شود.
+#
+# منطقِ تصمیم **خالص** است (`gap_watch_decide`) و I/O جدا مانده تا بشود بدونِ
+# شبکه آزمودش کرد.
+GAP_WATCH_INTERVAL = 300      # ثانیه — پویشِ گپ‌بان (کارِ سنگین‌تر از آلارمِ قیمت)
+GAP_WATCH_HITS_MAX = 20       # چند هشدارِ آخر در فایل نگه داشته شود
+
+
+def _gapwatch_grades():
+    """درجه‌هایی که هشدار می‌دهند — از خودِ موتور، نه یک فهرستِ موازی."""
+    try:
+        return tuple(G.RELIABLE_GRADES)
+    except Exception:
+        return ("A+", "A")
+
+
+def _gap_key(gap):
+    """هویتِ پایدارِ یک گپ — جلوگیری از هشدارِ تکراری در دورهای بعدی."""
+    return "%s|%s|%s|%s" % (gap.get("born_ts"), gap.get("type"),
+                            gap.get("bottom"), gap.get("top"))
+
+
+def gap_watch_decide(seen, seeded, current_all, current_reliable):
+    """تصمیمِ خالصِ گپ‌بان → (seenِ تازه، کلیدهای نیازمندِ هشدار، پایه‌گذاری‌شده؟).
+
+    بدونِ هیچ I/O، تا همان «کی باید خبر بگیرد؟» بدونِ شبکه آزمون‌پذیر باشد؛
+    کارگر فقط اجرا می‌کند.
+    `current_all`: کلیدِ همهٔ گپ‌های پویش‌شده (برای هرس).
+    `current_reliable`: کلیدِ زیرمجموعه‌ای که امروز A+/A است (برای هشدار).
+    """
+    seen = [k for k in (seen or []) if k]
+    cur = [k for k in (current_all or []) if k]
+    if not seeded:
+        # دورِ اول = پایه‌گذاریِ بی‌صدا (تصمیمِ ۲ در بالای همین بخش).
+        return (sorted(set(cur)), [], True)
+    rel = [k for k in (current_reliable or []) if k]
+    fresh = [k for k in rel if k not in set(seen)]
+    merged = seen + fresh
+    if cur:
+        # هرس فقط وقتی پویش چیزی دیده باشد: پویشِ خالی یا خرابِ گذرا نباید `seen`
+        # را پاک کند، وگرنه دورِ بعد برای همان گپ‌های قدیمی دوباره هشدار می‌رفت.
+        keep = set(cur)
+        merged = [k for k in merged if k in keep]
+    return (sorted(set(merged)), fresh, True)
+
+
+def _gap_watch_once(alarm):
+    """یک دورِ پویشِ گپ‌بان برای یک نظارت → (وصلهٔ آلارم، هشدارهای تازه).
+
+    داده **یک‌بار** خوانده می‌شود و هر گپِ بازِ همان تایم‌فریم با گامِ ۱۲بندیِ
+    حکم نمره می‌گیرد؛ پس هزینهٔ هر دور یک fetch است، نه یک fetch به‌ازای هر گپ.
+    """
+    sym = str(alarm.get("symbol") or "").strip().upper()
+    tf = str(alarm.get("tf") or "").strip().lower()
+    if not sym or tf not in G.TF_LADDER:
+        return None, []
+    bars, d = G.load(sym, tf, 300)
+    htf = G.tf_above(tf)
+    d_htf = None
+    if htf:
+        try:
+            _, d_htf = G.load(sym, htf, 300)
+        except Exception:
+            d_htf = None      # بی‌داده‌بودنِ تایم‌فریمِ بالا نباید پویش را بشکند
+    grades = _gapwatch_grades()
+    all_keys, reliable = [], []
+    for f in (d.get("FVG_unfilled") or []):
+        try:
+            v = G.gap_verdict(bars, tf, f.get("bottom"), f.get("top"),
+                              d=d, d_htf=d_htf, htf=htf, sym=sym)
+        except Exception:
+            continue
+        if not v.get("ok") or not v.get("found"):
+            continue
+        key = _gap_key(v.get("gap") or f)
+        all_keys.append(key)
+        if v.get("grade") in grades:
+            reliable.append((key, v))
+    seen, fresh, seeded = gap_watch_decide(
+        alarm.get("seen"), alarm.get("seeded"), all_keys, [k for k, _ in reliable])
+    byk = dict(reliable)
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    hits = []
+    for k in fresh:
+        v = byk.get(k) or {}
+        gp = v.get("gap") or {}
+        sc = v.get("score") or {}
+        gp_fa = "صعودی" if gp.get("type") == "bullish" else "نزولی"
+        hits.append({
+            "at": now, "key": k, "symbol": sym, "tf": tf,
+            "grade": v.get("grade"), "state_fa": v.get("state_fa"),
+            "bottom": gp.get("bottom"), "top": gp.get("top"),
+            "percent": sc.get("percent"),
+            "why": ("%s %s · گپِ %s %s–%s · %s · امتیازِ تأیید %s٪"
+                    % (sym, tf, gp_fa, gp.get("bottom"), gp.get("top"),
+                       v.get("grade"), sc.get("percent"))),
+        })
+    patch = {
+        "seen": seen, "seeded": seeded, "last_scan": now,
+        "last_price": round(bars[-1]["c"], 5),
+        "scanned": len(all_keys), "reliable_now": len(reliable),
+        "alerts": int(alarm.get("alerts") or 0) + len(hits),
+        "hits": (list(alarm.get("hits") or []) + hits)[-GAP_WATCH_HITS_MAX:],
+    }
+    return patch, hits
+
+
+def _gap_watch_worker():
+    """هر GAP_WATCH_INTERVAL ثانیه نظارت‌های گپ را می‌پوید و برای تولدِ گپِ
+    قابلِ اتکا یک نوتیفیکیشنِ نیتیو می‌فرستد (یک‌بار به‌ازای هر گپ)."""
+    while True:
+        try:
+            with _alarms_lock:
+                alarms = _load_alarms()
+            for a in [x for x in alarms
+                      if x.get("mode") == "gap" and x.get("active", True)]:
+                try:
+                    patch, hits = _gap_watch_once(a)
+                except Exception:
+                    traceback.print_exc()
+                    continue
+                if not patch:
+                    continue
+                # اول ذخیره، بعد نوتیف: اگر پروسه بینِ این دو بمیرد، یک هشدارِ
+                # گم‌شده بهتر از هشدارِ تکراریِ هر دور است. نوشتن با **بازخوانی و
+                # ادغام بر اساسِ id** است تا ویرایشِ کاربر در همان فاصله (حذف یا
+                # خاموش‌کردنِ نظارت) پاک نشود.
+                with _alarms_lock:
+                    cur = _load_alarms()
+                    found = False
+                    for x in cur:
+                        if str(x.get("id")) == str(a.get("id")):
+                            x.update(patch)
+                            found = True
+                            break
+                    if not found:
+                        continue     # کاربر همان‌موقع حذفش کرد — چیزی نمی‌نویسیم
+                    _save_alarms(cur)
+                for h in hits:
+                    _notify_mac("🧩 گپِ قابلِ اتکا — %s %s" % (h["symbol"], h["tf"]),
+                                h.get("why") or "")
+        except Exception:
+            traceback.print_exc()
+        time.sleep(GAP_WATCH_INTERVAL)
+
+
+def start_gap_watch_worker():
+    t = threading.Thread(target=_gap_watch_worker, daemon=True)
+    t.start()
+    return t
+
+
+# ── بازنگریِ کدِ در حالِ اجرا (revision) ──────────────────────────────────────
+# چرا: پایتون کد را *لحظهٔ استارت* می‌خواند. اگر بعد از ادغام، همان پروسهٔ قدیمی
+# سرو کند، رابطِ کهنه دیده می‌شود و دقیقاً شبیهِ «کلیدها گم شدند» به‌نظر می‌رسد،
+# در حالی که کد سالم است. اینجا ثبت می‌کنیم چه کدی در حافظه بار شده و دیسک
+# الان چه چیزی دارد تا «کهنه سرو شدن» بی‌درنگ قابلِ دیدن باشد.
+REV_ROOT = os.path.dirname(os.path.abspath(__file__))
+# فایل‌هایی که تعیین می‌کنند کدام رابط سرو می‌شود (نه داده‌های زمانِ اجرا)
+REV_TRACKED = [
+    "app.py", "selfcheck.py", "confluence.py", "smc_engine.py", "backtest.py",
+    "macro_context.py", "fundamental.py", "sw.js", "manifest.webmanifest",
+]
+
+
+def _rev_track_imported():
+    """هر ماژولِ هم‌پوشه‌ای که واقعاً import شده را به فهرستِ ردیابی اضافه می‌کند.
+
+    چرا لازم شد: همین فهرستِ دستی یک بار ماژولِ تازه (`risk.py`) را از قلم
+    انداخته بود؛ نتیجه‌اش این بود که ویرایشِ آن ماژول هیچ‌وقت ری‌استارتِ خودکار را
+    تریگر نمی‌کرد و پروسه تا ابد نسخهٔ قدیمیِ آن ماژول را سرو می‌کرد — بی‌صدا،
+    دقیقاً همان «کهنه سرو شدن»ی که این مکانیزم برای بستنش ساخته شد.
+    """
+    # BK/AB هم عمداً این‌جایند: ویرایشِ ماژولِ انتقال/پشتیبان باید مثلِ بقیه
+    # ری‌استارتِ خودکار را تریگر کند، وگرنه پروسه نسخهٔ قدیمی را سرو می‌کند.
+    for mod in (C, E, BT, M, FUND, RK, BK, AB):
+        try:
+            p = getattr(mod, "__file__", None)
+            if not p:
+                continue
+            p = os.path.abspath(p)
+            if os.path.dirname(p) != REV_ROOT:
+                continue          # ماژولِ همسایه (مثلِ ژورنال) مسیرِ دیگری دارد
+            name = os.path.basename(p)
+            if name not in REV_TRACKED:
+                REV_TRACKED.append(name)
+        except Exception:
+            pass
+
+
+_rev_track_imported()
+_BOOT_TS = time.time()
+_BOOT_MONO = time.monotonic()
+_PROC_PID = os.getpid()
+
+
+def _rev_git(root):
+    """SHA/شاخه/dirty را با git می‌خواند؛ بدونِ git یا بیرونِ ریپو → None."""
+    import subprocess
+    out = {"sha": None, "sha_full": None, "branch": None, "dirty": None}
+
+    def _git(*args):
+        try:
+            r = subprocess.run(["git", "-C", root, *args],
+                               capture_output=True, text=True, timeout=4)
+            return r.stdout.strip() if r.returncode == 0 else None
+        except Exception:
+            return None
+
+    full = _git("rev-parse", "HEAD")
+    if full:
+        out["sha_full"] = full
+        out["sha"] = full[:7]
+        out["branch"] = _git("rev-parse", "--abbrev-ref", "HEAD")
+        st = _git("status", "--porcelain")
+        out["dirty"] = bool(st) if st is not None else None
+    return out
+
+
+def _rev_mtimes():
+    files = {}
+    for name in REV_TRACKED:
+        try:
+            files[name] = os.path.getmtime(os.path.join(REV_ROOT, name))
+        except OSError:
+            files[name] = None
+    return files
+
+
+def _fmt_ts(ts):
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+
+
+# ── ری‌استارتِ خودکارِ «کهنه» ─────────────────────────────────────────────
+# چرا: حتی با نشانگرِ بازنگری، کاربر باید خودش دخالت کند. اینجا سرور خودش می‌فهمد
+# کدِ روی دیسک تازه‌تر از پروسهٔ خودش است، کدِ تازه را اول **اعتبارسنجی** می‌کند
+# (تا هرگز پروسهٔ سالم را برای یک ویرایشِ خراب نکشد)، صبر می‌کند هیچ درخواستی
+# در جریان نباشد، و بعد با `os.execv` خود را در همان PID از نو اجرا می‌کند.
+# همان PID مهم است: جابِ launchd و ثبتِ پیش‌نمایش با همان شناسه معتبر می‌مانند.
+def _env_float(name, default):
+    try:
+        return float(os.environ.get(name, "") or default)
+    except Exception:
+        return default
+
+
+_REV_WATCH = {
+    "enabled": (os.environ.get("PIPFOUND_AUTORESTART", "1").strip().lower()
+                not in ("0", "false", "no", "off")),
+    "interval": max(1.0, _env_float("PIPFOUND_AUTORESTART_INTERVAL", 5.0)),
+    "settle": max(0.0, _env_float("PIPFOUND_AUTORESTART_SETTLE", 3.0)),
+    "max_wait_idle": max(0.0, _env_float("PIPFOUND_AUTORESTART_MAXWAIT", 180.0)),
+    "restarts": 0,
+    "waiting": False,
+    "blocked": None,        # کدِ تازه روی دیسک سالم نبود / exec نشد
+    "blocked_mtime": None,
+    "drift_pair": None,     # «loaded>disk» که در حالِ دیده‌شدن است (برای آرامشِ SHA)
+    "drift_since": None,
+}
+_REV_LOCK = threading.Lock()
+
+_REV_BOOT = {
+    "boot_ts": _BOOT_TS,
+    "boot_iso": _fmt_ts(_BOOT_TS),
+    "pid": _PROC_PID,
+    "files": _rev_mtimes(),
+    "git": _rev_git(REV_ROOT),
+}
+
+
+def _rev_state_file():
+    return os.path.join(HOME, "pipfound", "autorestart.json")
+
+
+def _rev_state_read():
+    """آخرین ری‌استارتِ خودکار — از فایل می‌خواند تا بعد از exec هم باقی بماند."""
+    try:
+        with open(_rev_state_file(), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _rev_state_write(rec):
+    fp = _rev_state_file()
+    try:
+        os.makedirs(os.path.dirname(fp), exist_ok=True)
+        tmp = fp + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(rec, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, fp)
+    except Exception as e:
+        print("⚠️ ثبتِ وضعیتِ ری‌استارت ناموفق: %s" % e, flush=True)
+
+
+# ── نامِ کشِ سرویس‌ورکر: جای‌گذارِ بازنگریِ کد (auto-versioning) ──────────────
+# در `sw.js` نامِ کش به‌شکلِ `pipfound-__CACHE_REV__` نوشته شده و همین‌جا سرِ سرو
+# با بازنگریِ کدِ روی دیسک پر می‌شود. چرا لازم است: نامِ دستیِ «v1» یعنی ارتقای
+# کش به یادِ آدم وابسته است؛ اگر یادت برود، `activate` هیچ کشی را پاک نمی‌کند،
+# پوستهٔ کهنه با تازه قاطی می‌شود و کاربرِ آفلاین هم نمی‌فهمد نسخهٔ تازه‌ای آمده.
+CACHE_REV_TOKEN = "__CACHE_REV__"
+_CACHE_REV_MEM = {"val": None}
+
+
+def cache_rev():
+    """بازنگریِ کوتاهِ کد برای نامِ کشِ سرویس‌ورکر.
+
+    اول SHAِ گیتِ روی دیسک (همان چیزی که چیپِ بازنگری نشان می‌دهد، با نشانِ
+    «-d» اگر درخت کثیف باشد)، و اگر گیت نبود هشِ محتوای فایل‌های رابط — تا در
+    هیچ حالتی «یخ‌زده» نمانَد. یک‌بار در عمرِ پروسه حساب می‌شود؛ خودِ اپ موقعِ
+    تغییرِ کد ری‌استارت می‌شود، پس مقدار در حافظه همیشه بازنگریِ همان کد است."""
+    if _CACHE_REV_MEM["val"]:
+        return _CACHE_REV_MEM["val"]
+    rev = ""
+    try:
+        disk = code_rev().get("disk") or {}
+        sha = (disk.get("sha") or "").strip()
+        if sha:
+            rev = sha[:7] + ("-d" if disk.get("dirty") else "")
+    except Exception:
+        rev = ""
+    if not rev:                       # بدونِ گیت: هشِ محتوا (همیشه در دسترس)
+        h = hashlib.sha1()
+        for n in REV_TRACKED:
+            try:
+                with open(os.path.join(REV_ROOT, n), "rb") as f:
+                    h.update(f.read())
+            except Exception:
+                continue
+        rev = h.hexdigest()[:8]
+    _CACHE_REV_MEM["val"] = rev
+    return rev
+
+
+def code_rev():
+    """بازنگریِ کدِ بارشده در برابرِ دیسک + وضعیتِ ری‌استارتِ خودکار.
+
+    stale=True یعنی چیزی روی دیسک تازه‌تر از استارتِ این پروسه است (یا SHA عوض
+    شده)، پس نسخه‌ای که سرو می‌شود کهنه است.
+    """
+    now_files = _rev_mtimes()
+    changed = []
+    for name, mt in now_files.items():
+        base = _REV_BOOT["files"].get(name)
+        if mt is None:
+            continue
+        if base is None or mt > base + 1e-6:
+            changed.append({"file": name, "mtime": _fmt_ts(mt), "mtime_epoch": mt})
+    disk_git = _rev_git(REV_ROOT)
+    loaded = _REV_BOOT["git"]
+    sha_drift = (disk_git.get("sha") or None) != (loaded.get("sha") or None)
+    stale = bool(changed) or sha_drift
+    with _REV_LOCK:
+        ar = {"enabled": _REV_WATCH["enabled"],
+              "interval_s": _REV_WATCH["interval"],
+              "settle_s": _REV_WATCH["settle"],
+              "restarts": _REV_WATCH["restarts"],
+              "waiting": _REV_WATCH["waiting"],
+              "blocked": _REV_WATCH["blocked"]}
+    ar["last"] = _rev_state_read()
+    if not stale:
+        note = "کدِ سروشده با دیسک یکی است"
+    elif ar["blocked"]:
+        note = "نسخه‌ی کهنه سرو می‌شود و کدِ تازه سالم نیست — ری‌استارت انجام نمی‌شود"
+    elif ar["enabled"]:
+        note = "نسخه‌ی کهنه سرو می‌شود — ری‌استارتِ خودکار به‌زودی انجام می‌شود"
+    else:
+        note = "نسخه‌ی کهنه سرو می‌شود — ری‌استارتِ خودکار خاموش است؛ اپ را از نو بالا بیاور"
+    return {
+        "ok": True,
+        "stale": stale,
+        "pid": _PROC_PID,
+        "uptime_s": round(time.monotonic() - _BOOT_MONO, 1),
+        "boot_ts": _REV_BOOT["boot_ts"],
+        "boot_local": _REV_BOOT["boot_iso"],
+        "loaded": loaded,
+        "disk": disk_git,
+        "sha_drift": sha_drift,
+        "changed_files": changed,
+        "tracked_files": [{"file": n, "mtime_epoch": m} for n, m in now_files.items()],
+        "autorestart": ar,
+        "note": note,
+    }
+
+
+def _rev_argv():
+    """دستورِ خودِ همین پروسه برای اجرای دوباره (orig_argv پرچم‌هایی مثلِ -u را نگه می‌دارد)."""
+    argv = getattr(sys, "orig_argv", None)
+    if argv:
+        return list(argv)
+    return [sys.executable, "-u"] + list(sys.argv)
+
+
+def _rev_validate():
+    """کدِ تازه روی دیسک قبل از ری‌استارت اعتبارسنجی می‌شود.
+
+    بدونِ این مرحله، یک ویرایشِ نیمه‌کاره/خراب سرورِ سالم را می‌کشت.
+
+    **قوانینِ سنجش باید از خودِ دیسک بیایند، نه از حافظه.** اگر با همان
+    `selfcheck`ی که موقعِ بوت import شده سنجیده شود، پروسه هرگز نمی‌تواند
+    *اصلاحِ خودِ نگهبان* را بپذیرد: نسخهٔ کهنهٔ درونِ حافظه رکوردهای تازه را با
+    قوانینِ قدیم قضاوت می‌کند و یک مثبتِ کاذبِ کهنه تا ابد «کدِ تازه خراب است»
+    می‌دهد — قفلِ خودارجاعی که سرور را روی نسخهٔ قدیم زندانی می‌کند، درحالی‌که
+    خودِ درخت روی دیسک سالم است. پس سنجش در یک **زیرفرایندِ جدا** با همان
+    `selfcheck.py`ِ روی دیسک اجرا می‌شود (دقیقاً همان چیزی که CI اجرا می‌کند).
+    اگر زیرفرایند ممکن نشد، به نسخهٔ بارشده برمی‌گردیم ولی همان را صریح در
+    `detail` می‌گوییم تا «سبزِ» بی‌اعتبار شبیهِ سبزِ واقعی به‌نظر نرسد.
+    """
+    script = os.path.join(REV_ROOT, "selfcheck.py")
+    if os.path.exists(script):
+        try:
+            p = subprocess.run([sys.executable, script, "--root", REV_ROOT, "--json"],
+                               cwd=REV_ROOT, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, timeout=180)
+            rep = json.loads((p.stdout or b"").decode("utf-8", "replace"))
+            if rep.get("ok"):
+                return True, "selfcheck ✅ (قوانینِ روی دیسک)"
+            return False, (" | ".join(rep.get("problems") or [])[:400]
+                           or "selfcheck ❌")
+        except Exception as e:
+            why = "اجرای زیرفرایندیِ selfcheck ممکن نشد: %s" % e
+    else:
+        why = "selfcheck.py روی دیسک نیست"
+    try:
+        import selfcheck as SC
+        rep = SC.run_checks(REV_ROOT)
+        if rep.get("ok"):
+            return True, "selfcheck ✅ (نسخهٔ بارشده — %s)" % why
+        return False, " | ".join(rep.get("problems") or [])[:400] or "selfcheck ❌"
+    except Exception as e:
+        return False, "selfcheck در دسترس نیست: %s (%s)" % (e, why)
+
+
+def _rev_restart(rev, detail, guard_key=None):
+    files = [c["file"] for c in (rev.get("changed_files") or [])]
+    from_sha = (rev.get("loaded") or {}).get("sha")
+    to_sha = (rev.get("disk") or {}).get("sha")
+    if guard_key is None:
+        guard_key = max([c["mtime_epoch"] for c in (rev.get("changed_files") or [])]
+                        or [None])
+    with _REV_LOCK:
+        _REV_WATCH["restarts"] += 1
+        _REV_WATCH["drift_pair"] = None
+        _REV_WATCH["drift_since"] = None
+    _rev_state_write({"at": _fmt_ts(time.time()), "from": from_sha, "to": to_sha,
+                      "files": files, "detail": detail, "pid": _PROC_PID})
+    print("♻️ کدِ تازه روی دیسک دیده شد (%s) — ری‌استارتِ خودکار [%s] · %s → %s"
+          % (", ".join(files) or "فقط SHA عوض شده", detail,
+             from_sha or "?", to_sha or "?"), flush=True)
+    try:
+        for h in (sys.stdout, sys.stderr):
+            try:
+                h.flush()
+            except Exception:
+                pass
+        os.execv(sys.executable, _rev_argv())
+    except Exception as e:
+        with _REV_LOCK:
+            _REV_WATCH["blocked"] = {"at": _fmt_ts(time.time()),
+                                     "detail": "ری‌استارت انجام نشد: %s" % e}
+            _REV_WATCH["blocked_mtime"] = guard_key
+        print("⚠️ ری‌استارتِ خودکار ممکن نشد (%s) — روی همین نسخه ادامه می‌دهم."
+              % e, flush=True)
+
+
+def _rev_watch_once():
+    """یک دورِ بررسی: کهنه است؟ کدِ تازه سالم است؟ درخواستی در جریان نیست؟ → ری‌استارت.
+
+    دو نشانه‌ی مستقلِ «کهنه» هر دو باید محرک باشند:
+      · mtimeِ فایل‌های تعیین‌کننده‌ی رابط تازه‌تر از استارتِ پروسه شده باشد؛
+      · SHAِ HEAD روی دیسک با SHAِ بارشده فرق کند — کامیتی که هیچ‌کدام از آن
+        فایل‌های فهرست‌شده را لمس نکرده (مستندات/CI/ابزار) هم پروسه را کهنه
+        می‌کند. اگر این شاخه نادیده گرفته شود، چیپ تا ابد قرمز می‌ماند و می‌گوید
+        «ری‌استارت در راه است» ولی هیچ‌وقت نمی‌آید — بی‌صدا نسخه‌ی کهنه سرو می‌شود.
+    """
+    if not _REV_WATCH["enabled"]:
+        return False
+    rev = code_rev()
+    changed = rev.get("changed_files") or []
+    drift = bool(rev.get("sha_drift"))
+    if not changed and not drift:
+        with _REV_LOCK:
+            _REV_WATCH["blocked"] = None
+            _REV_WATCH["blocked_mtime"] = None
+            _REV_WATCH["drift_pair"] = None
+            _REV_WATCH["drift_since"] = None
+        return False
+
+    if changed:
+        settle_from = max(c["mtime_epoch"] for c in changed)
+    else:
+        # هیچ mtimeی برای مقایسه نداریم، پس خودِ «دیده‌شدنِ دریفت» مرجعِ آرامش است
+        # تا وسطِ یک checkout/pullِ نیمه‌کاره ری‌استارت نکنیم.
+        pair = "%s>%s" % ((rev.get("loaded") or {}).get("sha"),
+                           (rev.get("disk") or {}).get("sha"))
+        with _REV_LOCK:
+            if _REV_WATCH["drift_pair"] != pair or _REV_WATCH["drift_since"] is None:
+                _REV_WATCH["drift_pair"] = pair
+                _REV_WATCH["drift_since"] = time.time()
+            settle_from = _REV_WATCH["drift_since"]
+    newest = settle_from
+    # شاید همین حالا مشغولِ نوشتنِ فایل/گیت هستیم → کمی صبر کن
+    if time.time() - settle_from < _REV_WATCH["settle"]:
+        return False
+    # همان فایلِ خرابی که قبلاً رد شده بود را دوباره اعتبارسنجی نکن (بی‌فایده و گران)
+    with _REV_LOCK:
+        if _REV_WATCH["blocked"] and _REV_WATCH["blocked_mtime"] == newest:
+            return False
+    ok, detail = _rev_validate()
+    if not ok:
+        with _REV_LOCK:
+            fresh = _REV_WATCH["blocked"] is None
+            _REV_WATCH["blocked"] = {"at": _fmt_ts(time.time()), "detail": detail}
+            _REV_WATCH["blocked_mtime"] = newest
+        if fresh:
+            print("⚠️ کدِ تازه روی دیسک هست ولی سالم نیست (%s) — روی نسخه‌ی فعلی می‌مانم."
+                  % detail, flush=True)
+        return False
+    # نسخهٔ تازه تأیید شد ⇒ وضعیتِ «متوقف» دیگر معنا ندارد و نباید در
+    # /api/revision بمانَد (وگرنه چیپ دروغ می‌گوید «کدِ تازه خراب است»).
+    with _REV_LOCK:
+        _REV_WATCH["blocked"] = None
+        _REV_WATCH["blocked_mtime"] = None
+    # تمیز: تا هیچ درخواستی در جریان نباشد صبر کن (تا وسطِ یک تحلیل قطع نشود)
+    with _REV_LOCK:
+        _REV_WATCH["waiting"] = True
+    try:
+        waited = 0.0
+        while not _REQ_IDLE.is_set() and waited < _REV_WATCH["max_wait_idle"]:
+            time.sleep(0.2)
+            waited += 0.2
+    finally:
+        with _REV_LOCK:
+            _REV_WATCH["waiting"] = False
+    _rev_restart(rev, detail, guard_key=newest)
+    return True
+
+
+def _rev_watch_worker():
+    time.sleep(min(4.0, max(1.0, _REV_WATCH["interval"])))
+    while True:
+        time.sleep(max(1.0, _REV_WATCH["interval"]))
+        try:
+            _rev_watch_once()
+        except Exception:
+            traceback.print_exc()
+
+
+HTML = r"""<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pipfound — تحلیلگرِ اسمارت‌مانی (SMC / ICT)</title>
+<meta name="theme-color" content="#0b0f17">
+<link rel="icon" href="/icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="pipfound">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<script>
+/* نگهبانِ بوت: اگر اسکریپتِ اصلی به هر دلیلی از کار بیفتد، به‌جای صفحه‌ی مرده هشدار بده */
+window.__pipfoundBooted = false;
+function pipfoundBootWarn(){
+  if(document.getElementById("bootWarn")) return;
+  var b=document.body; if(!b){ setTimeout(pipfoundBootWarn, 120); return; }
+  var d=document.createElement("div"); d.id="bootWarn";
+  d.setAttribute("style","position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#7f1d1d;"+
+    "color:#fff;padding:10px 14px;font:13px/1.8 system-ui,Tahoma,sans-serif;text-align:center;"+
+    "box-shadow:0 6px 24px rgba(0,0,0,.5)");
+  d.textContent="⚠️ بخشی از کدِ این صفحه خطای نحوی دارد (دکمه‌ها بی‌اثر می‌شوند). اپ را ببند و دوباره باز کن؛ "+
+    "نگهبانِ سلامت خودش نسخه‌ی سالمِ قبلی را برمی‌گرداند. بررسیِ دستی: python3 selfcheck.py";
+  b.appendChild(d);
+}
+window.addEventListener("error", function(e){
+  if(window.__pipfoundBooted) return;
+  if(e && e.message && String(e.message).indexOf("Script error")>=0) return;
+  pipfoundBootWarn();
+});
+setTimeout(function(){ if(!window.__pipfoundBooted) pipfoundBootWarn(); }, 3000);
+</script>
+<style>
+:root{
+  --bg:#0b0f17; --panel:#141a26; --panel2:#1b2333; --line:#28324a;
+  --txt:#e8eefc; --muted:#8a97b3; --accent:#4da3ff; --accent2:#22d3a5;
+  --good:#22c55e; --bad:#ef4444; --warn:#f59e0b; --half:#eab308;
+  --grade-ap:#22d3a5; --grade-a:#4ade80; --grade-b:#facc15; --grade-c:#fb923c; --grade-no:#64748b;
+}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(1200px 600px at 80% -10%,#16223b 0%,var(--bg) 55%);
+  color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,"Vazirmatn","Segoe UI",Tahoma,sans-serif;
+  min-height:100vh;padding:28px 16px}
+.wrap{max-width:920px;margin:0 auto}
+.header{display:flex;align-items:center;gap:12px;margin-bottom:6px}
+h1{font-size:22px;margin:0;font-weight:700;letter-spacing:.2px;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+.sub{color:var(--muted);font-size:13px;margin:2px 0 22px}
+.revchip{font-size:11px;color:var(--muted);border:1px solid var(--line);
+  background:var(--panel2);border-radius:999px;padding:4px 10px;white-space:nowrap;cursor:default;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;direction:ltr;transition:.15s}
+.revchip.warn{color:var(--warn);border-color:#a16207;background:#2a1f05}
+.revchip.bad{color:#fca5a5;border-color:#7f1d1d;background:#2a0a0a}
+.chiprow{margin-left:auto;display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end}
+/* بنرِ تازگیِ داده/بازار در کارتِ نتیجه — قبل از پلن خوانده می‌شود */
+.datanote{margin:10px 0 4px;padding:9px 12px;border-radius:12px;font-size:12.5px;line-height:1.8;
+  border:1px solid var(--line);background:var(--panel2);direction:rtl}
+.datanote b{font-weight:700}
+.datanote-why{margin-top:3px;font-size:12px;opacity:.92}
+.datanote.data-ok{color:#4ade80;border-color:rgba(74,222,128,.35)}
+.datanote.data-warn{color:var(--warn);border-color:#a16207;background:#2a1f05}
+.datanote.data-closed{color:#fca5a5;border-color:#7f1d1d;background:#2a0a0a}
+/* پنلِ ریسک — سرمایه/درصد/سقف‌ها + وضعیتِ امروز (ژورنال) */
+.riskpanel{margin-top:12px;padding:0;overflow:hidden;border:1px solid var(--line);
+  border-radius:14px;background:var(--panel2)}
+.risktitle{font-size:12.5px;color:var(--muted);font-weight:700;margin-bottom:9px;line-height:1.8}
+.riskrow{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.rinp{background:var(--panel);border:1px solid var(--line);border-radius:10px;color:var(--txt);
+  font-size:14px;padding:8px 10px;outline:none;width:104px;direction:ltr;text-align:center;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;transition:.15s}
+.rinp:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(77,163,255,.18)}
+.rinp.wide{width:132px}
+.riskbtn{background:var(--accent);color:#04241b;border:0;border-radius:10px;padding:9px 16px;
+  font-family:inherit;font-size:13px;font-weight:700;cursor:pointer}
+.riskbtn:disabled{opacity:.5;cursor:default}
+.riskstat{margin-top:9px;font-size:12px;color:var(--muted);line-height:1.9}
+.riskstat b{color:var(--txt)}
+.riskstat .bad{color:#fca5a5}
+.riskstat .good{color:var(--good)}
+.riskstat .warn{color:var(--warn)}
+/* بنرِ هشدار/وضعیتِ ریسک در کارتِ نتیجه */
+.riskwarn{margin:10px 0 4px;padding:9px 12px;border-radius:12px;font-size:12.5px;line-height:1.9;
+  border:1px solid #7f1d1d;background:#2a0a0a;color:#fca5a5;direction:rtl}
+.riskwarn.caution{border-color:#a16207;background:#2a1f05;color:var(--warn)}
+.riskwarn.quiet{border-color:var(--line);background:var(--panel2);color:var(--muted)}
+.riskwarn ul{margin:4px 0 0;padding-inline-start:18px}
+/* سلول‌های سایزِ پوزیشن در کارتِ پلن */
+.pcell.size{background:rgba(34,211,165,.10);border-color:rgba(34,211,165,.35)}
+.pcell.size .v{color:var(--accent2)}
+.sizenote{margin-top:8px;font-size:11.5px;color:var(--muted);line-height:1.85}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:20px;
+  box-shadow:0 20px 50px rgba(0,0,0,.35)}
+.searchrow{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.inp{flex:1;min-width:200px;background:var(--panel2);border:1px solid var(--line);border-radius:12px;
+  color:var(--txt);font-size:16px;padding:14px 16px;outline:none;transition:.15s}
+.inp:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(77,163,255,.18)}
+.styles{display:flex;gap:6px;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:4px}
+.styles button{background:transparent;border:0;color:var(--muted);padding:10px 14px;border-radius:9px;
+  cursor:pointer;font-size:14px;font-weight:600;transition:.15s}
+.styles button.active{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#04121f}
+.go{background:linear-gradient(135deg,var(--accent),var(--accent2));border:0;color:#04121f;font-weight:800;
+  font-size:16px;padding:14px 26px;border-radius:12px;cursor:pointer;transition:.15s}
+.go:hover{filter:brightness(1.08)}
+.go:disabled{opacity:.55;cursor:not-allowed}
+/* دکمه‌ی خاصِ سیلوربولت — رنگِ متمایزِ بنفش/طلایی */
+.sb-btn{background:linear-gradient(135deg,#a855f7,#f59e0b);border:0;color:#0b0f17;font-weight:800;
+  font-size:15px;padding:14px 20px;border-radius:12px;cursor:pointer;transition:.15s;
+  box-shadow:0 0 0 1px rgba(168,85,247,.4),0 4px 18px rgba(168,85,247,.25)}
+.sb-btn:hover{filter:brightness(1.08)}
+.sb-btn.active{outline:2px solid #f59e0b;outline-offset:2px}
+/* کارتِ پنجره‌ی سیلوربولت */
+.sbwin{margin-top:16px;background:linear-gradient(135deg,rgba(168,85,247,.10),rgba(245,158,11,.08));
+  border:1px solid rgba(168,85,247,.4);border-radius:14px;padding:16px}
+.sbwin h3{margin:0 0 10px;font-size:15px;color:#e8eefc}
+.sbwin .sb-state{font-size:15px;font-weight:800;margin-bottom:8px}
+.sbwin .sb-open{color:#22d3a5}
+.sbwin .sb-shut{color:#f59e0b}
+.sbwin .sb-timer{font-variant-numeric:tabular-nums;font-size:22px;font-weight:900;color:#f59e0b}
+.sbwin .sb-steps{margin:12px 0 0;padding:0;list-style:none;font-size:13px;line-height:1.9;color:#c8d2ea}
+.sbwin .sb-steps li{padding-right:20px;position:relative}
+.sbwin .sb-steps li::before{content:"◆";position:absolute;right:0;color:#a855f7;font-size:11px;top:3px}
+/* انتخابِ سریعِ نماد: در نمای اصلیِ صفحه **هیچ کلیدی** دیده نمی‌شود؛ این پنل فقط
+   وقتی نشانگر یا فوکوس داخلِ کادرِ نماد می‌رود باز می‌شود (مثلِ یک کشویی زیرِ کادر). */
+.chips{position:absolute;top:calc(100% + 6px);inset-inline:0;z-index:60;display:none;
+  flex-direction:column;gap:9px;background:var(--panel);border:1px solid var(--line);
+  border-radius:14px;padding:12px;box-shadow:0 18px 40px rgba(0,0,0,.55);
+  max-height:min(430px,64vh);overflow:auto}
+.chips.open{display:flex}
+/* وقتی زیرِ کادر جا نیست (پنجره‌ی باریک)، پنل به بالای کادر برمی‌گردد */
+.chips.above{top:auto;bottom:calc(100% + 6px)}
+/* و اگر ردیفِ دکمه‌ها همان‌جا را گرفته باشد، پنل از زیرِ کلِ ردیفِ جستجو باز
+   می‌شود (موقعیتش با JS ست می‌شود) تا هیچ کنترلی را نپوشاند. */
+.chips.docked{position:fixed;inset:auto;z-index:70}
+.chipgroup{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+.chiplbl{color:var(--accent);font-size:11px;font-weight:700;background:var(--panel2);
+  border:1px solid var(--line);border-radius:8px;padding:4px 9px;white-space:nowrap}
+.chiphint{color:var(--muted);font-size:11px;opacity:.85;margin-top:-2px}
+.symwrap{position:relative;flex:1;min-width:200px;display:flex}
+/* پنلِ تنظیماتِ بک‌تست */
+.btpanel{margin-top:14px}
+.btrow{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.btlbl{color:var(--muted);font-size:13px;font-weight:600;white-space:nowrap}
+.btinp{background:var(--panel2);border:1px solid var(--line);border-radius:10px;color:var(--txt);
+  padding:9px 12px;font-size:14px;font-family:inherit;min-width:150px;direction:ltr;text-align:right}
+.btinp:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(77,163,255,.18);outline:none}
+.btinp.wide{min-width:260px;flex:1}
+.btinp.narrow{min-width:90px;width:90px}
+.bthint{color:var(--muted);font-size:11px;opacity:.8}
+.sideseg{display:flex;gap:5px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:4px}
+.sideseg button{background:transparent;border:0;color:var(--muted);padding:8px 14px;border-radius:8px;
+  cursor:pointer;font-size:13px;font-weight:600;font-family:inherit;transition:.15s}
+.sideseg button.active{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#04121f}
+/* راهنمای تقدم‌وتأخر: بعد از انتخابِ نماد، سبک و دکمه‌ی تحلیل چشمک بزنند */
+.styles.awaiting{box-shadow:0 0 0 2px rgba(77,163,255,.35);border-radius:12px}
+@keyframes gopulse{0%,100%{box-shadow:0 0 0 0 rgba(77,163,255,.0)}50%{box-shadow:0 0 0 4px rgba(77,163,255,.28)}}
+.go.pulse{animation:gopulse 1.6s ease-in-out infinite}
+.stephint{color:var(--muted);font-size:12px;margin-top:10px;line-height:1.7;
+  border-inline-start:3px solid var(--accent);padding-inline-start:10px;opacity:.9}
+.btsug{background:var(--panel2);border:1px solid var(--accent);color:var(--accent);
+  padding:7px 12px;border-radius:9px;cursor:pointer;font-size:12px;font-weight:600;
+  font-family:inherit;transition:.15s;white-space:nowrap}
+.btsug:hover{background:var(--accent);color:#04121f}
+.btsug:disabled{opacity:.5;cursor:default}
+.btsughint{color:var(--muted);font-size:12px;line-height:1.7;margin:2px 0 4px;
+  padding-inline-start:2px}
+.btsughint.ok{color:var(--txt)}
+.btsughint b{color:var(--accent)}
+.sugpick{color:var(--accent);cursor:pointer;text-decoration:underline;font-weight:700}
+.chip{background:var(--panel2);border:1px solid var(--line);color:var(--muted);font-size:12px;
+  padding:6px 11px;border-radius:20px;cursor:pointer;transition:.15s}
+.chip:hover{border-color:var(--accent);color:var(--txt)}
+#result{margin-top:22px}
+.hidden{display:none}
+.status{color:var(--muted);text-align:center;padding:26px 0;font-size:15px}
+/* نشانگرِ «در حالِ کار» در متنِ وضعیت: حلقه‌ی گرادیانی با دُمِ محو (نه کمانِ بریده‌ی
+   border-top) و چرخشِ نرم — همان زبانِ بصریِ دکمه‌ی بروزرسانی. */
+.spin{display:inline-block;width:15px;height:15px;border-radius:50%;vertical-align:-3px;
+  margin-inline-start:8px;
+  background-image:conic-gradient(from 0turn,rgba(77,163,255,0),rgba(77,163,255,.3) .42turn,
+    var(--accent) .92turn,rgba(77,163,255,.9) 1turn),
+    linear-gradient(rgba(77,163,255,.16),rgba(77,163,255,.16));
+  -webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 2px));
+  mask:radial-gradient(farthest-side,transparent calc(100% - 2px),#000 calc(100% - 2px));
+  animation:sp .95s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+.err{color:var(--bad);text-align:center;padding:20px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);border-radius:12px}
+.warn{color:#eab308;padding:10px 14px;background:rgba(234,179,8,.08);border:1px solid rgba(234,179,8,.35);border-radius:10px;font-size:13px;line-height:1.7}
+.btbreak{display:flex;flex-wrap:wrap;gap:16px;margin-top:12px}
+.btbcol{flex:1;min-width:220px}
+.btbtitle{color:var(--muted);font-size:12px;font-weight:600;margin-bottom:4px}
+.bttable.small{margin-top:0;font-size:11.5px}
+/* result head */
+.rhead{display:flex;flex-wrap:wrap;align-items:center;gap:14px;margin-bottom:16px}
+.sym{font-size:26px;font-weight:800}
+.dir{padding:5px 12px;border-radius:9px;font-weight:700;font-size:14px}
+.dir.up{background:rgba(34,197,94,.15);color:var(--good);border:1px solid rgba(34,197,94,.35)}
+.dir.down{background:rgba(239,68,68,.15);color:var(--bad);border:1px solid rgba(239,68,68,.35)}
+.dir.flat{background:rgba(100,116,139,.15);color:var(--muted);border:1px solid rgba(100,116,139,.35)}
+.price{color:var(--muted);font-size:15px}
+.spacer{flex:1}
+.grade{font-size:30px;font-weight:900;padding:8px 18px;border-radius:14px;color:#04121f;min-width:64px;text-align:center}
+.metaline{color:var(--muted);font-size:13px;margin:-6px 0 14px;display:flex;flex-wrap:wrap;gap:14px}
+.metaline b{color:var(--txt)}
+/* score bar */
+.scorebar{height:12px;background:var(--panel2);border-radius:10px;overflow:hidden;margin:6px 0 4px;border:1px solid var(--line)}
+.scorefill{height:100%;border-radius:10px;transition:width .6s cubic-bezier(.2,.8,.2,1)}
+.scoretxt{font-size:13px;color:var(--muted);margin-bottom:16px}
+/* table */
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:11px 10px;text-align:right;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600;font-size:12px;background:var(--panel2)}
+th:first-child,td:first-child{text-align:center;width:44px}
+td.st{font-size:18px;font-weight:800}
+td.pts{font-variant-numeric:tabular-nums;color:var(--muted);white-space:nowrap;text-align:center;width:74px}
+.det{color:var(--muted);font-size:12.5px}
+tr.on td{background:rgba(34,197,94,.05)}
+/* plan */
+.plan{margin-top:18px;background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:16px}
+.plan h3{margin:0 0 12px;font-size:15px}
+.pgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.pcell{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:11px 12px}
+.bttable{width:100%;border-collapse:collapse;margin-top:14px;font-size:12.5px}
+.bttable th,.bttable td{border:1px solid var(--line);padding:6px 8px;text-align:center}
+.bttable th{background:var(--panel);color:var(--muted);font-weight:600}
+.pcell .k{color:var(--muted);font-size:11px;margin-bottom:4px}
+.pcell .v{font-size:17px;font-weight:800;font-variant-numeric:tabular-nums}
+.pcell.rr .v{color:var(--accent2)}
+.stamp{margin:0 0 12px;padding:10px 14px;border-radius:10px;font-size:14px;font-weight:700}
+.stamp .stamp-why{font-size:11px;font-weight:400;color:var(--muted);margin-top:6px;line-height:1.6}
+.stamp-ok{background:rgba(34,211,165,.12);border:1px solid rgba(34,211,165,.4);color:var(--grade-ap)}
+.stamp-no{background:rgba(100,116,139,.12);border:1px solid rgba(100,116,139,.35);color:var(--muted)}
+.verdict{margin-top:16px;background:rgba(77,163,255,.08);border-right:3px solid var(--accent);
+  padding:12px 14px;border-radius:8px;font-size:14px;line-height:1.7}
+/* منوی کرکره‌ایِ ستاپ‌های اسکلپ (آکاردئون) */
+.acc{margin-top:16px;display:flex;flex-direction:column;gap:8px}
+.acc-item{background:var(--panel2);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.acc-head{width:100%;display:flex;align-items:center;gap:10px;padding:12px 14px;background:transparent;
+  border:none;color:var(--txt);font-family:inherit;font-size:14px;font-weight:700;cursor:pointer;text-align:right}
+.acc-head:hover{background:rgba(77,163,255,.06)}
+.acc-head .arr{margin-right:auto;color:var(--muted);transition:.2s;font-size:12px}
+.acc-item.open .acc-head .arr{transform:rotate(180deg)}
+.acc-body{display:none;padding:0 14px 14px;font-size:13px;line-height:1.9;color:#c8d2ea;border-top:1px dashed var(--line)}
+.acc-item.open .acc-body{display:block}
+.acc-path{margin:10px 0;padding:10px 12px;background:rgba(168,85,247,.08);
+  border-right:3px solid #a855f7;border-radius:8px;font-size:12.5px;line-height:2}
+.acc-path b{color:#d8b4fe}
+.acc-stats{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:12px;color:var(--muted)}
+.acc-stats b{color:var(--accent2)}
+/* چراغِ وضعیتِ زنده‌ی هر ستاپ */
+/* دکمه و پنلِ ستاپ‌ها — همیشه بالای صفحه، مستقل از کارتِ نتیجه */
+.setups-btn{background:linear-gradient(135deg,#059669,#65a30d);border:0;color:#04120b;font-weight:800;
+  font-size:15px;padding:14px 18px;border-radius:12px;cursor:pointer;transition:.15s}
+.setups-btn:hover{filter:brightness(1.08)}
+.setups-btn.active{outline:2px solid #34d399;outline-offset:2px}
+/* دکمه‌ی فاندمنتال — رنگِ متمایزِ آبیِ نفتی/فیروزه‌ای */
+.fund-btn{background:linear-gradient(135deg,#0ea5e9,#6366f1);border:0;color:#04121f;font-weight:800;
+  font-size:15px;padding:14px 20px;border-radius:12px;cursor:pointer;transition:.15s;
+  box-shadow:0 0 0 1px rgba(14,165,233,.4),0 4px 18px rgba(99,102,241,.22)}
+.fund-btn:hover{filter:brightness(1.08)}
+/* دکمه‌های کم‌رنگِ نوارِ ابزار: ↻ بروزرسانی و 📁 آرشیو اقتصادی */
+.rf-btn,.ab-btn{background:var(--panel2);border:1px solid var(--line);color:var(--txt);
+  font-weight:700;font-size:14px;padding:12px 16px;border-radius:11px;cursor:pointer;
+  font-family:inherit;transition:.15s;white-space:nowrap}
+.rf-btn:hover,.ab-btn:hover{border-color:var(--accent);color:var(--accent)}
+/* حالتِ «آمادهٔ نصبِ مستقیم»: دو تپشِ نرم روی حاشیه — همان زبانِ آرامِ بقیهٔ حالت‌ها */
+@keyframes instpulse{0%,100%{box-shadow:0 0 0 0 rgba(77,163,255,0)}45%{box-shadow:0 0 0 6px rgba(77,163,255,.22)}}
+.ab-btn.pulsing{border-color:var(--accent);color:var(--accent);animation:instpulse 1.6s ease-in-out 3}
+/* پنلِ نصب (داخلِ مودالِ عمومی) */
+.inst-h{font-size:13px;font-weight:800;color:var(--accent);margin:16px 0 8px}
+.inst-h:first-child{margin-top:0}
+.inst-url{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 14px;
+  font-size:14px;font-weight:700;color:var(--txt);direction:ltr;text-align:left;
+  user-select:all;overflow-x:auto;white-space:nowrap}
+.inst-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:10px}
+.inst-cp{background:linear-gradient(135deg,var(--accent),var(--accent2));border:0;color:#04121f;
+  font-weight:800;font-size:13px;padding:9px 16px;border-radius:10px;cursor:pointer;font-family:inherit}
+.inst-note{color:var(--muted);font-size:12px;line-height:1.7;flex:1;min-width:200px}
+.inst-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+@media(max-width:560px){.inst-grid{grid-template-columns:1fr}}
+.inst-card{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+.inst-card .t{font-weight:800;font-size:13px;margin-bottom:8px}
+.inst-card ol{margin:0;padding-inline-start:18px;color:var(--muted);font-size:12.5px;line-height:2}
+.inst-status{margin-top:14px;font-size:12.5px;color:var(--good);font-weight:700}
+.inst-warn{margin-top:10px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);
+  border-radius:10px;padding:10px 12px;font-size:12px;line-height:1.8;color:#f6d99a}
+.rf-btn:disabled,.ab-btn:disabled{opacity:.5;cursor:default}
+/* ── دکمه‌ی بروزرسانی: حالتِ «در حالِ انجام» به‌جای گلیفِ چرخانِ متنی ──
+   همه‌ی سه حالت (گلیفِ آماده / نشانگرِ چرخان / تیکِ تأیید) در یک اسلاتِ ثابتِ ۱۸px
+   روی هم می‌نشینند تا نه اندازه‌ی دکمه بتپد و نه متن جابه‌جا شود. */
+/* ── دکمهی بروزرسانی: حالتِ «در حالِ انجام» ──
+   همهی سه حالت (گلیفِ آماده / نشانگرِ چرخان / تیکِ تأیید) در یک اسلاتِ ثابتِ ۱۶px روی
+   هم مینشینند تا نه اندازهی دکمه بتپد و نه متن جابهجا شود.
+   اصلِ طراحی: حرکتِ کم و دقیق. حلقه با سرعتِ *ثابت* میچرخد و فقط دُمش نفس میکشد
+   (چرخش با easing در هر دور تند-و-کند میشود و حسِ آماتوری میدهد).
+   حالتِ کار با «وضعیتِ» خودِ دکمه دیده میشود (پسزمینه، حاشیه، هاله)، نه با افکت. */
+.rf-btn{position:relative;overflow:hidden;display:inline-flex;align-items:center;gap:8px;
+  transition:border-color .22s ease,background .22s ease,color .22s ease,box-shadow .3s ease}
+.rf-btn.loading{cursor:progress}
+.rf-slot{position:relative;width:16px;height:16px;flex:0 0 16px;display:inline-block}
+.rf-ico,.rf-spin,.rf-check{position:absolute;inset:0;display:flex;align-items:center;
+  justify-content:center;transition:opacity .2s ease,transform .2s ease}
+.rf-ico svg,.rf-spin svg,.rf-check svg{width:16px;height:16px;display:block;overflow:visible}
+.rf-ico svg path{fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
+.rf-spin,.rf-check{opacity:0;transform:scale(.72)}
+.rf-spin svg circle{fill:none;stroke-width:2;stroke-linecap:round}
+.rf-track{stroke:var(--accent);stroke-opacity:.16}
+.rf-arc{stroke:var(--accent);transform-origin:50% 50%}
+.rf-check svg path{fill:none;stroke:var(--good);stroke-width:2.6;stroke-linecap:round;stroke-linejoin:round}
+.rf-live{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
+  clip:rect(0 0 0 0);white-space:nowrap;border:0}
+/* هنگامِ کار: گلیف کنار می‌رود، حلقه‌ی بدونِ‌سر ظاهر می‌شود و نوارِ نازکِ پایین می‌خزد */
+/* هنگامِ کار: گلیف کنار میرود و حلقه ظاهر میشود — چرخشِ خطی، دُمِ نفسکش.
+   دکمه در این حالت disabled است؛ عمداً محو نمیشود تا وضعیتِ کار *روشن* دیده شود. */
+.rf-btn.loading:disabled,.rf-btn.ok:disabled{opacity:1}
+.rf-btn.loading{color:var(--txt);border-color:var(--accent);
+  background:linear-gradient(180deg,rgba(77,163,255,.14),rgba(77,163,255,.05));
+  box-shadow:0 0 0 1px rgba(77,163,255,.18),0 6px 20px rgba(77,163,255,.14)}
+.rf-btn.loading .rf-ico{opacity:0;transform:scale(.72)}
+.rf-btn.loading .rf-spin{opacity:1;transform:none}
+.rf-btn.loading .rf-spin svg{animation:rfrot .9s linear infinite}
+.rf-btn.loading .rf-arc{stroke-dasharray:8 49;animation:rfdash 1.5s ease-in-out infinite}
+.rf-btn.loading .rf-lbl{opacity:.9}
+/* تأییدِ پایان: تیک «کشیده» می‌شود (بدونِ پرشِ رنگ) */
+/* تأییدِ پایان: تیک «کشیده» میشود و دکمه بهآرامی به رنگِ سالم میگراید */
+.rf-btn.ok{border-color:var(--good);color:var(--good);
+  background:linear-gradient(180deg,rgba(52,211,153,.16),rgba(52,211,153,.05));
+  box-shadow:0 0 0 1px rgba(52,211,153,.2),0 6px 20px rgba(52,211,153,.16)}
+.rf-btn.ok .rf-ico{opacity:0;transform:scale(.72)}
+.rf-btn.ok .rf-spin{opacity:0;transform:scale(.72)}
+.rf-btn.ok .rf-check{opacity:1;transform:none}
+.rf-btn.ok .rf-check svg path{stroke-dasharray:24;stroke-dashoffset:24;animation:rfdraw .36s cubic-bezier(.2,.9,.3,1) .04s forwards}
+/* «چیزی برای بروزرسانی نیست»: کلید لحظه‌ای نارنجی می‌شود تا کلیکِ بی‌واکنش بی‌پاسخ نمانَد */
+.rf-btn.need{border-color:var(--warn);color:var(--warn);
+  background:linear-gradient(180deg,rgba(245,158,11,.16),rgba(245,158,11,.05));
+  box-shadow:0 0 0 1px rgba(245,158,11,.2),0 6px 20px rgba(245,158,11,.14)}
+.rf-btn.need .rf-lbl{opacity:.95}
+@keyframes rfrot{to{transform:rotate(360deg)}}
+@keyframes rfdash{0%{stroke-dasharray:8 49;stroke-dashoffset:8}
+  50%{stroke-dasharray:30 27;stroke-dashoffset:-8}
+  100%{stroke-dasharray:8 49;stroke-dashoffset:-49}}
+@keyframes rfdraw{to{stroke-dashoffset:0}}
+/* احترام به کاهشِ حرکت (دسترسی‌پذیری): فقط یک تپشِ نرم، بدونِ چرخش و نور */
+@media (prefers-reduced-motion: reduce){
+  .rf-btn.loading .rf-spin svg,.rf-btn.loading .rf-arc{animation:none}
+  .rf-btn.loading .rf-arc{stroke-dasharray:30 27}
+  .spin,.rf-btn.loading .rf-spin{animation:rfsoft 1.6s ease-in-out infinite}
+}
+@keyframes rfsoft{0%,100%{opacity:.45}50%{opacity:1}}
+/* مودالِ عمومی (پنجره‌ی آرشیو و …) */
+.modal-overlay{position:fixed;inset:0;background:rgba(2,6,14,.72);display:flex;
+  align-items:center;justify-content:center;z-index:120;padding:20px}
+.modal-box{background:var(--panel);border:1px solid var(--line);border-radius:16px;
+  width:100%;max-width:660px;max-height:82vh;overflow:auto;box-shadow:0 30px 80px rgba(0,0,0,.55)}
+.modal-head{display:flex;align-items:center;justify-content:space-between;gap:10px;
+  padding:14px 18px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--panel)}
+.modal-head h3{margin:0;font-size:16px}
+.modal-close{background:transparent;border:1px solid var(--line);color:var(--muted);width:30px;height:30px;
+  border-radius:8px;cursor:pointer;font-family:inherit;font-size:16px;line-height:1}
+.modal-close:hover{border-color:var(--bad);color:var(--bad)}
+.modal-content{padding:14px 18px;font-size:13.5px;line-height:1.9}
+.arc-ev{background:var(--panel2);border:1px solid var(--line);border-radius:12px;
+  padding:12px 14px;margin-bottom:10px}
+.arc-t{font-weight:800;font-size:14.5px}
+.arc-t .arc-en{color:var(--muted);font-size:12px;font-weight:600;margin-inline-start:6px}
+.arc-m{color:var(--muted);font-size:12.5px;margin-top:4px}
+.arc-i{margin-top:6px;color:var(--muted);font-size:12.5px}
+.arc-v{margin-top:7px;font-size:13px;font-weight:800;padding:7px 10px;border-radius:9px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.arc-v.v-up{background:rgba(46,204,113,.14);color:#2ecc71;border:1px solid rgba(46,204,113,.35)}
+.arc-v.v-dn{background:rgba(231,76,60,.14);color:#e74c3c;border:1px solid rgba(231,76,60,.35)}
+.arc-v.v-fl{background:rgba(149,165,166,.14);color:#95a5a6;border:1px solid rgba(149,165,166,.35)}
+.arc-v .arc-num{font-size:15px}
+.arc-v .arc-vnote{font-weight:600;font-size:11.5px;color:var(--muted)}
+.arc-note{color:var(--muted);font-size:12px;border-top:1px dashed var(--line);
+  padding-top:10px;margin-top:8px;line-height:1.9}
+.arc-empty{color:var(--muted);text-align:center;padding:18px;font-size:13px}
+.setups-panel{display:none;margin-top:12px;background:var(--panel);border:1px solid var(--line);
+  border-radius:14px;padding:14px}
+.setups-panel.open{display:block}
+.sp-head{font-size:14px;font-weight:800;margin-bottom:10px}
+.lamp{font-size:12px;font-weight:700;padding:4px 10px;border-radius:8px;white-space:nowrap}
+.lamp.g{background:rgba(34,197,94,.15);color:var(--good);border:1px solid rgba(34,197,94,.35)}
+.lamp.y{background:rgba(245,158,11,.13);color:var(--warn);border:1px solid rgba(245,158,11,.32)}
+.lamp.r{background:rgba(239,68,68,.12);color:var(--bad);border:1px solid rgba(239,68,68,.3)}
+.acc-why{margin-top:10px;padding:8px 12px;background:rgba(77,163,255,.07);border-right:3px solid var(--accent);
+  border-radius:6px;font-size:12.5px;color:#dbe6ff}
+.badge{display:inline-block;font-size:12px;padding:4px 10px;border-radius:8px;margin:2px 4px 2px 0}
+.badge.kz{background:rgba(245,158,11,.12);color:var(--warn);border:1px solid rgba(245,158,11,.3)}
+.badge.g-green{background:rgba(34,197,94,.12);color:var(--good);border:1px solid rgba(34,197,94,.3)}
+.badge.g-amber{background:rgba(245,158,11,.12);color:var(--warn);border:1px solid rgba(245,158,11,.3)}
+.badge.g-red{background:rgba(239,68,68,.12);color:var(--bad);border:1px solid rgba(239,68,68,.3)}
+.upcoming{color:var(--muted);font-size:12px;margin-top:8px}
+.jrnrow{margin-top:16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.jbtn{background:var(--accent2);color:#04241b;border:none;border-radius:10px;
+  padding:10px 18px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit}
+.jbtn:hover{filter:brightness(1.08)}
+.jbtn:disabled{opacity:.5;cursor:default}
+.jmsg{font-size:13px;color:var(--muted)}
+.jmsg.good{color:var(--accent2)}
+.jmsg.bad{color:#ff6b6b}
+/* OTE panel */
+.ote{margin-top:16px;border-radius:14px;padding:16px}
+.ote.ote-in{background:rgba(34,197,94,.10);border:1px solid rgba(34,197,94,.4)}
+.ote.ote-out{background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.4)}
+.ote-head{font-size:15px;font-weight:800;margin-bottom:6px}
+.ote-body{font-size:14px;line-height:1.7;margin-bottom:10px}
+.ote-nums{display:flex;gap:20px;flex-wrap:wrap;font-size:14px;margin-bottom:12px}
+.ote-nums b{color:var(--txt);font-variant-numeric:tabular-nums}
+.alarm-btn{background:var(--warn);color:#231600;border:none;border-radius:10px;
+  padding:10px 18px;font-size:14px;font-weight:700;cursor:pointer;font-family:inherit}
+.alarm-btn:hover{filter:brightness(1.08)}
+.alarm-btn:disabled{opacity:.5;cursor:default}
+/* alarms dock */
+.alarms-dock{margin-top:22px;background:var(--panel);border:1px solid var(--line);
+  border-radius:18px;padding:18px}
+.alarms-dock h2{font-size:16px;margin:0;display:flex;align-items:center;gap:8px}
+/* ── کرکره‌های نمای اصلی: آلارم‌ها · تنظیماتِ بک‌تست · مدیریتِ ریسک · پشتیبانِ داده ──
+   خواستهٔ کاربر: هیچ‌کدام از این بخش‌های «نگهداری» در نمای اصلی همیشه‌باز نباشند؛
+   هر کدام یک نوارِ کلیدپذیر است و بدنه‌اش فقط با کلیک باز می‌شود تا صفحه شلوغ و
+   بچه‌گونه دیده نشود. الگو همان کرکره‌ی «ستاپ‌ها»ست. */
+.fold-head{margin:0;font-size:16px}
+.fold-toggle{width:100%;display:flex;align-items:center;gap:10px;padding:16px 18px;
+  background:transparent;border:none;color:var(--txt);font-family:inherit;
+  font-size:16px;font-weight:800;cursor:pointer;text-align:right;white-space:nowrap}
+.fold-toggle:hover{background:rgba(77,163,255,.06)}
+.fold-toggle .arr{margin-right:auto;color:var(--muted);transition:.2s;font-size:12px}
+.fold.open .fold-toggle .arr{transform:rotate(180deg)}
+.fold-st{margin-right:8px;font-weight:600;font-size:12px;color:var(--muted);
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fold-body{display:none}
+.fold.open .fold-body{display:block}
+.fold-note{color:var(--muted);font-size:12px;margin:10px 0 0;line-height:1.8}
+/* پوستهٔ هر بخش: خودِ نوار پدینگ دارد، پس پوسته پدینگِ اضافه نمی‌گیرد */
+.alarms-dock.fold{padding:0;overflow:hidden}
+.alarms-body{padding:0 18px 18px}
+.btpanel.fold{margin-top:14px}
+/* ⚠ این بدنه عمداً flex نیست: یک قاعدهٔ نمایشی روی خودِ هر بدنه (مثلِ display:flex)
+   با قاعدهٔ پنهان‌بودنِ پیش‌فرض هم‌ارزش می‌شود و ترتیبِ متن تعیین می‌کند — یعنی
+   پنل می‌تواند همیشه‌باز بماند (همین در اجرای زنده لو رفت و حالا
+   selfcheck.fold_panels_problems هم آن را می‌گیرد). فاصله‌ها با marginِ فرزندان. */
+.bt-body{padding-top:12px;border-top:1px dashed var(--line)}
+.bt-body > * + *{margin-top:10px}
+.risk-body{padding:0 12px 10px}
+.bk-dock{padding:0;overflow:hidden}
+.bk-body{padding:0 18px 16px;border-top:1px dashed var(--line)}
+/* ⚠ مثلِ بقیهٔ بدنه‌ها عمداً هیچ `display`ی روی `.gap-body` نیست — وگرنه
+   پنهان‌بودنِ پیش‌فرضِ کرکره بی‌اثر می‌شود و پنل همیشه‌باز می‌مانَد
+   (selfcheck.fold_panels_problems همین را می‌گیرد). */
+.gap-body{padding:0 18px 16px;border-top:1px dashed var(--line)}
+.gap-body > * + *{margin-top:10px}
+.gap-grid{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.gap-ck{display:flex;align-items:flex-start;gap:8px;background:var(--panel2);
+  border:1px solid var(--line);border-radius:10px;padding:8px 12px;margin-bottom:6px;font-size:13px}
+.gap-ck.ok{border-color:rgba(34,197,94,.35)}
+.gap-ck.no{border-color:rgba(239,68,68,.3)}
+.gap-ck .gstw{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.gap-lvl{display:flex;gap:14px;flex-wrap:wrap;font-size:13px;color:var(--muted);
+  font-variant-numeric:tabular-nums;background:var(--panel2);border:1px solid var(--line);
+  border-radius:10px;padding:9px 12px}
+.gap-lvl b{color:var(--txt)}
+.gap-near{font-size:12.5px;color:var(--muted);line-height:1.9;font-variant-numeric:tabular-nums}
+.alarm-item{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:var(--panel2);
+  border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:8px;font-size:13px}
+.alarm-item.trig{border-color:rgba(34,197,94,.5);background:rgba(34,197,94,.08)}
+.alarm-item .asym{font-weight:800;font-size:15px}
+.alarm-item .arng{color:var(--muted);font-variant-numeric:tabular-nums}
+.alarm-item .astat{margin-right:auto}
+.alarm-item .apx{color:var(--muted);font-variant-numeric:tabular-nums}
+.pill{font-size:11px;padding:3px 9px;border-radius:20px;font-weight:700}
+.pill.waiting{background:rgba(245,158,11,.15);color:var(--warn)}
+.pill.hit{background:rgba(34,197,94,.18);color:var(--good)}
+.adel{background:transparent;border:1px solid var(--line);color:var(--muted);
+  border-radius:8px;padding:5px 10px;cursor:pointer;font-family:inherit;font-size:12px}
+.adel:hover{border-color:var(--bad);color:var(--bad)}
+.aempty{color:var(--muted);font-size:13px;text-align:center;padding:14px}
+/* live chart + screenshots */
+.livewrap{margin-top:22px;background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:18px}
+.livewrap h2{font-size:16px;margin:0 0 12px;display:flex;align-items:center;gap:8px}
+.tv-box{position:relative;border-radius:12px;overflow:hidden;border:1px solid var(--line);height:420px;background:var(--panel2)}
+.tv-box iframe{width:100%;height:100%;border:0;display:block}
+.uprow{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:14px}
+.upbtn{background:var(--accent);color:#04121f;border:none;border-radius:10px;padding:11px 18px;
+  font-size:14px;font-weight:700;cursor:pointer;font-family:inherit}
+.upbtn:hover{filter:brightness(1.08)}
+.upbtn:disabled{opacity:.5;cursor:default}
+.upnote{flex:1;min-width:180px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;
+  color:var(--txt);font-size:14px;padding:11px 14px;outline:none}
+/* پشتیبانِ خودکار: زمان‌بندی + فهرستِ نسخه‌های نگه‌داشته‌شده */
+input.abnum{flex:0 0 86px;min-width:86px;text-align:center;direction:ltr;
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.ablabel{display:flex;align-items:center;gap:7px;font-size:13px;color:var(--txt);cursor:pointer;
+  background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:11px 14px}
+.ablabel input{width:16px;height:16px;accent-color:var(--accent);cursor:pointer;margin:0}
+#abList{margin-top:10px;display:flex;flex-direction:column;gap:6px}
+.abrow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;background:var(--panel2);
+  border:1px solid var(--line);border-radius:10px;padding:8px 12px;font-size:12.5px}
+.abrow .abname{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;direction:ltr;color:var(--txt)}
+.abrow .abmeta{color:var(--muted);font-variant-numeric:tabular-nums}
+.abrow .abrestore{margin-inline-start:auto;padding:6px 12px;font-size:12px}
+.shotgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin-top:14px}
+.shot{background:var(--panel2);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.shot img{width:100%;height:150px;object-fit:cover;cursor:pointer;display:block;background:#000}
+.shot .meta{padding:8px 10px;font-size:12px;color:var(--muted)}
+.shot .meta b{color:var(--txt)}
+.shot .sdel{background:transparent;border:1px solid var(--line);color:var(--muted);border-radius:7px;
+  padding:4px 9px;cursor:pointer;font-family:inherit;font-size:11px;margin-top:6px}
+.shot .sdel:hover{border-color:var(--bad);color:var(--bad)}
+.lightbox{position:fixed;inset:0;background:rgba(0,0,0,.85);display:none;align-items:center;justify-content:center;
+  z-index:100;padding:24px;cursor:zoom-out}
+.lightbox.on{display:flex}
+.lightbox img{max-width:95%;max-height:95%;border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.6)}
+/* بنرِ «نسخهٔ تازه» — پیش‌فرض پنهان؛ فقط وقتی سرویس‌ورکرِ تازه در انتظار است
+   با کلاسِ show دیده می‌شود (کاربرِ آفلاین نباید بی‌خبر بماند) */
+.updbar{position:fixed;inset-inline:12px;bottom:14px;max-width:720px;margin-inline:auto;z-index:120;
+  display:none;align-items:center;gap:10px;flex-wrap:wrap;padding:11px 14px;border-radius:14px;
+  background:linear-gradient(135deg,#0ea5e9,#6366f1);color:#04121f;font-size:13px;font-weight:700;
+  box-shadow:0 12px 34px rgba(0,0,0,.5)}
+.updbar.show{display:flex}
+.updbar.warn{background:linear-gradient(135deg,#f59e0b,#ef4444);color:#2a1206}
+.updbar span{flex:1 1 190px;line-height:1.7}
+.updbtn,.updlater{border:0;border-radius:9px;padding:7px 14px;cursor:pointer;font-family:inherit;
+  font-size:12.5px;font-weight:700}
+.updbtn{background:#04121f;color:#e6f6ff}
+.updbtn:hover{filter:brightness(1.25)}
+.updlater{background:rgba(4,18,31,.16);color:#04121f}
+.updlater:hover{background:rgba(4,18,31,.3)}
+.foot{color:var(--muted);font-size:11px;text-align:center;margin-top:22px;line-height:1.8}
+@media(max-width:560px){.pgrid{grid-template-columns:repeat(2,1fr)}.styles{width:100%}.styles button{flex:1}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="header">
+    <div>
+      <h1>pipfound</h1>
+    </div>
+    <div class="chiprow">
+      <span id="dataChip" class="revchip" title="تازگیِ داده و باز/بسته بودنِ بازار — اگر آخرین کندلِ بسته کهنه باشد یا بازار بسته باشد، تحلیل «آماده‌سازی» است نه سیگنالِ ورود.">داده …</span>
+      <span id="revChip" class="revchip" title="بازنگریِ کدِ در حالِ اجرا — SHA بارشده، زمانِ استارتِ پروسه، و اینکه کدِ سروشده با فایل‌های روی دیسک یکی است یا نه.">rev …</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="searchrow">
+      <div class="symwrap">
+        <input id="sym" class="inp" placeholder="نامِ نماد… مثل XAUUSD، EURUSD، WTI، SPX500، NVDA"
+               title="نامِ نماد را این‌جا بنویس (طلا/نقره، جفت‌ارزهای مهم، کامودیتی، اندیکس، استاک و کریپتو). نشانگر را داخلِ همین کادر ببر (یا روی آن کلیک کن) تا فهرستِ نمادها زیرِ کادر باز شود و یکی را انتخاب کنی. با انتخاب/تایپِ نماد، سبک و دکمه‌ی تحلیل چشمک می‌زنند؛ هیچ‌چیز خودکار اجرا نمی‌شود."
+               list="syms" autocomplete="off">
+        <datalist id="syms"></datalist>
+        <div class="chips" id="chips"></div>
+      </div>
+      <div class="styles" id="styles">
+        <button data-k="scalp" title="سبکِ اسکالپ — تایم‌فریمِ پایین. فقط سبک را عوض می‌کند؛ تحلیل را خودکار اجرا نمی‌کند.">اسکالپ</button>
+        <button data-k="day" class="active" title="سبکِ روزانه (پیش‌فرض). فقط سبک را عوض می‌کند؛ تحلیل را خودکار اجرا نمی‌کند.">روزانه</button>
+        <button data-k="swing" title="سبکِ سوینگ — تایم‌فریمِ بالا. فقط سبک را عوض می‌کند؛ تحلیل را خودکار اجرا نمی‌کند.">سوینگ</button>
+      </div>
+      <button id="go" class="go" title="تحلیلِ زنده‌ی همین لحظه: امتیاز، تایم‌فریمِ ورود، پلنِ عددی و درجه را می‌دهد.">تحلیل کن</button>
+      <button id="bt" class="go" style="background:#334155" title="بک‌تستِ walk-forward روی داده‌ی تاریخی؛ پنلِ تنظیماتِ بازه/تایم‌فریم/جهت را باز می‌کند.">بک‌تست</button>
+      <button id="sbBtn" class="sb-btn" title="استراتژیِ سیلوربولتِ نیویورک روی تایمِ ۱ دقیقه — فقط در پنجره‌ی ۰۹:۰۰ تا ۱۱:۰۰ به‌وقتِ نیویورک معتبر است (اوجِ فعالیتِ روز). با کلیک، سبک روی این استراتژی می‌رود، تحلیلِ ۱m اجرا می‌شود و تایمرِ ساعتِ ۹ نمایش داده می‌شود.">🎯 سیلوربولت نیویورک</button>
+      <button id="setupsBtn" class="setups-btn" title="چهار ستاپِ پیشنهادیِ اسکلپ با وضعیتِ زنده: 🟢 تأییدِ قوی · 🟡 منتظرِ شرایط · 🔴 شرایط نیست. چراغ‌ها از آخرین تحلیل به‌روز می‌شوند؛ با کلیک روی هر ردیف مسیرِ ستاپ باز می‌شود.">📚 ستاپ‌ها</button>
+      <button id="fundBtn" class="fund-btn" title="اخبارِ اقتصادیِ پرتأثیر (GDP، تورم، اشتغال، نرخِ بهره) یک روز پیش از اعلام — ساعتِ دقیقِ اعلام به‌وقتِ نیویورک و تهران، به‌همراهِ تحلیلِ اثرِ هر خبر روی جفت‌ارزهای مهم و طلا/نقره. با کلیک، صفحه‌ی جداگانه‌ی فاندمنتال در تبِ نو باز می‌شود.">📰 فاندمنتال</button>
+      <button id="refreshBtn" class="rf-btn" title="همان نمادِ آخرین تحلیل را دوباره با دیتای زنده می‌گیرد — بدونِ رفرشِ کلِ صفحه. از همان بارگذاری فعال است: اگر در این صفحه تحلیلی باشد همان را با دیتای زنده بازتازه می‌کند، وگرنه آخرین تحلیلِ ثبت‌شده را می‌گیرد؛ اگر چیزی نباشد فقط پیام می‌دهد — پنجره‌ای باز نمی‌کند.">
+        <span class="rf-slot" aria-hidden="true">
+          <span class="rf-ico"><svg viewBox="0 0 24 24"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></span>
+          <span class="rf-spin"><svg viewBox="0 0 24 24"><circle class="rf-track" cx="12" cy="12" r="9"/><circle class="rf-arc" cx="12" cy="12" r="9"/></svg></span>
+          <span class="rf-check"><svg viewBox="0 0 24 24"><path d="M5 12.8l4.3 4.3L19 7.4"/></svg></span>
+        </span>
+        <span class="rf-lbl">بروزرسانی</span>
+        <span class="rf-live" role="status" aria-live="polite"></span>
+      </button>
+      <button id="archiveBtn" class="ab-btn" title="اخبارِ اقتصادیِ پرتأثیرِ ۶ ساعتِ گذشته — هر خبر با ارز، ساعتِ اعلام، نتیجهٔ قطعیِ اعلام‌شده (عددِ Actual + صعودی/نزولی) و تأثیرِ همین نتیجه روی جفت‌ارزها و طلا/نقره؛ در همین صفحه به‌شکلِ پنجره باز می‌شود.">📁 آرشیو اقتصادی</button>
+      <button id="installBtn" class="ab-btn" title="همین اپ را به‌شکلِ آیکونِ مستقل روی گوشی/تبلت/کامپیوتر نصب کن — آدرسِ قابل‌اشتراک و راهنمای هر دستگاه.">📲 نصب روی دستگاه</button>
+    </div>
+    <div id="setupsPanel" class="setups-panel">
+      <div class="sp-head">📚 ستاپ‌های پیشنهادی <span class="jmsg" id="spState">— اول یک تحلیل بگیر تا چراغ‌ها روشن شوند</span></div>
+      <div id="spList"></div>
+    </div>
+    <div id="btPanel" class="fold btpanel">
+      <h2 class="fold-head"><button id="btToggle" class="fold-toggle" type="button"
+            aria-expanded="false" aria-controls="btBody"
+            title="تنظیماتِ بک‌تست: بازهٔ تاریخی، تایم‌فریم‌های دلخواه، جهتِ مجاز و عمقِ پیمایش. برای دیدنِ کادرها روی همین نوار کلیک کن.">
+        🧪 تنظیماتِ بک‌تست <span class="arr" aria-hidden="true">▾</span>
+      </button></h2>
+      <div class="fold-body bt-body" id="btBody">
+      <div class="btrow">
+        <span class="btlbl">بازه‌ی بک‌تست (تاریخِ روی چارت):</span>
+        <input id="btFrom" class="btinp" type="text" placeholder="از — مثل 2026-06-01" autocomplete="off"
+               title="تاریخِ شروعِ بازه‌ی بک‌تست (روی چارت). خالی = خودکار (کندل‌های اخیر). قالب: 2026-06-01">
+        <input id="btTo" class="btinp" type="text" placeholder="تا — مثل 2026-08-13" autocomplete="off"
+               title="تاریخِ پایانِ بازه‌ی بک‌تست (روی چارت). خالی = خودکار (کندل‌های اخیر). قالب: 2026-08-13">
+        <button id="btSuggest" class="btsug" type="button"
+                title="بر اساسِ عمقِ پیمایش و دیتای در دسترس، حداقلِ تاریخِ معتبر را در کادرها پیشنهاد می‌دهد. اول نماد و سبک را انتخاب کن.">بازه‌ی پیشنهادی ↧</button>
+      </div>
+      <div class="btsughint" id="btSugHint"></div>
+      <div class="btrow">
+        <span class="btlbl">تایم‌فریمِ دلخواه (فرکتالی):</span>
+        <input id="btTfs" class="btinp wide" type="text" placeholder="مثلاً 4h,1h,15m,5m — خالی = طبقِ سبک"
+               title="تایم‌فریم‌های دلخواهِ فرکتالی، با کاما جدا: «4h,1h,15m,5m». اولی = بایاسِ بالا، آخری = ورود. بر سبک اولویت دارد؛ خالی = طبقِ سبک.">
+      </div>
+      <div class="btrow">
+        <span class="btlbl">جهتِ مجاز:</span>
+        <div class="sideseg" id="btSide">
+          <button data-s="both" class="active" title="هر دو جهتِ خرید و فروش را بک‌تست کن (پیش‌فرض).">هر دو</button>
+          <button data-s="long" title="فقط سیگنال‌های خرید (long) را بک‌تست کن.">فقط خرید</button>
+          <button data-s="short" title="فقط سیگنال‌های فروش (short) را بک‌تست کن.">فقط فروش</button>
+        </div>
+        <span class="btlbl" style="margin-inline-start:14px">عمقِ پیمایش:</span>
+        <input id="btWalk" class="btinp narrow" type="number" min="100" max="8000" step="100" value="2000"
+               title="عمقِ پیمایشِ walk-forward = تعدادِ کندلِ ورودی که ماشین روی آن قدم‌به‌قدم جلو می‌رود. برای نمونه‌ی آماریِ معتبر ≥ ۲۰۰۰ توصیه می‌شود.">
+      </div>
+      </div>
+    </div>
+    <div class="riskpanel fold" id="riskPanel">
+      <h2 class="fold-head"><button id="rkToggle" class="fold-toggle" type="button"
+            aria-expanded="false" aria-controls="rkBody"
+            title="مدیریتِ ریسک: سرمایه، درصدِ ریسکِ هر معامله و سقفِ ضررِ روزانه/ریسکِ باز — تا کنارِ هر پلن «سایزِ پوزیشن» و ریسکِ دلاری‌اش را بدهد. برای دیدنِ کادرها روی همین نوار کلیک کن.">
+        💰 مدیریتِ ریسک <span class="fold-st jmsg" id="rkState">در حالِ خواندن…</span>
+        <span class="arr" aria-hidden="true">▾</span>
+      </button></h2>
+      <div class="fold-body risk-body" id="rkBody">
+      <div class="risktitle">سرمایه و درصدِ ریسکت را بده تا کنارِ هر پلن «سایزِ پوزیشن» و ریسکِ دلاری‌اش را بدهد، و سقفِ ضررِ روزانه/تمرکزِ معاملات را هم بپاید.</div>
+      <div class="riskrow">
+        <span class="btlbl">سرمایه</span>
+        <input id="rkBalance" class="rinp wide" type="number" min="0" step="100" autocomplete="off"
+               title="سرمایه‌ی حساب (به ارزِ حساب، پیش‌فرض دلار). سایزِ پوزیشن از همین عدد و درصدِ ریسک حساب می‌شود.">
+        <span class="btlbl">ریسکِ هر معامله (٪)</span>
+        <input id="rkRisk" class="rinp" type="number" min="0" max="100" step="0.1" autocomplete="off"
+               title="درصدی از سرمایه که در هر معامله ریسک می‌کنی (پیش‌فرض ۱٪). سایز = (سرمایه × این درصد) ÷ فاصله‌ی استاپ.">
+        <span class="btlbl">سقفِ ضررِ روزانه (٪)</span>
+        <input id="rkDaily" class="rinp" type="number" min="0" max="100" step="0.5" autocomplete="off"
+               title="اگر ضررِ محقق‌شده‌ی امروز به این درصد برسد، اپ ورودِ جدید را مسدود می‌کند، درجه را سقف C می‌زند و مهرِ ورود صادر نمی‌کند.">
+        <span class="btlbl">سقفِ ریسکِ باز (٪)</span>
+        <input id="rkOpen" class="rinp" type="number" min="0" max="100" step="0.5" autocomplete="off"
+               title="مجموعِ ریسکِ معاملاتِ بازِ تو (از ژورنال). عبور از این سقف = تمرکزِ زیاد؛ اپ ورودِ جدید را مسدود می‌کند.">
+        <button id="rkSave" class="riskbtn" title="تنظیماتِ ریسک را ذخیره کن. در ~/pipfound/risk.json می‌ماند و بعد از ری‌استارتِ خودکارِ اپ هم حفظ می‌شود.">ذخیره</button>
+        <span id="rkMsg" class="jmsg"></span>
+      </div>
+      <div class="riskstat" id="rkStat">در حالِ خواندنِ وضعیتِ ریسک…</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="result"></div>
+  <div id="btresult"></div>
+
+  <div class="alarms-dock fold" id="alarmsDock">
+    <h2 class="fold-head"><button id="alarmsToggle" class="fold-toggle" type="button"
+          aria-expanded="false" aria-controls="alarmsBody"
+          title="آلارم‌های قیمتیِ تو — هر ۹۰ ثانیه بررسی می‌شوند و هنگامِ رسیدنِ قیمت خبر می‌دهند. برای دیدنِ فهرست روی همین نوار کلیک کن.">
+      🔔 آلارم‌های فعال <span class="fold-st jmsg" id="alarmsState">…</span>
+      <span class="arr" aria-hidden="true">▾</span>
+    </button></h2>
+    <div class="fold-body alarms-body" id="alarmsBody">
+      <div id="alarmsList"><div class="aempty">هنوز آلارمی نگذاشته‌ای.</div></div>
+    </div>
+  </div>
+
+  <div class="alarms-dock bk-dock fold" id="bkDock">
+    <h2 class="fold-head">
+      <button id="bkToggle" class="fold-toggle" type="button" aria-expanded="false" aria-controls="bkBody"
+              title="پشتیبانِ داده و انتقالِ آن: برون‌بری/درون‌بریِ JSON، پشتیبانِ خودکارِ زمان‌بندی‌شده و برگرداندنِ نسخه‌ها. برای دیدنِ گزینه‌ها روی همین نوار کلیک کن.">
+        📦 پشتیبان و انتقالِ داده
+        <span class="fold-st jmsg" id="bkState">در حالِ خواندن…</span>
+        <span class="arr" aria-hidden="true">▾</span>
+      </button>
+    </h2>
+    <div class="fold-body bk-body" id="bkBody">
+    <p class="fold-note">📁 ژورنال، آلارم‌ها و تنظیماتِ ریسک — همه در یک فایلِ JSON. این بخش جمع شده است تا نمای اصلی تمیز بماند؛ برای گزینه‌ها روی نوارِ بالا کلیک کن. پشتیبانِ خودکار هم بی‌سروصدا در پس‌زمینه کار می‌کند.</p>
+    <div class="uprow">
+      <input type="file" id="impFile" accept="application/json,.json" style="display:none">
+      <button class="upbtn" id="expBtn" title="کلِ دادهٔ تو (ردیف‌های ژورنال، آلارم‌ها و تنظیماتِ ریسک) را به‌شکلِ یک فایلِ JSON برون‌بری می‌کند؛ همان فایل را روی دستگاهِ تازه درون‌بری کن تا از صفر شروع نکنی.">⬇️ برون‌بری (JSON)</button>
+      <button class="upbtn" id="impBtn" title="یک فایلِ پشتیبانِ JSON را می‌خواند و بدونِ پاک‌کردنِ دادهٔ فعلی به آن اضافه می‌کند: ژورنال/آلارم‌های تکراری نادیده می‌روند (تکرارپذیر) و تنظیماتِ ریسک اعمال می‌شوند.">⬆️ درون‌بری (JSON)</button>
+      <span id="bkMsg" class="jmsg"></span>
+    </div>
+    <div class="uprow" style="margin-top:10px">
+      <label class="ablabel" for="abToggle" title="روشن باشد، خودِ اپ هر چند ساعت یک نسخهٔ کامل از ژورنال/آلارم‌ها/تنظیمات می‌سازد و فقط چند نسخهٔ آخر را نگه می‌دارد — پس حتی اگر یادت برود، پشتیبان داری.">
+        <input type="checkbox" id="abToggle"> پشتیبانِ خودکار
+      </label>
+      <input class="upnote abnum" id="abEvery" type="number" min="1" max="720" step="1"
+             title="هر چند ساعت یک نسخهٔ تازه ساخته شود (۱ تا ۷۲۰ ساعت).">
+      <span class="jmsg">ساعت یک‌بار · نگه‌داشتِ</span>
+      <input class="upnote abnum" id="abKeep" type="number" min="1" max="50" step="1"
+             title="چند نسخهٔ آخر نگه داشته شود؛ قدیمی‌ترها خودکار هرس می‌شوند — فقط فایل‌های پشتیبانِ خودِ اپ، هیچ فایلِ دیگری در آن پوشه لمس نمی‌شود.">
+      <span class="jmsg">نسخه</span>
+      <button class="upbtn" id="abSave" title="تنظیماتِ زمان‌بندی را ذخیره کن؛ در ~/pipfound/autobackup.json می‌مانَد و بعد از ری‌استارتِ خودکارِ اپ هم حفظ می‌شود.">ذخیره</button>
+      <button class="upbtn" id="abNow" title="همین حالا یک نسخه بساز، بدونِ انتظار برای نوبتِ زمان‌بند — دقیقاً همان بسته‌ای که با «برون‌بری» می‌گیری.">▶️ همین حالا نسخه بساز</button>
+      <span id="abMsg" class="jmsg"></span>
+    </div>
+    <div class="riskstat" id="abStat">در حالِ خواندنِ وضعیتِ پشتیبانِ خودکار…</div>
+    <div id="abList"></div>
+    </div>
+  </div>
+
+  <!-- پرسشِ «تأییدِ شکافِ ارزش منصفانه»: کاربر آدرسِ گپ (کف/سقف) را در یک
+       تایم‌فریم می‌دهد و اپ همان گپ را در دادهٔ زنده پیدا می‌کند و می‌گوید چقدر
+       تأیید دارد و می‌شود به آن اتکا کرد یا نه — یک «پرسش» است، نه فهرستِ خام. -->
+  <div class="alarms-dock fold" id="gapDock">
+    <h2 class="fold-head"><button id="gapToggle" class="fold-toggle" type="button"
+          aria-expanded="false" aria-controls="gapBody"
+          title="پرسشِ تأییدِ شکافِ ارزش منصفانه (FVG): آدرسِ گپ را با کف و سقفِ ناحیه و تایم‌فریم بده تا اپ همان گپ را در دادهٔ زنده پیدا کند و بگوید چقدر تأیید دارد و قابلِ اتکاست یا نه. برای دیدنِ کادرها روی همین نوار کلیک کن.">
+      🧩 تأییدِ شکافِ ارزش منصفانه <span class="fold-st jmsg" id="gapState">آماده</span>
+      <span class="arr" aria-hidden="true">▾</span>
+    </button></h2>
+    <div class="fold-body gap-body" id="gapBody">
+      <p class="fold-note">آدرسِ گپ را با «کف» و «سقف» بده (در همان تایم‌فریمی که روی چارت می‌بینی). اپ همان ناحیه را در دادهٔ زنده پیدا می‌کند و ۱۲ معیارِ تأیید — دیسپلیسمنتِ کندلِ میانی، تازگیِ گپ، هم‌سویی با بایاسِ تایم‌فریمِ بالا، POIِ تایم‌فریمِ بالا، توالیِ سوئیپ→MSS، سوئیپِ لیکوئیدیتی پیش از تولد، سمتِ پریمیوم/دیسکانت، کیل‌زون، اردر بلاکِ هم‌جهت، اندازهٔ معقولِ گپ و فاصلهٔ اجرایی — را نمره می‌دهد و درجه می‌دهد. اگر آدرس را نمی‌دانی، «گپ‌های همین تایم‌فریم» را بزن تا پرتأییدترین‌ها را ببینی.</p>
+      <div class="gap-grid">
+        <span class="btlbl">نماد</span>
+        <input id="gapSym" class="btinp" type="text" placeholder="مثلاً XAUUSD" autocomplete="off"
+               title="نمادی که گپ روی آن است — همان نمادِ چارت. با حروفِ بزرگ نوشته می‌شود.">
+        <span class="btlbl">تایم‌فریم</span>
+        <select id="gapTf" class="btinp" title="تایم‌فریمِ گپ — همان تایم‌فریمی که آدرس را از روی آن می‌دهی. تایم‌فریمِ بالاتر خودکار برای بایاس بررسی می‌شود.">
+          <option>1m</option><option>5m</option><option>15m</option><option>30m</option>
+          <option selected>1h</option><option>4h</option><option>1d</option><option>1w</option>
+        </select>
+      </div>
+      <div class="gap-grid">
+        <span class="btlbl">کفِ ناحیه</span>
+        <input id="gapLo" class="btinp narrow" type="number" step="any" placeholder="مثلاً 2300" autocomplete="off"
+               title="پایین‌ترین قیمتِ ناحیهٔ گپ (روی چارت). اگر جای کف/سقف را عوض کنی هم مهم نیست، خودش مرتب می‌کند.">
+        <span class="btlbl">سقفِ ناحیه</span>
+        <input id="gapHi" class="btinp narrow" type="number" step="any" placeholder="مثلاً 2312.5" autocomplete="off"
+               title="بالاترین قیمتِ ناحیهٔ گپ (روی چارت).">
+        <button id="gapGo" class="riskbtn" title="همین ناحیه را در دادهٔ زنده پیدا کن و بگو چقدر تأیید دارد و آیا می‌شود به آن اتکا کرد.">🔎 بررسیِ تأیید</button>
+        <button id="gapList" class="btsug" title="اگر آدرس نداری: گپ‌های بازِ همین نماد و تایم‌فریم را از پرتأییدترین به کم‌تأییدترین نشان می‌دهد تا یکی را انتخاب کنی.">گپ‌های همین تایم‌فریم</button>
+        <button id="gapWatch" class="btsug" title="گپ‌بان: همین نماد و تایم‌فریم را زیرِ نظارت بگذار. خودِ اپ هر ۵ دقیقه پویش می‌کند و به‌محضِ تولدِ گپِ تازه با نمرهٔ A+ یا A نوتیفیکیشنِ نیتیو می‌فرستد — لازم نیست پرسشی بفرستی. دورِ اول بی‌صدا پایه‌گذاری می‌شود تا برای گپ‌های ازپیش‌موجود سیلیِ اعلان نگیری.">🔔 گپ‌بان</button>
+        <span id="gapMsg" class="jmsg"></span>
+      </div>
+      <div id="gapRes"></div>
+    </div>
+  </div>
+
+  <div class="livewrap">
+    <h2>📊 چارتِ زنده <span class="jmsg" id="tvSymLbl"></span></h2>
+    <div class="tv-box" id="tvBox">
+    <div class="aempty" style="padding:40px">یک نماد را تحلیل کن تا چارتِ زنده‌اش این‌جا بیاید.</div>
+    </div>
+  </div>
+
+  <div class="livewrap">
+    <h2>🖼️ اسکرین‌شاتِ چارت <span class="jmsg">(آپلود برای بایگانی و مرور)</span></h2>
+    <div class="uprow">
+      <input type="file" id="shotFile" accept="image/png,image/jpeg,image/webp,image/gif" style="display:none">
+      <button class="upbtn" id="shotPick" title="یک تصویرِ چارت را از دستگاهت انتخاب کن (PNG/JPG/WebP/GIF) تا برای بایگانی و مرور آپلود شود.">📤 انتخابِ تصویر</button>
+      <input class="upnote" id="shotNote" placeholder="یادداشت (اختیاری) — مثلاً «سوئیپِ لو + چاک روی ۱h»"
+             title="یادداشتِ اختیاری روی این اسکرین‌شات؛ کنارِ تصویر ذخیره و نمایش داده می‌شود.">
+      <span id="shotMsg" class="jmsg"></span>
+    </div>
+    <div class="shotgrid" id="shotGrid"></div>
+  </div>
+
+  <div class="lightbox" id="lightbox"><img id="lightboxImg" src="" alt=""></div>
+
+  <!-- بنرِ «نسخهٔ تازه» — پیش‌فرض پنهان است و فقط وقتی سرویس‌ورکرِ تازه در حالتِ
+       انتظار است با کلاسِ show دیده می‌شود (جانشینی فقط با تأییدِ کاربر). -->
+  <div class="updbar" id="pfSwBanner" role="status" aria-live="polite">
+    <span id="pfSwTxt">🔄 نسخهٔ تازهٔ اپ آماده است — همین‌حالا بگیرش</span>
+    <button class="updbtn" id="pfSwBtn" type="button"
+            title="صفحه با کدِ تازه دوباره بالا می‌آید؛ کشِ کهنه هم پاک می‌شود.">به‌روزرسانی</button>
+    <button class="updlater" id="pfSwHide" type="button"
+            title="بعداً؛ تا پایانِ همین بازدید دیگر پرسیده نمی‌شود و نسخهٔ تازه در صف می‌مانَد (در بازدیدِ بعد یادآوری می‌شود).">بعداً</button>
+  </div>
+</div>
+
+<script>
+// نمایشِ هر خطای JS روی خودِ صفحه — خطاها دیگر بی‌صدا گم نمی‌شوند
+window.addEventListener("error", e=>{
+  const r=document.getElementById("result");
+  if(r && !r.innerHTML.trim()){
+    r.innerHTML='<div class="err">خطای جاوااسکریپت: '+ (e.message||"نامشخص") +'</div>';
+  }
+});
+const SUGGESTIONS = __SUGGESTIONS__;
+const SYMBOL_GROUPS = __SYMBOL_GROUPS__;
+let style = "day";
+
+const $ = s => document.querySelector(s);
+const symIn = $("#sym"), goBtn = $("#go"), res = $("#result");
+
+// datalist + chips
+const dl = $("#syms");
+SUGGESTIONS.forEach(s=>{const o=document.createElement("option");o.value=s;dl.appendChild(o);});
+const chips = $("#chips");
+// انتخابِ سریعِ گروه‌بندی‌شده — جفت‌ارزهای مهم · کامودیتی · اندیکس · استاک.
+// این‌ها در نمای اصلیِ صفحه دیده **نمی‌شوند**: پنل تا وقتی نشانگر/فوکوس داخلِ کادرِ
+// نماد نیامده بسته است، پس صفحه تمیز می‌ماند و انتخاب همیشه در دسترس است.
+const symWrap = symIn.closest(".symwrap") || symIn.parentElement;
+SYMBOL_GROUPS.forEach(([label, syms])=>{
+  const row=document.createElement("div"); row.className="chipgroup";
+  const lb=document.createElement("span"); lb.className="chiplbl"; lb.textContent=label;
+  row.appendChild(lb);
+  syms.forEach(s=>{
+    const c=document.createElement("button");c.type="button";c.className="chip";c.textContent=s;
+    c.setAttribute("data-sym",s);   // تستِ بصریِ CI روی همین می‌چسبد (نباید بی‌صدا حذف شود)
+    c.title="انتخابِ "+s+" — فقط کادرِ نماد را پُر می‌کند؛ اول سبک/بازه را انتخاب کن.";
+    // فقط نماد را پُر کن؛ اجرا نکن. کاربر اول سبک و بازه را انتخاب می‌کند.
+    c.onclick=()=>{ symIn.focus(); symIn.value=s; markReady(); closePick(); };
+    row.appendChild(c);
+  });
+  chips.appendChild(row);
+});
+const hint=document.createElement("div");
+ hint.className="chiphint"; hint.textContent="با تایپ هم می‌توانی نماد را بنویسی؛ این فهرست فقط انتخاب را سریع می‌کند.";
+chips.appendChild(hint);
+
+// باز/بسته شدنِ پنل: با ورودِ نشانگر یا فوکوس؛ بستن با خروجِ نشانگر، کلیکِ بیرون، Esc یا انتخاب
+let pickTimer=null;
+// ── پنلِ نمادها هرگز نباید روی کنترل‌های دیگر بنشیند (رفعِ «کلیدِ تحلیل کن کار نمی‌کند») ──
+// در پنجره‌های باریک ردیفِ جستجو می‌شکند و دکمه‌ها (تحلیل کن/بک‌تست/بروزرسانی/…)
+// زیرِ پنلِ کشویی می‌افتند؛ کلیکِ کاربر بی‌صدا به چیپِ نماد می‌رفت: نماد عوض
+// می‌شد و هیچ تحلیلی اجرا نمی‌شد. راه‌حلِ ریشه‌ای: هنگامِ بازشدن، پنل خودش را
+// با فضای خالیِ اطرافِ کادر اندازه می‌گیرد — زیرِ کادر جا بود همان‌جا با
+// ارتفاعِ محدود؛ نبود، به بالای کادر برمی‌گردد — تا هیچ‌وقت چیزی را نپوشاند
+// و هر کلیک به مقصدِ واقعی‌اش برسد.
+const _pfRowBtns = Array.from(document.querySelectorAll(".searchrow button"))
+  .filter(el => !chips.contains(el));   // خودِ چیپ‌ها هم «button»اند؛ نباید در سنجش بیایند
+function _pfAvoidControls(){
+  chips.style.maxHeight = "";
+  chips.style.top = chips.style.left = chips.style.width = "";
+  chips.classList.remove("above", "docked");
+  const wr = symWrap.getBoundingClientRect();
+  // فضای آزاد زیر/بالای کادر = کمترینِ فاصله تا دکمه‌های ردیف و لبه‌ی ویوپورت
+  let below = innerHeight - wr.bottom, above = wr.top, rowBottom = wr.bottom;
+  // فقط دکمه‌هایی که در *ستونِ افقیِ* کادر هستند می‌توانند زیرِ پنل بیفتند؛
+  // دکمه‌های ستون‌های دیگر (ردیف‌های دیگرِ همان ردیفِ شکسته) مانعِ باز شدن نیستند.
+  const _pfSameCol = (r) => !(r.right <= wr.left || r.left >= wr.right);
+  for(const el of _pfRowBtns){
+    const r = el.getBoundingClientRect();
+    if(!r.width || !r.height) continue;
+    rowBottom = Math.max(rowBottom, r.bottom);
+    if(!_pfSameCol(r)) continue;
+    if(r.top >= wr.bottom - 4) below = Math.min(below, r.top - wr.bottom);
+    if(r.bottom <= wr.top + 4) above = Math.min(above, wr.top - r.bottom);
+  }
+  const gap = 14;                              // 6px فاصله‌ی پنل + 8px حاشیه‌ی امن
+  const belowRoom = below - gap;
+  // حالتِ ۱: زیرِ کادر جای کافی هست → همان کشوییِ همیشگی زیرِ کادر.
+  if(belowRoom >= 200) return;
+  // حالتِ ۲: دکمه‌های ردیف همان زیرِ کادر نشسته‌اند، پس نشستنِ پنل روی آن‌ها
+  // کلیک را می‌دزدد. به‌جای پوشاندنِ دکمه‌ها (و به‌جای پریدنِ ناگهانی به بالای
+  // صفحه)، پنل از *زیرِ کلِ ردیفِ جستجو* باز می‌شود: نه روی دکمه‌ها می‌نشیند،
+  // نه از ویوپورت بیرون می‌زند، و ارتفاعش هم به فضای واقعیِ موجود قفل می‌شود.
+  const room = innerHeight - (rowBottom + 10) - 12;
+  if(room >= 150){
+    const width = Math.min(Math.max(wr.width, 280), innerWidth - 16);
+    // هم‌تراز با لبه‌ی راستِ کادرِ نماد (چیدمانِ RTL) و در هر حال داخلِ ویوپورت
+    const left = Math.min(Math.max(wr.right - width, 8), Math.max(8, innerWidth - width - 8));
+    chips.classList.add("docked");
+    chips.style.top = Math.round(rowBottom + 10) + "px";
+    chips.style.left = Math.round(left) + "px";
+    chips.style.width = Math.round(width) + "px";
+    chips.style.maxHeight = Math.min(430, Math.floor(room)) + "px";
+    return;
+  }
+  // حالتِ ۳ (پنجره‌ی بسیار کم‌ارتفاع): ناچار بالای کادر، با ارتفاعِ قفل‌شده
+  // به همان فضای کم — پنلِ اسکرول‌شونده بهتر از پنلی است که از صفحه بیرون بزند.
+  const aboveRoom = above - gap;
+  if(aboveRoom > belowRoom) chips.classList.add("above");
+  const avail = chips.classList.contains("above") ? aboveRoom : belowRoom;
+  if(isFinite(avail)) chips.style.maxHeight = Math.max(60, Math.floor(avail)) + "px";
+}
+function openPick(){ clearTimeout(pickTimer); chips.classList.add("open"); _pfAvoidControls(); }
+function closePick(){ clearTimeout(pickTimer); chips.classList.remove("open"); }
+// ── بستنِ نرم: پنل فقط وقتی بسته می‌شود که نشانگر واقعاً از «ناحیه‌ی امنِ» کادر
+// بیرون رفته باشد (و کادر هم فوکوس نداشته باشد). رفعِ باگِ «با پایین‌آمدن روی
+// کرکره، سریع بسته می‌شود و فرصتِ انتخابِ نماد نمی‌دهد»: پیش‌تر خروجِ لحظه‌ای
+// نشانگر از کادرِ نماد — حتی برای عبور از همان ۶ پیکسلِ فاصله‌ی بین کادر و پنل —
+// پنل را ۲۰۰ میلی‌ثانیه بعد می‌بست. حالا ناحیه‌ی امن = کادر + راهرو + خودِ پنل،
+// با حاشیه‌ی ۲۴ پیکسل، و مهلتِ بستن هم بلندتر است تا انتخابِ آسوده ممکن شود. ──
+let _pfX=-1, _pfY=-1;
+function _pfInZone(){
+  const wr = symWrap.getBoundingClientRect();
+  let top=wr.top, bottom=wr.bottom, left=wr.left, right=wr.right;
+  if(chips.classList.contains("open")){
+    const pr = chips.getBoundingClientRect();
+    if(pr.width && pr.height){
+      top=Math.min(top,pr.top); bottom=Math.max(bottom,pr.bottom);
+      left=Math.min(left,pr.left); right=Math.max(right,pr.right);
+    }
+  }
+  const pad=24;   // فرصتِ عبورِ آزاد از راهرو/لبه‌ها، بدونِ بسته‌شدنِ ناخواسته
+  return _pfX >= left-pad && _pfX <= right+pad && _pfY >= top-pad && _pfY <= bottom+pad;
+}
+function closePickSoon(){
+  clearTimeout(pickTimer);
+  pickTimer=setTimeout(()=>{
+    if(_pfInZone()) return;                        // نشانگر برگشت/همان‌جاست
+    if(document.activeElement===symIn) return;      // کاربر داخلِ کادر مشغول است
+    closePick();
+  }, 420);
+}
+function _pfIntent(e){
+  _pfX=e.clientX; _pfY=e.clientY;
+  if(!chips.classList.contains("open")) return;
+  if(_pfInZone()) clearTimeout(pickTimer);          // هر حرکتِ داخلِ ناحیه = تمدیدِ مهلت
+  else closePickSoon();
+}
+document.addEventListener("mousemove", _pfIntent, {passive:true});
+chips.addEventListener("mouseenter", ()=>clearTimeout(pickTimer));
+chips.addEventListener("mouseleave", closePickSoon);
+symIn.addEventListener("focus", openPick);
+symIn.addEventListener("click", openPick);
+symWrap.addEventListener("mouseenter", openPick);
+symWrap.addEventListener("mouseleave", closePickSoon);
+symWrap.addEventListener("focusout", (e)=>{ if(!symWrap.contains(e.relatedTarget)) closePick(); });
+symIn.addEventListener("keydown", (e)=>{ if(e.key==="Escape") closePick(); });
+document.addEventListener("click", (e)=>{ if(!symWrap.contains(e.target)) closePick(); });
+// پنلِ «زیرِ ردیف» با position:fixed ست می‌شود؛ پس با اسکرولِ صفحه (نه اسکرولِ
+// داخلِ خودِ پنل) بسته می‌شود تا از کادرِ نماد جدا نیفتد.
+window.addEventListener("scroll", (e)=>{
+  if(e.target===document || e.target===document.documentElement) closePick();
+}, {passive:true});
+
+// وقتی نمادی انتخاب/تایپ شد، کاربر را به انتخابِ سبک/بازه هدایت کن (بدونِ اجرای خودکار)
+function markReady(){
+  const has = symIn.value.trim().length>0;
+  $("#styles").classList.toggle("awaiting", has);
+  goBtn.classList.toggle("pulse", has);
+}
+symIn.addEventListener("input", ()=>{ markReady();
+  // وقتی کاربر دارد تایپ می‌کند، اتوکامپلیتِ خودِ مرورگر کار می‌کند و پنل بسته می‌شود؛
+  // با خالی شدنِ کادر، پنل برمی‌گردد تا انتخابِ فهرستی همیشه یک قدم فاصله داشته باشد.
+  if(symIn.value.trim()) closePick(); else openPick();
+});
+
+// style toggle — فقط سبک را عوض کن؛ تحلیل را خودکار اجرا نکن
+$("#styles").addEventListener("click",e=>{
+  const b=e.target.closest("button");if(!b)return;
+  document.querySelectorAll("#styles button").forEach(x=>x.classList.remove("active"));
+  $("#sbBtn").classList.remove("active");
+  b.classList.add("active");style=b.dataset.k;
+});
+
+// دکمه‌ی خاصِ سیلوربولت نیویورک — سبک را روی sb_ny می‌گذارد و بلافاصله تحلیل می‌کند
+$("#sbBtn").addEventListener("click",()=>{
+  document.querySelectorAll("#styles button").forEach(x=>x.classList.remove("active"));
+  $("#sbBtn").classList.add("active");
+  style="sb_ny";
+  if(symIn.value.trim()) run(); else symIn.focus();
+});
+
+// تایمرِ زنده‌ی پنجره‌ی سیلوربولت (شمارشِ معکوس تا ۰۹:۰۰ ET یا تا بسته‌شدن)
+let _sbTimer=null;
+function fmtDur(sec){
+  sec=Math.max(0,sec|0);
+  const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60),s=sec%60;
+  const p=n=>String(n).padStart(2,"0");
+  return (h>0? p(h)+":":"")+p(m)+":"+p(s);
+}
+function startSbTimer(win){
+  if(_sbTimer){clearInterval(_sbTimer);_sbTimer=null;}
+  if(!win) return;
+  let toOpen=win.seconds_to_open|0, toClose=win.in_window?(win.seconds_to_close|0):0;
+  const el=()=>document.getElementById("sbTimer");
+  const stEl=()=>document.getElementById("sbState");
+  const tick=()=>{
+    const t=el(); if(!t){clearInterval(_sbTimer);_sbTimer=null;return;}
+    if(win.in_window){
+      toClose--; if(toClose<0)toClose=0;
+      t.textContent=fmtDur(toClose);
+      const s=stEl(); if(s){s.textContent="🟢 پنجره باز است — تا بسته‌شدن:";s.className="sb-state sb-open";}
+    }else{
+      toOpen--; if(toOpen<0)toOpen=0;
+      t.textContent=fmtDur(toOpen);
+      const s=stEl(); if(s){s.textContent="🟠 پنجره بسته است — تا بازشدنِ ۰۹:۰۰ ET:";s.className="sb-state sb-shut";}
+    }
+  };
+  tick(); _sbTimer=setInterval(tick,1000);
+}
+
+goBtn.onclick=run;
+symIn.addEventListener("keydown",e=>{if(e.key==="Enter")run();});
+
+// دکمه‌ی بروزرسانی — همان تحلیلِ آخر را با دیتای تازه دوباره می‌گیرد (بدونِ رفرشِ صفحه).
+// وضعیتِ کار با کلاسِ `.loading` روی خودِ دکمه نشان داده می‌شود (حلقه‌ی بدونِ‌سر +
+// هالهٔ ملایم — بدونِ افکتِ تصویری) — متن و اندازه‌ی دکمه ثابت می‌ماند تا چیزی نپرد.
+const refreshBtn=document.getElementById("refreshBtn");
+if(refreshBtn){
+  const rfLive=refreshBtn.querySelector(".rf-live");
+  const rfIdleTitle=refreshBtn.getAttribute("title")||"";
+  const rfSay=s=>{ if(rfLive) rfLive.textContent=s||""; };
+  // دکمه از همان بارگذاری فعال می‌ماند: کلیکِ بی‌نماد باید پاسخِ روشن بدهد، نه سکوت.
+  // (قبلاً دکمه disabled بود و کلیک هیچ واکنشی نداشت — به‌نظرِ «دکمهٔ خراب» می‌آمد.)
+  // هیچ پنجره/فوکوسی را نمی‌قاپد: فقط پیام می‌دهد. (بازکردنِ فهرستِ نمادها روی کلیکِ
+  // «بروزرسانی» خودِ تجربه را خراب می‌کرد — خواستهٔ کاربر: دکمه باید خودش کار کند.)
+  // ⚠ اینجا یک بی‌صداییِ واقعی رفع شد: `.rf-live` عمداً sr-only است
+  // (`width:1px` برای صفحه‌خوان)، پس پیامِ «چیزی برای بروزرسانی نیست» روی
+  // نمایشگر *دیده نمی‌شد* — و در مسیری که کادرِ نتیجه از قبل محتوا داشت، هیچ
+  // واکنشِ دیدنی‌ای نمی‌ماند و کلید «خراب» به‌نظر می‌رسید. الان پیامِ دیدنی
+  // همیشه بالای کادرِ نتیجه می‌نشیند و خودِ کلید هم لحظه‌ای رنگِ هشدار می‌گیرد.
+  const rfTell=()=>{
+    const msg='چیزی برای بروزرسانی نیست: در این صفحه هنوز تحلیلی ثبت نشده و کادرِ نماد هم خالی است. یک نماد را در کادرِ بالا بنویس (یا از فهرست انتخاب کن) و بعد همین دکمه را بزن.';
+    if(res){
+      const prev=res.querySelector(".rf-hint"); if(prev) prev.remove();
+      const st=document.createElement("div"); st.className="status rf-hint"; st.textContent=msg;
+      res.insertBefore(st, res.firstChild);        // پیامِ دیدنی، بالای هر محتوای قبلی
+      if(res.scrollIntoView) res.scrollIntoView({block:"nearest"});
+    }
+    rfSay("چیزی برای بروزرسانی نیست — اول یک نماد را انتخاب یا تحلیل کن.");
+    refreshBtn.title="هنوز چیزی برای بروزرسانی نیست؛ اول یک نماد را تحلیل کن.";
+    // پاسخِ دیدنی روی خودِ کلید (وگرنه کلیک بی‌واکنش به‌نظر می‌رسد)
+    refreshBtn.classList.add("need");
+    setTimeout(()=>refreshBtn.classList.remove("need"), 2200);
+  };
+  // اگر این صفحه تحلیلی ندارد، از حافظه‌ی سرور استفاده کن: آخرین تحلیلِ ثبت‌شده (حتی
+  // از نشستِ قبلی) — پس «بروزرسانی» روی اپِ تازه‌باز هم کاری برای انجام دارد.
+  const rfRemembered=async ()=>{
+    let a=window._lastSeen||null;
+    if(!a){
+      try{ const r=await fetch("/api/data_status",{cache:"no-store"});
+           a=((await r.json())||{}).analyzed||null; }catch(e){ a=null; }
+    }
+    return (a&&a.symbol)?a:null;
+  };
+  const rfSetStyle=k=>{
+    if(!k) return;
+    style=k;
+    const b=document.querySelector('#styles button[data-k="'+k+'"]');
+    if(b){
+      document.querySelectorAll("#styles button").forEach(x=>x.classList.remove("active"));
+      const sb=document.getElementById("sbBtn"); if(sb) sb.classList.remove("active");
+      b.classList.add("active");
+    }
+  };
+  refreshBtn.onclick=async ()=>{
+    if(refreshBtn.classList.contains("loading")) return;       // یک درخواست در هر لحظه
+    let sym=(window._last&&window._last.symbol)||symIn.value.trim();
+    if(!sym){
+      const a=await rfRemembered();
+      if(a){ sym=a.symbol; rfSetStyle(a.style||a.style_key); }
+    }
+    if(!sym){ rfTell(); return; }
+    symIn.value=sym;
+    refreshBtn.disabled=true;
+    refreshBtn.classList.remove("ok");
+    refreshBtn.classList.add("loading");
+    refreshBtn.setAttribute("aria-busy","true");
+    refreshBtn.title="در حالِ بروزرسانیِ «"+sym+"» با دیتای زنده…";
+    rfSay("در حالِ بروزرسانی…");
+    let ok=false;
+    try{
+      await run();
+      ok=true;
+      refreshBtn.classList.add("ok");
+      refreshBtn.title="بروزرسانی شد — «"+sym+"» با دیتای تازه دوباره تحلیل شد.";
+      rfSay("بروزرسانی شد");
+      setTimeout(()=>refreshBtn.classList.remove("ok"), 1900);
+    }catch(e){
+      rfSay("بروزرسانی ناموفق بود");
+    }finally{
+      refreshBtn.classList.remove("loading");
+      refreshBtn.disabled=false;
+      refreshBtn.removeAttribute("aria-busy");
+      if(!ok) refreshBtn.title=rfIdleTitle;
+    }
+  };
+}
+
+const btBtn = $("#bt"), btRes = $("#btresult");
+btBtn.onclick = runBacktest;
+
+// جهتِ مجاز (both/long/short)
+let btSide = "both";
+$("#btSide").addEventListener("click", e=>{
+  const b=e.target.closest("button"); if(!b) return;
+  document.querySelectorAll("#btSide button").forEach(x=>x.classList.remove("active"));
+  b.classList.add("active"); btSide=b.dataset.s;
+});
+
+// دکمه‌ی «بازه‌ی پیشنهادی»: بر اساسِ عمقِ walk و دیتای در دسترس،
+// حداقلِ تاریخِ معتبر را به کاربر پیشنهاد می‌دهد.
+const btSug = $("#btSuggest"), btSugHint = $("#btSugHint");
+btSug.onclick = async ()=>{
+  const sym=symIn.value.trim();
+  if(!sym){ symIn.focus(); btSugHint.textContent="اول یک نماد انتخاب کن."; return; }
+  const tfs=$("#btTfs").value.trim();
+  let walk=parseInt($("#btWalk").value,10); if(!walk||walk<100) walk=600;
+  btSug.disabled=true; const old=btSug.textContent; btSug.textContent="در حالِ محاسبه…";
+  try{
+    const qs=new URLSearchParams({symbol:sym, style, walk:String(walk)});
+    if(tfs) qs.set("tfs", tfs);
+    const r=await fetch(`/api/suggest-range?${qs.toString()}`);
+    const d=await r.json();
+    if(d.error){ btSugHint.className="btsughint"; btSugHint.textContent="خطا: "+d.error; return; }
+    // پیشنهاد را داخلِ کادرها بگذار + راهنمای قابلِ‌کلیک
+    $("#btFrom").value=d.suggested_from;
+    $("#btTo").value=d.suggested_to;
+    btSugHint.className="btsughint ok";
+    btSugHint.innerHTML=
+      `برای عمقِ پیمایشِ <b>${d.walk}</b> کندلِ <b>${d.ltf}</b> (${d.timeframes.join(" ")})، `+
+      `حداقلِ تاریخِ معتبر <b>${d.suggested_from}</b> است و تا <b>${d.suggested_to}</b> داده هست. `+
+      `کهن‌ترین دیتای در دسترس: ${d.data_from}. `+
+      `<span class="sugpick" id="pickFull">استفاده از کلِ دیتا (${d.data_from} → ${d.data_to})</span>`;
+    const pf=document.getElementById("pickFull");
+    if(pf) pf.onclick=()=>{ $("#btFrom").value=d.data_from; $("#btTo").value=d.data_to; };
+  }catch(err){ btSugHint.className="btsughint"; btSugHint.textContent="ارتباط با سرور ناموفق بود: "+err; }
+  finally{ btSug.disabled=false; btSug.textContent=old; }
+};
+
+async function runBacktest(){
+  const sym=symIn.value.trim();
+  if(!sym){symIn.focus();return;}
+  // خواندنِ انتخاب‌های کاربر
+  const from=$("#btFrom").value.trim();
+  const to=$("#btTo").value.trim();
+  const tfs=$("#btTfs").value.trim();
+  let walk=parseInt($("#btWalk").value,10); if(!walk||walk<100) walk=600;
+  btBtn.disabled=true;
+  const scope = (from||to) ? `بازه‌ی ${from||"…"} تا ${to||"…"}` : "کندل‌های اخیر";
+  const sideLbl = btSide==="long"?"فقط خرید":btSide==="short"?"فقط فروش":"هر دو جهت";
+  btRes.innerHTML=`<div class="status">در حالِ بک‌تستِ walk-forward — ${scope} · ${sideLbl}${tfs?` · تایم‌فریم ${tfs}`:""}… <span class="spin"></span></div>`;
+  try{
+    const qs=new URLSearchParams({symbol:sym, style, walk:String(walk), side:btSide});
+    if(from) qs.set("from", from);
+    if(to)   qs.set("to", to);
+    if(tfs)  qs.set("tfs", tfs);
+    const r=await fetch(`/api/backtest?${qs.toString()}`);
+    const d=await r.json();
+    if(d.error){btRes.innerHTML=`<div class="err">خطا در بک‌تستِ «${sym}»: ${d.error}</div>`;return;}
+    renderBacktest(d);
+  }catch(err){
+    btRes.innerHTML=`<div class="err">ارتباط با سرور ناموفق بود: ${err}</div>`;
+  }finally{btBtn.disabled=false;}
+}
+
+function renderBacktest(d){
+  const wr = d.winrate_pct;
+  const wrColor = wr>=55?"var(--good)":wr>=45?"var(--half)":"var(--bad)";
+  const expColor = d.expectancy_R>0?"var(--good)":"var(--bad)";
+  let rows="";
+  (d.trade_log||[]).slice(-15).reverse().forEach(t=>{
+    const win = t.result==="win";
+    rows+=`<tr>
+      <td>${t.time}</td>
+      <td>${t.dir}</td>
+      <td>${t.entry_type==="market"?"بازار":"لیمیت OTE"}</td>
+      <td>${t.entry}</td><td>${t.sl}</td><td>${t.tp}</td>
+      <td style="color:${win?'var(--good)':'var(--bad)'}">${win?"برد":"باخت"}</td>
+      <td style="color:${win?'var(--good)':'var(--bad)'}">${t.r>0?"+":""}${t.r}R</td>
+    </tr>`;
+  });
+  const empty = d.trades===0
+    ? `<div class="err" style="margin-top:8px">هیچ سیگنالِ واجدِ شرایطی در این بازه پیدا نشد — معیارها سخت‌گیرند (درجه‌ی خوب + RR≥۱:۲ + پرشدنِ ورود). این خودش یعنی اپ کورکورانه ورود نمی‌سازد.</div>`
+    : "";
+  // برچسبِ تنظیماتِ به‌کاررفته
+  const sideMap={both:"هر دو جهت",long:"فقط خرید",short:"فقط فروش"};
+  const sideTxt=sideMap[d.side_used]||"هر دو جهت";
+  const rangeTxt=(d.range_from||d.range_to)
+    ? `بازه: ${d.range_from||"ابتدای داده"} تا ${d.range_to||"انتهای داده"}`
+    : "بازه: کندل‌های اخیر (خودکار)";
+  // بنرِ کفایتِ نمونه (مورد ۲) — وقتی معامله کم است هشدار بده
+  let sampleBanner="";
+  if(d.sample && !d.sample.ok){
+    const cls = d.sample.level==="empty" ? "err" : "warn";
+    sampleBanner=`<div class="${cls}" style="margin:8px 0">⚠️ ${d.sample.msg}</div>`;
+  } else if(d.sample && d.sample.ok){
+    sampleBanner=`<div style="color:var(--good);font-size:12px;margin:6px 0">✔️ ${d.sample.msg}</div>`;
+  }
+  // هشدارِ سبکِ کم‌سیگنال برای این نماد (مورد ۴)
+  let styleWarn="";
+  if(d.style_advice){
+    styleWarn=`<div class="warn" style="margin:8px 0">💡 ${d.style_advice}</div>`;
+  }
+  // تفکیکِ وین‌ریت بر اساسِ نوعِ ورود و جهت (مورد ۳)
+  function segTable(obj, labelMap){
+    if(!obj||!Object.keys(obj).length) return "";
+    let r="";
+    for(const k of Object.keys(obj)){
+      const s=obj[k];
+      const c=s.winrate_pct>=55?"var(--good)":s.winrate_pct>=45?"var(--half)":"var(--bad)";
+      r+=`<tr><td>${labelMap[k]||k}</td><td>${s.trades}</td>
+        <td style="color:${c}">${s.winrate_pct}٪</td>
+        <td>${s.total_R>0?"+":""}${s.total_R}R</td></tr>`;
+    }
+    return r;
+  }
+  const entLbl={market:"ورودِ بازار",limit_ote:"لیمیت OTE"};
+  const dirLbl={"صعودی":"خرید (صعودی)","نزولی":"فروش (نزولی)"};
+  const entRows=segTable(d.by_entry_type, entLbl);
+  const dirRows=segTable(d.by_direction, dirLbl);
+  const breakdown = d.trades>0 ? `
+    <div class="btbreak">
+      <div class="btbcol">
+        <div class="btbtitle">تفکیک بر اساسِ نوعِ ورود</div>
+        <table class="bttable small"><thead><tr><th>نوع</th><th>تعداد</th><th>وین‌ریت</th><th>مجموع R</th></tr></thead>
+        <tbody>${entRows}</tbody></table>
+      </div>
+      <div class="btbcol">
+        <div class="btbtitle">تفکیک بر اساسِ جهت</div>
+        <table class="bttable small"><thead><tr><th>جهت</th><th>تعداد</th><th>وین‌ریت</th><th>مجموع R</th></tr></thead>
+        <tbody>${dirRows}</tbody></table>
+      </div>
+    </div>` : "";
+  btRes.innerHTML=`
+  <div class="plan" style="margin-top:14px">
+    <h3>🔬 نتیجه‌ی بک‌تست — ${d.symbol} · سبک ${d.style} · ${(d.timeframes||[]).join(" ")}</h3>
+    <p style="color:var(--muted);font-size:13px;margin:4px 0 4px">
+      این وین‌ریت از همان منطقِ ورودی‌ای می‌آید که اپ الان زنده پیشنهاد می‌دهد
+      (walk-forward، بدونِ نگاه به آینده). سیگنال‌های هم‌پوشان حذف شده‌اند.</p>
+    <p style="color:var(--muted);font-size:12px;margin:0 0 8px">🎯 ${sideTxt} · 📅 ${rangeTxt}</p>
+    ${sampleBanner}
+    ${styleWarn}
+    <div class="pgrid">
+      <div class="pcell"><span>تعدادِ معاملات</span><b>${d.trades}</b></div>
+      <div class="pcell"><span>برد / باخت</span><b>${d.wins} / ${d.losses}</b></div>
+      <div class="pcell"><span>وین‌ریت</span><b style="color:${wrColor}">${wr}٪</b></div>
+      <div class="pcell"><span>مجموعِ R</span><b>${d.total_R>0?"+":""}${d.total_R}</b></div>
+      <div class="pcell"><span>میانگینِ R</span><b>${d.avg_R_per_trade}</b></div>
+      <div class="pcell"><span>اکسپکتنسی</span><b style="color:${expColor}">${d.expectancy_R}R</b></div>
+    </div>
+    ${breakdown}
+    ${empty}
+    ${d.trades>0?`<table class="bttable"><thead><tr>
+      <th>زمانِ سیگنال</th><th>جهت</th><th>نوعِ ورود</th><th>ورود</th><th>استاپ</th><th>هدف</th><th>نتیجه</th><th>R</th>
+    </tr></thead><tbody>${rows}</tbody></table>`:""}
+  </div>`;
+}
+
+const dirClass = d => d==="صعودی"?"up":d==="نزولی"?"down":"flat";
+const gradeColor = g => ({"A+":"var(--grade-ap)","A":"var(--grade-a)","B":"var(--grade-b)","C":"var(--grade-c)"}[g]||"var(--grade-no)");
+const stColor = s => s==="✓"?"var(--good)":s==="◐"?"var(--half)":s==="✗"?"var(--bad)":"var(--muted)";
+
+// ⏱️ درخواستِ JSON با «ساعتِ زنده» + سقفِ زمانی.
+// چرا: کلیکِ «تحلیل کن» چهار تایم‌فریم + تقویم را می‌خواند؛ اگر این میانه یک
+// منبع کند/قطع باشد، کاربر پشتِ یک اسپینرِ بی‌پیام می‌مانْد و نمی‌دانست «در
+// جریان است» یا «مرده» — دقیقاً حسِ «زمانِ طولانی بدونِ خروجی و نتیجه».
+// حالا ثانیه‌ها شمرده می‌شود و پس از سقف، پیامِ صریح با راهِ ادامه می‌آید.
+const ANALYZE_TIMEOUT_MS=180000;
+async function jfetch(url, ms, onTick){
+  const t0=Date.now();
+  const AC=(typeof AbortController==="function")?new AbortController():null;
+  const tick=onTick?setInterval(()=>onTick(Math.floor((Date.now()-t0)/1000)),500):null;
+  const to=AC?setTimeout(()=>AC.abort(),ms):null;
+  if(onTick) onTick(0);
+  try{ const r=await fetch(url, AC?{signal:AC.signal}:undefined); return await r.json(); }
+  finally{ if(tick)clearInterval(tick); if(to)clearTimeout(to); }
+}
+
+async function run(){
+  const sym=symIn.value.trim();
+  if(!sym){symIn.focus();return;}
+  goBtn.disabled=true;
+  const paint=s=>{
+    const hint = s>=15 ? " — شبکه کند است؛ همان چهار تایم‌فریم موازی خوانده می‌شوند" : "";
+    res.innerHTML=`<div class="status">در حالِ تحلیلِ دیتای زنده… ${s} ثانیه${hint} <span class="spin"></span></div>`;
+  };
+  try{
+    const d=await jfetch(`/api/analyze?symbol=${encodeURIComponent(sym)}&style=${style}`,
+                         ANALYZE_TIMEOUT_MS, paint);
+    if(d.error){res.innerHTML=`<div class="err">خطا در تحلیلِ «${sym}»: ${d.error}</div>`;return;}
+    render(d);
+    showLiveChart(d.symbol);
+  }catch(err){
+    res.innerHTML = (err && err.name==="AbortError")
+      ? `<div class="err">تحلیل بیش از ${Math.round(ANALYZE_TIMEOUT_MS/1000)} ثانیه طول کشید و قطع شد — یعنی شبکه‌ی همین لحظه کند است. یک‌بارِ دیگر بزن؛ داده‌ی خوانده‌شده حالا کش شده و همان کلیک دوم سریع است.</div>`
+      : `<div class="err">ارتباط با سرور ناموفق بود: ${err}</div>`;
+  }finally{goBtn.disabled=false;}
+}
+
+function render(d){
+  const pct = d.max_score ? Math.round(d.score/d.max_score*100) : 0;
+  const rows = d.checklist.map(c=>{
+    const on = (c.status==="✓"||c.status==="◐");
+    return `<tr class="${on?'on':''}">
+      <td class="st" style="color:${stColor(c.status)}">${c.status}</td>
+      <td><div>${c.name}</div><div class="det">${c.detail||""}</div></td>
+      <td class="pts">${c.got}/${c.weight}</td>
+    </tr>`;
+  }).join("");
+
+  // بلوکِ تازگیِ داده + باز/بسته بودنِ بازار — پیش از پلن خوانده می‌شود تا پلنِ
+  // بازارِ بسته اشتباه به‌شکلِ سیگنالِ ورود دیده نشود.
+  let dataHtml="";
+  const dd = d.data||{};
+  if(dd.last_bar_utc){
+    const st=dd.state;
+    const cls = st==="open"?"data-ok" : st==="closed"?"data-closed" : "data-warn";
+    const head = st==="open"?"🟢 داده تازه" : st==="closed"?"🔴 بازار بسته است" : "🟡 داده عقب‌تر از حدِ معمول";
+    dataHtml=`<div class="datanote ${cls}">
+      <b>${head}</b> — آخرین کندلِ بسته: <b>${dd.last_bar_utc} UTC</b> (${dd.tf}) · سنِ داده: <b>${dd.age_human}</b> · نیویورک: ${dd.et_now}
+      ${st!=="open"?`<div class="datanote-why">${dd.reason||""} — پس این تحلیل «آماده‌سازی» است، نه سیگنالِ ورود؛ پلنِ زیر برای سشنِ بعدی است.</div>`:""}
+    </div>`;
+  }
+
+  // بلوکِ SMT دایورجنس — بالای بلوکِ ریسک، چون زمینه‌ی حرفه‌ایِ جفت‌های همبسته است
+  const smtBlk = d.smt || null;
+  let smtHtml = "";
+  if (smtBlk && smtBlk.checked) {
+    const c = smtBlk.checked;
+    const cls = c.diverged ? (c.sweep ? "data-ok" : "data-warn") : "data-closed";
+    const ico = c.diverged ? (c.sweep ? "🟢" : "🟡") : "⚪";
+    smtHtml = `<div class="datanote ${cls}">
+      <b>${ico} SMT دایورجنس (${c.symbol} ↔ ${c.partner})</b> — ${c.reason}
+      ${c.diverged && !c.sweep ? `<div class="datanote-why">سوئیپِ لیکوئیدیتی روی این نماد تازه نیست — طبقِ مدل، ورود را روی نمادِ سوئیپ‌کننده (${c.symbol === c.symbol ? c.partner : c.symbol}) بگیر.</div>` : ""}
+    </div>`;
+  } else if (smtBlk && smtBlk.available === false) {
+    smtHtml = `<div class="datanote data-closed"><b>⚪ SMT</b> — این نماد در جدولِ جفت‌های همبسته نیست؛ ستاپِ SMT برایش ارزیابی نمی‌شود.</div>`;
+  }
+
+  // بلوکِ ریسک: سقفِ ضررِ روزانه + هشدارِ تمرکز/هم‌بستگی — پیش از پلن خوانده
+  // می‌شود تا پلنی که با سقفِ روزانه مسدود شده اشتباه به‌شکلِ سیگنالِ ورود دیده نشود.
+  const rk = d.risk || null;
+  let riskHtml="";
+  if(rk){
+    const warns = rk.warnings || [];
+    const day = rk.daily || {};
+    // ضرایبِ هم‌بستگیِ به‌کاررفته — کاربر باید عددی که بر اساسش هشدار داده
+    // شده را *ببیند* (BTC↔ETH ‎+۰٫۸۵، طلا↔دلارِکانادا ‎−۰٫۵۵، …).
+    const corr = rk.correlation || {};
+    const cp = corr.coef_pairs || [];
+    const eff = corr.effective || {};
+    const coefLine = cp.length
+      ? `<div class="datanote-why">🧮 ضرایبِ هم‌بستگی: `
+        + cp.map(x=>`${x.a}↔${x.b} ${x.coef>0?"+":""}${x.coef}`).join(" · ")
+        + (eff.multiple>1?` — ریسکِ مؤثرِ این ورود ≈${eff.multiple}× یک پوزیشن`:"")
+        + (eff.offset>0?` — ‎${eff.offset} از ریسک به‌خاطرِ هجِ هم‌بسته هدر می‌رود`:"")
+        + `</div>`
+      : "";
+    if(warns.length){
+      riskHtml = `<div class="riskwarn${rk.blocked?"":" caution"}">
+        <b>${rk.blocked?"⛔ محدودیتِ ریسک — ورودِ جدید مجاز نیست":"⚠ هشدارِ ریسک"}</b>
+        <ul>${warns.map(w=>`<li>${w}</li>`).join("")}</ul>${coefLine}
+      </div>`;
+    } else if(day.closed_today || day.open_count){
+      riskHtml = `<div class="riskwarn quiet">
+        <b>💰 وضعیتِ ریسکِ امروز</b> — ضررِ محقق‌شده: <b>${day.realized_pct}٪</b>
+        (${day.realized_r}R · ${day.closed_today} معامله) · باقی‌مانده تا سقف: <b>${day.remaining_pct}٪</b>
+        · ریسکِ باز: <b>${day.open_risk_pct}٪</b> از سقفِ ${day.open_risk_limit_pct}٪ (${day.open_count} پوزیشن)
+      </div>`;
+    }
+  }
+
+  let planHtml="";
+  if(d.plan){
+    const p=d.plan;
+    const closed = (p.executable_now===false);
+    const et = p.entry_type==="market"
+      ? (closed
+          ? `<span class="badge g-red">ورودِ بازار — ولی الان قابلِ اجرا نیست (بازار بسته/داده کهنه)</span>`
+          : `<span class="badge g-green">ورودِ بازار (الان)</span>`)
+      : (closed
+          ? `<span class="badge g-amber">لیمیت در OTE — منتظرِ پولبک</span><span class="badge g-red">الان قابلِ اجرا نیست (بازار بسته)</span>`
+          : `<span class="badge g-amber">لیمیت در OTE — منتظرِ پولبک</span>`);
+    // مهرِ تاییدِ ورودِ اختیاری (مدلِ عرضه/تقاضا: نمره>۷۰٪ + نفوذِ ۳۰٪ + تاییدِ چرخشِ LTF)
+    const es = d.entry_stamp || {};
+    let stampHtml = "";
+    if(es.stamped){
+      stampHtml = `<div class="stamp stamp-ok" title="همه‌ی شرایطِ مدلِ عرضه/تقاضا برقرار است — مهرِ تاییدِ ورودِ اختیاری.">
+        ✅ مهرِ تاییدِ ورود (نمره ${es.score_pct}٪ · نفوذِ زون ${es.penetration_pct}٪)
+        <div class="stamp-why">${(es.reasons||[]).join(" · ")}</div></div>`;
+    } else {
+      stampHtml = `<div class="stamp stamp-no" title="یک یا چند شرطِ مدلِ عرضه/تقاضا برقرار نیست — ورود توصیه نمی‌شود.">
+        ⛔ بدونِ مهرِ تایید — شرایطِ ورود کامل نیست
+        <div class="stamp-why">${(es.reasons||[]).join(" · ")}</div></div>`;
+    }
+    // سایزِ پوزیشن برای همین پلن — از سرمایه/درصدِ ریسکِ پنلِ بالای صفحه
+    const sz = (d.risk && d.risk.size) || {};
+    let sizeHtml = "";
+    if(sz.ok){
+      const ccy = sz.account_ccy || "USD";
+      const szNotes = (sz.notes||[]).length
+        ? `<div class="sizenote">ℹ ${(sz.notes||[]).join(" · ")}</div>` : "";
+      sizeHtml = `
+      <div class="pgrid" style="margin-top:10px">
+        <div class="pcell size"><div class="k">سایزِ پوزیشن${sz.approx?" (تقریبی — تنظیم‌پذیر)":""}</div><div class="v">${sz.size} ${sz.unit_fa}</div></div>
+        <div class="pcell"><div class="k">ریسکِ این معامله</div><div class="v">${sz.actual_risk_amount} ${ccy}</div></div>
+        <div class="pcell"><div class="k">سود در هدف (۱:${p.rr})</div><div class="v">${sz.reward_amount!=null?sz.reward_amount:"—"} ${ccy}</div></div>
+        <div class="pcell"><div class="k">ارزشِ هر پوینت / فاصله‌ی استاپ</div><div class="v">${sz.value_per_point} ${ccy} · ${sz.stop_pips}p</div></div>
+      </div>${szNotes}`;
+    } else if(sz.reason){
+      sizeHtml = `<div class="sizenote">💰 سایزِ پوزیشن محاسبه نشد: ${sz.reason}</div>`;
+    }
+    planHtml=`<div class="plan">
+      <h3>📌 پلنِ پیشنهادی — تایم‌فریمِ ورود: <b>${d.entry_tf}</b> · سبک: ${d.style} &nbsp; ${et}</h3>
+      ${stampHtml}
+      <div class="pgrid">
+        <div class="pcell"><div class="k">جهت</div><div class="v">${p.direction}</div></div>
+        <div class="pcell"><div class="k">ورود</div><div class="v">${fmt(p.entry)}</div></div>
+        <div class="pcell"><div class="k">حدِ ضرر</div><div class="v">${fmt(p.sl)}</div></div>
+        <div class="pcell rr"><div class="k">ریسک به ریوارد</div><div class="v">۱:${p.rr}</div></div>
+      </div>
+      <div class="pgrid" style="margin-top:10px">
+        <div class="pcell"><div class="k">هدف (حدِ سود · ۲ تا ۳R)</div><div class="v">${fmt(p.tp)}</div></div>
+        ${p.liq_target && p.rr_to_liq && p.rr_to_liq>p.rr ? `<div class="pcell"><div class="k">کششِ رانر (لیکوئیدیتیِ بعدی)</div><div class="v">${fmt(p.liq_target)} <span style="color:var(--muted);font-size:12px">۱:${p.rr_to_liq}</span></div></div>` : ""}
+      </div>
+      ${sizeHtml}
+    </div>`;
+  }
+
+  // بلوکِ ناحیه‌ی OTE (۰.۶۲–۰.۷۹ فیب)
+  let oteHtml="";
+  if(d.ote){
+    const o=d.ote;
+    const inside=o.inside;
+    const cls=inside?"ote-in":"ote-out";
+    const icon=inside?"✅":"⛔";
+    const head=inside
+      ? "قیمت داخلِ ناحیه‌ی موفقِ ورود (OTE) است — ورودِ باکیفیت"
+      : "قیمت بیرونِ ناحیه‌ی موفق است — بهتر است منتظرِ پولبک بمانی";
+    oteHtml=`<div class="ote ${cls}">
+      <div class="ote-head">${icon} ناحیه‌ی OTE (۰.۶۲ تا ۰.۷۹ فیب)</div>
+      <div class="ote-body">${head}</div>
+      <div class="ote-nums">
+        <span>محدوده‌ی موفقِ ورود: <b>${fmt(o.low)} – ${fmt(o.high)}</b></span>
+        <span>قیمتِ فعلی: <b>${fmt(d.last_price)}</b> (فیبِ ${o.fib_pct}٪)</span>
+      </div>
+      <button class="alarm-btn" id="alarmBtn" title="روی این ناحیه‌ی OTE آلارم بگذار؛ هر ۹۰ ثانیه بررسی می‌شود و وقتی قیمت واردِ ناحیه شد خبر می‌دهد.">🔔 آلارم روی این ناحیه بگذار</button>
+      <span id="alarmMsg" class="jmsg"></span>
+    </div>`;
+  }
+
+  let badges="";
+  if(d.killzone){badges+=`<span class="badge kz">🕐 ${kzFa(d.killzone)}</span>`;}
+  if(d.macro && d.macro.gate){
+    const g=d.macro.gate.toLowerCase();
+    const cls=g.includes("red")?"g-red":g.includes("amber")?"g-amber":"g-green";
+    badges+=`<span class="badge ${cls}">گیتِ خبر: ${gateFa(d.macro.gate)}</span>`;
+  }
+
+  let upcoming="";
+  if(d.macro && d.macro.upcoming && d.macro.upcoming.length){
+    upcoming=`<div class="upcoming">⚠️ اخبارِ مهمِ پیشِ رو (۴۸س): ${d.macro.upcoming.join(" · ")}</div>`;
+  }
+
+  const biasStrip = d.bias_by_tf ? Object.entries(d.bias_by_tf).map(([k,v])=>`${k}=${v}`).join(" · ") : "";
+
+  // کارتِ پنجره‌ی سیلوربولت نیویورک — فقط در حالتِ sb_ny نمایش داده می‌شود
+  let sbHtml="";
+  if(d.is_sb_mode){
+    const w=d.sb_window||{};
+    const open=w.in_window;
+    const stateTxt = open ? "🟢 پنجره باز است — تا بسته‌شدن:" : "🟠 پنجره بسته است — تا بازشدنِ ۰۹:۰۰ ET:";
+    const stateCls = open ? "sb-open" : "sb-shut";
+    const nowEt = (w.et_hour!=null) ? `${String(w.et_hour).padStart(2,"0")}:${String(w.et_minute||0).padStart(2,"0")} ET` : "—";
+    const gate = open
+      ? `<div style="color:#22d3a5;font-size:13px;margin-top:6px">✅ الان داخلِ پنجره‌ای — شرایطِ ورودِ زیر را روی چارتِ ۱ دقیقه دنبال کن.</div>`
+      : `<div style="color:#f59e0b;font-size:13px;margin-top:6px">⏳ خارج از پنجره — سیگنالِ ورود فقط بینِ ۰۹:۰۰ تا ۱۱:۰۰ ET معتبر است. تایمرِ بالا تا بازشدن می‌شمارد.</div>`;
+    sbHtml=`<div class="sbwin">
+      <h3>🎯 سیلوربولت نیویورک — استراتژیِ ۱ دقیقه (پنجره‌ی ۰۹:۰۰–۱۱:۰۰ ET)</h3>
+      <div id="sbState" class="sb-state ${stateCls}">${stateTxt}</div>
+      <div class="sb-timer" id="sbTimer">—</div>
+      <div style="color:var(--muted);font-size:12px;margin-top:4px">ساعتِ فعلیِ نیویورک: <b>${nowEt}</b></div>
+      ${gate}
+      <ol class="sb-steps">
+        <li><b>بایاس (قبل از ۰۹:۰۰):</b> جهتِ روزت را از ۱۵m/۵m بگیر؛ فقط هم‌جهت معامله کن. سقف/کفِ سشنِ آسیا و لندن را به‌عنوانِ لیکوئیدیتیِ هدف علامت بزن.</li>
+        <li><b>سوئیپ (جوداس):</b> صبر کن قیمت یک لیکوئیدیتیِ نزدیک را بزند (کفِ ساعتِ قبل برای خرید، سقف برای فروش) — تله‌ی استاپِ خردها.</li>
+        <li><b>ام‌اس‌اس + دیسپلیسمنت:</b> بلافاصله بعدِ سوئیپ، یک کندلِ پرقدرت باید ساختارِ ۱m را خلافِ سوئیپ با <b>کلوز</b> بشکند (نه فتیله).</li>
+        <li><b>فیرولیوگپ:</b> همان کندلِ دیسپلیسمنت یک FVGِ ۳کندلی می‌سازد — ناحیه‌ی ورودِ تو.</li>
+        <li><b>ورود/استاپ/هدف:</b> لیمیت روی لبه‌ی FVG · استاپ پشتِ فتیله‌ی سوئیپ · هدف لیکوئیدیتیِ مقابل (سقف/کفِ آسیا/لندن)، با RR ۱:۲ تا ۱:۳.</li>
+      </ol>
+    </div>`;
+  }
+
+  res.innerHTML=`<div class="card">
+    <div class="rhead">
+      <div class="sym">${d.symbol}</div>
+      <span class="dir ${dirClass(d.direction)}">${d.direction}</span>
+      <span class="price" title="کلوزِ آخرین کندلِ بستهٔ تایم‌فریمِ ورود (نه قیمتِ لحظه‌ایِ کندلِ ناقص).">قیمت: ${fmt(d.last_price)}</span>
+      <div class="spacer"></div>
+      <div class="grade" style="background:${gradeColor(d.grade)}">${d.grade}</div>
+    </div>
+    <div class="metaline">
+      <span>سبک: <b>${d.style}</b></span>
+      <span>تایم‌فریم‌ها: <b>${(d.timeframes||[]).join(" ، ")}</b></span>
+      ${biasStrip?`<span>بایاس: <b>${biasStrip}</b></span>`:""}
+    </div>
+    ${dataHtml}
+    ${smtHtml}
+    ${riskHtml}
+    <div class="scorebar"><div class="scorefill" style="width:${pct}%;background:${gradeColor(d.grade)}"></div></div>
+    <div class="scoretxt">امتیاز: <b style="color:var(--txt)">${d.score}</b> از ${d.max_score} (${pct}٪)</div>
+    <table>
+      <thead><tr><th>وضعیت</th><th>معیار / جزئیات</th><th>امتیاز</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${planHtml}
+    ${sbHtml}
+    ${oteHtml}
+    <div style="margin-top:14px">${badges}</div>
+    ${upcoming}
+    <div class="verdict">${d.verdict||""}</div>
+    <div class="jrnrow">
+      <button id="jbtn" class="jbtn" ${d.plan?"":"disabled"} title="این ستاپ را با پلنِ عددی‌اش در ژورنالِ معاملات ثبت کن. تا وقتی پلنِ معتبری نباشد غیرفعال است.">💾 ثبت در ژورنال</button>
+      <span id="jmsg" class="jmsg"></span>
+    </div>
+  </div>`;
+  window._last = d;
+  if(refreshBtn) refreshBtn.disabled = false;
+  const jb = document.getElementById("jbtn");
+  if(jb) jb.onclick = saveJournal;
+  const ab = document.getElementById("alarmBtn");
+  if(ab) ab.onclick = setOteAlarm;
+  // تایمرِ زنده‌ی سیلوربولت را استارت بزن (اگر در این حالت هستیم)
+  if(d.is_sb_mode && d.sb_window){ startSbTimer(d.sb_window); }
+  else if(_sbTimer){ clearInterval(_sbTimer); _sbTimer=null; }
+  // چراغ‌های ستاپ‌ها بعد از هر تحلیل تازه شوند (اگر پنل باز است)
+  renderSetups(d.setup_statuses);
+  // چیپِ سنِ داده فوراً تازه شود (بدونِ انتظارِ ۳۰ ثانیه‌ی تایمر)
+  loadData();
+}
+
+// ── پنلِ ستاپ‌ها: همیشه بالای صفحه، مستقل از کارتِ نتیجه ──────────────
+// چهار ستاپ: سه ستاپِ بک‌تست‌شده (walk=1200–1500، جمعِ ۲۴ معامله: WR~۶۶٪، totalR +6.49)
+// + ستاپِ چهارم از ویدیوی Smart Risk 2026 (سوئیپِ سشن + SMT دایورجنس + IFVG/Breaker).
+// آمارِ ستاپ ۴ هنوز ادعایی ندارد (سورسِ عددیِ مستقل نداریم) — صادقانه «—» است.
+const scalpSetups=[
+  {t:"۱) پولبک به OTE در امتداد روند (ستاپِ اصلی)",
+   wr:"۶۲–۷۰٪", r:"+4.5R (ETH · ۱۰ معامله)",
+   path:["بایاس: روندِ 1h را بخوان (HH/HL صعودی یا LH/LL نزولی) — فقط هم‌جهت معامله کن",
+         "صبر کن قیمت به ناحیه‌ی OTE (۰.۶۲–۰.۷۹ فیبِ آخرین پای ایمپالس) پولبک بزند",
+         "روی 5m منتظر سوئیپِ لیکوئیدیتی بمان (فتیله زیرِ کف/بالای سقفِ قبلی + کلوزِ برگشتی)",
+         "چاک/MSS هم‌جهت روی 15m تأیید شود + کندلِ دیسپلیسمنت (بدنه ≥ ۱.۵× میانگین)",
+         "ورود: لیمیت روی لبه‌ی FVG یا گلدن‌پاکتِ ۰.۷۰۵ · استاپ پشتِ فتیله‌ی سوئیپ",
+         "هدف: لیکوئیدیتیِ مقابل با RR حداقل ۱:۲ (سقفِ ۳R)"],
+   note:"بیشترین تعداد سیگنال و پایدارترین آمار — ستاپِ پیش‌فرضِ اسکلپ."},
+  {t:"۲) سوئیپِ سشن → برگشت از زونِ HTF (سبکِ طلای Smart Risk)",
+   wr:"۶۷٪ (XAU)", r:"+1.6R (طلا · ۶ معامله)",
+   path:["روی 30m زونِ عرضه/تقاضا (اردربلاک/FVGِ مبدأِ حرکتِ ایمپالسی) را علامت بزن — حداکثر ۳ کندل",
+         "صبر کن قیمت وارد زون شود و حداقل ۳۰٪ آن را میتیگیت کند (اولین لمسِ سطحی = نه)",
+         "برو روی 5m؛ سوئیپِ لیکوئیدیتیِ خلافِ جهتِ موردنظرت را تماشا کن (جوداس)",
+         "MSS خلافِ سوئیپ با کلوزِ کندل تأیید شود",
+         "ورود: لبه‌ی FVG یا اردربلاکِ 5m · استاپ پشتِ فتیله‌ی سوئیپ",
+         "هدف: لیکوئیدیتیِ مقابل (EQH/EQL یا سقف/کفِ سشن) با RR ۱:۲ تا ۱:۳"],
+   note:"بهترین ستاپ برای طلا و جفت‌های پرنوسانِ سشنِ نیویورک."},
+  {t:"۳) ادامه‌دهنده پس از BOS (هم‌جهت با روندِ تازه‌شکسته)",
+   wr:"۸۰٪ گریدِ B (BTC)", r:"+1.8R (BTC · ۵ معامله)",
+   path:["روی 15m یک BOS تازه با کندلِ دیسپلیسمنت‌دار شناسایی کن (نه شکستِ بی‌جان)",
+         "منتظر پولبکِ قیمت به مبدأِ حرکتِ شکست بمان (اردربلاکِ سازنده‌ی BOS)",
+         "روی 5m ساختارِ کوچک هم‌جهت بسازد: HL بالاتر برای خرید / LH پایین‌تر برای فروش",
+         "FVGِ داخلِ حرکتِ شکست پر نشده باشد = هدف و ورودِ هم‌زمان",
+         "ورود: لیمیت در اردربلاک/FVG · استاپ زیرِ مبدأِ حرکت (پشتِ ساختار، نه درصدِ ثابت)",
+         "هدف: اولین لیکوئیدیتیِ مقابل با کفِ RR ۱:۲"],
+   note:"وین‌ریتِ بالا اما سیگنالِ کمتر — صبورانه، فقط BOSهای دیسپلیسمنت‌دار."},
+  {t:"۴) سوئیپ + SMT دایورجنس بین جفت‌های همبسته (مدلِ Smart Risk 2026)",
+   wr:"—", r:"— (آمارِ مستقل هنوز)",
+   path:["در ساعتِ درستِ سشن (اوپنِ لندن/نیویورک — نه وسطِ رِنجِ آرام)، یکی از دو جفتِ همبسته به زونِ HTF (FVGِ پرنشده یا زونِ عرضه/تقاضای سشنِ قبل) می‌رسد یا لیکوئیدیتیِ سشنِ قبلی را سوئیپ می‌کند",
+         "SMT را بین دو جفتِ درست ببین (EURUSD↔GBPUSD · SPX500↔NAS100 · XAUUSD↔XAGUSD · AUDUSD↔NZDUSD): یکی سقفِ بالاتر/کفِ پایین‌تر می‌زند و لیکوئیدیتی را می‌گیرد، دیگری رهایش می‌کند",
+         "برو روی 1m؛ ورود: IFVG — فیرولیوگپی که خلافِ جهتِ سوئیپ نقض و معکوس شده، به‌عنوانِ مقاومت/حمایتِ جدید. روی 5m: بریکر یا میدیگشن بلاکِ بعد از حرکتِ دستکاری",
+         "تأییدِ MSS هم‌جهت، در همان تایم‌فریمِ ورود، بعد از سوئیپ",
+         "ورود: کلوزِ کندلِ بعد از IFVG، یا لیمیت روی مرزِ دورِ IFVG / پایینِ بریکر · استاپ پشتِ فتیله‌ی سوئیپ",
+         "هدف: نزدیک‌ترین لیکوئیدیتیِ مقابل روی تایم‌فریمِ ورود، یا میدرِنج/کفِ سشنِ آسیا؛ یا RR ثابتِ ۲.۵–۳R. ورود را روی نمادِ **سوئیپ‌کننده** بگیر، نه هر دو"],
+   note:"چراغِ سبز یعنی دایورجنس + سوئیپ با هم؛ اگر فقط دایورجنس باشد زرد است (ورود روی نمادِ سوئیپ‌کننده). ستاپِ مکملِ سه ستاپِ قبل — نه جایگزینشان."}
+];
+function renderSetups(statuses){
+  const list=document.getElementById("spList");
+  const state=document.getElementById("spState");
+  if(!list) return;
+  const st = statuses || [null,null,null,null];
+  if(state){
+    if(statuses){
+      state.textContent=`— آخرین تحلیل: ${(window._last&&window._last.symbol)||""} · ${new Date().toLocaleTimeString("fa-IR")}`;
+    }else{
+      state.textContent="— اول یک تحلیل بگیر تا چراغ‌ها روشن شوند";
+    }
+  }
+  const lamp = s => s==="green" ? `<span class="lamp g">🟢 تأییدِ قوی</span>`
+                : s==="yellow" ? `<span class="lamp y">🟡 منتظرِ شرایط</span>`
+                : s==="red" ? `<span class="lamp r">🔴 شرایط نیست</span>`
+                : `<span class="lamp y">⚪ بی‌داده — تحلیل بگیر</span>`;
+  list.innerHTML = scalpSetups.map((s,i)=>`
+    <div class="acc-item${st[i]&&st[i].state==="green"?" open":""}">
+      <button class="acc-head" data-i="${i}">
+        <span>${s.t}</span>${lamp(st[i]&&st[i].state)}<span class="arr">▼</span>
+      </button>
+      <div class="acc-body">
+        ${st[i] ? `<div class="acc-why">${st[i].why||""}</div>` : ""}
+        <div class="acc-path"><b>مسیرِ ستاپ:</b><br>${s.path.map((p,j)=>`${j+1}. ${p}`).join("<br>")}</div>
+        <div class="acc-stats"><span>📊 وین‌ریتِ بک‌تست: <b>${s.wr}</b></span><span>💰 بازده: <b>${s.r}</b></span></div>
+        <div style="margin-top:8px;color:var(--muted);font-size:12px">💡 ${s.note}</div>
+      </div>
+    </div>`).join("");
+  list.querySelectorAll(".acc-head").forEach(h=>{
+    h.onclick=()=>{
+      h.closest(".acc-item").classList.toggle("open");
+    };
+  });
+}
+// دکمه‌ی تاگلِ پنلِ ستاپ‌ها
+const setupsBtn=document.getElementById("setupsBtn"), setupsPanel=document.getElementById("setupsPanel");
+if(setupsBtn && setupsPanel){
+  setupsBtn.onclick=()=>{
+    const open=setupsPanel.classList.toggle("open");
+    setupsBtn.classList.toggle("active",open);
+    if(open) renderSetups(window._last && window._last.setup_statuses);
+  };
+}
+// رندرِ اولیه: سه ستاپ با چراغِ «بی‌داده» از همان ابتدا دیده شوند
+renderSetups(null);
+
+// دکمه‌ی فاندمنتال — صفحه‌ی جداگانه‌ی اخبارِ اقتصادی را در تبِ نو باز می‌کند
+// ⚠ تورِ ایمنیِ لازم (شکایتِ واقعیِ کاربر: «کلیدا از کار افتادن — مثلاً فاندمنتال»):
+// در نصبِ PWA (حالتِ display-mode: standalone) و با پاپ‌آپ‌بلاکر، `window.open`
+// **NULL** برمی‌گرداند و کلید بی‌صدا می‌مُرد (نه تبی، نه پیامی). پس اگر تبِ نو
+// نیامد، همان تب به صفحه‌ی فاندمنتال می‌رود — «کلیدِ بی‌واکنش» ممنوع.
+const fundBtn=document.getElementById("fundBtn");
+if(fundBtn){
+  fundBtn.onclick=()=>{
+    let tab=null;
+    try{ tab=window.open("/fundamental","_blank","noopener"); }catch(e){ tab=null; }
+    if(!tab) location.assign("/fundamental");
+  };
+}
+
+// دکمه‌ی 📲 نصب روی دستگاه — آدرسِ قابل‌اشتراک + راهنمای هر پلتفرم + رویدادِ نصب
+(function(){
+  const ib=document.getElementById("installBtn");
+  if(!ib) return;
+  let deferredPrompt=null, installed=false;
+  window.addEventListener("beforeinstallprompt", (e)=>{
+    e.preventDefault(); deferredPrompt=e;
+    if(installed) return;
+    ib.classList.add("pulsing");
+    ib.title="✅ مرورگرِ این دستگاه نصبِ مستقیم را پیشنهاد می‌دهد — کلیک کن و «نصب» را بزن.";
+  });
+  window.addEventListener("appinstalled", ()=>{
+    installed=true; deferredPrompt=null; ib.classList.remove("pulsing");
+  });
+  ib.onclick=async ()=>{
+    if(deferredPrompt && !installed){
+      try{
+        deferredPrompt.prompt();
+        const res=await deferredPrompt.userChoice;
+        if(res && res.outcome==="accepted"){ installed=true; ib.classList.remove("pulsing"); return; }
+        // رد کرد → پنجرهٔ راهنما را نشان بده (کاربر شاید توضیح می‌خواهد)
+      }catch(e){}
+    }
+    let base="";
+    try{
+      const r=await fetch("/api/install",{cache:"no-store"});
+      const j=await r.json();
+      if(j && j.lan && j.lan.url) base=j.lan.url;
+    }catch(e){}
+    const own=base || location.origin;
+    const open=own.replace(/\/$/, "") + "/";
+    const sw=("serviceWorker" in navigator);
+    const swTxt=sw ? "✅ سرویس‌ورکر ثبت شده — آفلاین هم باز می‌شود" : "⚠ سرویس‌ورکر در این مرورگر نیست — نصبِ PWA ممکن نیست";
+    openModal("📲 نصبِ pipfound روی دستگاه", `
+      <div class="inst-h">آدرسِ این اپ</div>
+      <div class="inst-url" id="instUrl">${open}</div>
+      <div class="inst-row">
+        <button class="inst-cp" id="instCopy">📋 کپیِ آدرس</button>
+        <span class="inst-note">این آدرس را در مرورگرِ هر دستگاهی که به همین شبکه است باز کن — روی گوشی از طریقِ Wi-Fiِ خانه.</span>
+      </div>
+      <div class="inst-h">راهنمای هر دستگاه</div>
+      <div class="inst-grid">
+        <div class="inst-card"><div class="t">🤖 اندروید (کروم)</div><ol><li>آدرس را باز کن</li><li>منوی ⋮ → «Add to Home screen / نصب برنامه»</li><li>«Install / نصب» را بزن</li></ol></div>
+        <div class="inst-card"><div class="t">🍎 آیفون/آیپد (سافاری)</div><ol><li>آدرس را در سافاری باز کن</li><li>دکمهٔ اشتراک ⬆ → «Add to Home Screen»</li><li>«Add» را بزن</li></ol></div>
+        <div class="inst-card"><div class="t">💻 ویندوز (کروم/اج)</div><ol><li>آدرس را باز کن</li><li>آیکونِ ⊕ در نوارِ آدرس (یا منوی ⋯ → Apps)</li><li>«Install» را بزن</li></ol></div>
+        <div class="inst-card"><div class="t">💻 مک (کروم/اج)</div><ol><li>آدرس را باز کن</li><li>آیکونِ ⊕ در نوارِ آدرس</li><li>«Install» — اپ جدا از مرورگر باز می‌شود</li></ol></div>
+      </div>
+      <div class="inst-status">${swTxt}${(deferredPrompt||installed)?" · وضعیتِ نصبِ این مرورگر: "+(installed?"نصب شده":"آمادهٔ نصبِ مستقیم"):""}</div>
+      <div class="inst-warn">نکتهٔ سافاریِ آیفون: اگر این سرور با HTTPSِ خودگواهی‌شده باز شده، اول یک بار هشدارِ گواهی را بپذیر و صفحه را کامل باز کن — بعد «Add to Home Screen» کار می‌کند.</div>
+    `);
+    const cp=document.getElementById("instCopy");
+    if(cp){ cp.onclick=async ()=>{
+      try{ await navigator.clipboard.writeText(open); cp.textContent="✅ کپی شد"; }
+      catch(e){
+        // فالبک بدونِ HTTPS: انتخابِ متن برای کپیِ دستی
+        const u=document.getElementById("instUrl");
+        if(u){ const rg=document.createRange(); rg.selectNodeContents(u);
+               const s=getSelection(); s.removeAllRanges(); s.addRange(rg); }
+        cp.textContent="متن انتخاب شد — ⌘C بزن";
+      }
+      setTimeout(()=>{ cp.textContent="📋 کپیِ آدرس"; }, 1800);
+    }; }
+  };
+})();
+
+// ── به‌روزرسانیِ اپ: نامِ کشِ سرویس‌ورکر به بازنگریِ کد گره خورده (سرور جایش
+// می‌گذارد)، و جانشینیِ نسخهٔ تازه **با تأییدِ کاربر** انجام می‌شود. اگر تازه
+// در حالتِ انتظار بماند، بنرِ #pfSwBanner دیده می‌شود (`pfWatchInstall` می‌گوید
+// هر نسخهٔ در صفی — حتی یکی که خودِ همین بارگذاری راهش انداخته — دیده شود)؛
+// دکمهٔ «به‌روزرسانی»
+// پیامِ SKIP_WAITING را می‌فرستد و با controllerchange صفحه یک‌بار رفرش
+// می‌شود. مهم: در نصبِ اول یا جانشینیِ خودسر هیچ بنری نشان داده نمی‌شود و هیچ
+// رفرشی رخ نمی‌دهد (بنرِ اشتباهی = بی‌اعتبارشدنِ بنر).
+let pfReg=null, pfAsked=false, pfReloading=false;
+// «بعداً»ی کاربر تا پایانِ **همین بازدید** یادش می‌مانَد: بارگذاریِ دوباره/رفرش
+// بنر را برنمی‌گرداند (کاربری که یک‌بار «بعداً» گفته نباید در هر بارگذاری
+// دوباره بنر ببیند)، ولی با بستنِ تب فراموش می‌شود. عمداً `localStorage` نیست:
+// آن تا ابد بنر را خفه می‌کرد و کاربر هیچ‌وقت خبرِ نسخهٔ تازه را نمی‌گرفت.
+const PF_SW_LATER="pfSwLater";
+function pfLaterSaid(){
+  try{ return sessionStorage.getItem(PF_SW_LATER)==="1"; }catch(e){ return false; }
+}
+function pfMarkLater(){
+  try{ sessionStorage.setItem(PF_SW_LATER,"1"); }catch(e){}
+}
+function pfForgetLater(){
+  try{ sessionStorage.removeItem(PF_SW_LATER); }catch(e){}
+}
+function pfShowUpdate(){
+  if(pfLaterSaid()) return;      // «بعداً» تا پایانِ همین بازدید احترام دارد
+  const b=document.getElementById("pfSwBanner");
+  if(b) b.classList.add("show");
+}
+// پرسشِ وضعیتِ سرویس‌ورکر: «پوستهٔ فعال سالم است؟ چند کشِ قبلی نگه داشته شده؟»
+// در حالتِ «برگردانِ نسخه» (نسخهٔ تازه ناقص بوده) صفحه باید همین را به کاربر
+// بگوید، وگرنه ارتقا بی‌صدا عقب می‌افتد و کاربر فکر می‌کند اپ خراب است.
+function pfAskWho(){
+  return new Promise((res)=>{
+    const done=(v)=>{ try{ navigator.serviceWorker.removeEventListener("message", on); }
+                      catch(e){} res(v); };
+    const on=(ev)=>{ const d=ev.data||{}; if(d.type==="PF_WHO_ACK") done(d); };
+    const ctrl=navigator.serviceWorker.controller;
+    if(!ctrl) return done(null);
+    navigator.serviceWorker.addEventListener("message", on);
+    ctrl.postMessage({type:"PF_WHO"});
+    setTimeout(()=>done(null), 4000);
+  });
+}
+// مهم: پیامِ «برگردانِ نسخه» **عمداً** به یادِ «بعداً» گره نخورده است — اگر
+// کاربر در همین بازدید «بعداً» گفته باشد هم این هشدار هر بار دیده می‌شود؛
+// برگردان یعنی «نسخهٔ تازه ناقص بود»، و این خبر نباید بی‌صدا بمانَد.
+function pfShowRollback(){
+  const b=document.getElementById("pfSwBanner");
+  if(!b || b.classList.contains("show")) return;   // بنرِ «نسخهٔ تازه» اولویت دارد
+  const t=document.getElementById("pfSwTxt");
+  if(t) t.textContent="⚠ نسخهٔ تازه ناقص بود — روی نسخهٔ سالمِ قبلی ماندی (کشِ قبلی نگه داشته شد)";
+  const btn=document.getElementById("pfSwBtn");
+  if(btn) btn.textContent="تلاشِ دوباره";
+  b.classList.add("warn");
+  b.classList.add("show");
+}
+function pfHideUpdate(){
+  pfMarkLater();                 // تا پایانِ همین بازدید یادش می‌مانَد
+  const b=document.getElementById("pfSwBanner");
+  if(b) b.classList.remove("show");
+}
+// دیده‌بانیِ «نسخهٔ تازهٔ در صف» — و رفعِ شکافِ واقعیِ S10: ثبتِ خودِ همین صفحه
+// (`register("/sw.js")` سرِ بارگذاری) هم می‌تواند یک نسخهٔ تازه راه بیندازد. قبلاً
+// شنوندهٔ `updatefound` بعد از دو `await` وصل می‌شد؛ اگر نصب در همان فاصله تمام
+// می‌شد، هم `reg.waiting` در چکِ قبلش `null` بود و هم رویداد پیش از وصل‌شدنِ
+// شنونده رخ داده بود → کاربر روی کدِ کهنه می‌ماند **بدونِ این‌که بداند نسخهٔ تازه
+// در صف است** (این حالت در ساختِ بندِ ۹.۲ زنده دیده شد). پس دو کار می‌کنیم:
+// (۱) شنونده **پیش از هر awaitِ بعدی** وصل می‌شود، و (۲) وضعیتِ *کنونیِ* ثبت هم
+// یک‌بار خوانده می‌شود (نه فقط انتظارِ رویداد) — با هر دو، هر دو حالتِ مسابقه
+// پوشش داده می‌شود. بنرِ نصبِ اول نباید بیاید: تنها وقتی نشان می‌دهیم که نسخهٔ
+// دیگری کنترلِ صفحه را داشته باشد.
+function pfWatchInstall(reg){
+  const pfNotice=(w)=>{
+    if(!navigator.serviceWorker.controller) return;   // نصبِ اول: بی‌بنر
+    if(reg.waiting || (w && w.state==="installed")) pfShowUpdate();
+  };
+  const pfTrack=(w)=>{
+    if(!w) return false;
+    w.addEventListener("statechange", ()=>pfNotice(w));   // مسیرِ عادیِ رویداد
+    pfNotice(w);        // شاید همین حالا به installed رسیده باشد
+    return true;
+  };
+  reg.addEventListener("updatefound", ()=>{ if(!pfTrack(reg.installing)) pfNotice(null); });
+  if(!pfTrack(reg.installing)) pfNotice(null);   // رویداد از قبل رخ داده بود
+}
+function pfSwSetup(){
+  if(!("serviceWorker" in navigator)) return;
+  if(!(location.protocol==="http:" || location.protocol==="https:")) return;
+  const btn=document.getElementById("pfSwBtn");
+  if(btn) btn.onclick=()=>{
+    if(pfReg && pfReg.waiting){
+      pfAsked=true;
+      pfForgetLater();           // کاربر پذیرفت: «بعداً»ی قبلی باطل شود تا نسخهٔ
+                                 // بازهم‌تازه‌تر در همین بازدید بی‌صدا نمانَد
+      pfReg.waiting.postMessage({type:"SKIP_WAITING"});
+      // تورِ ایمنی: اگر جانشینی تا ۴ ثانیه رخ نداد، رفرشِ ساده (HTML از سرور
+      // می‌آید و کشِ صفحه تازه می‌شود) — "دکمهٔ بی‌اثر" بدترین حالت است.
+      setTimeout(()=>{ if(!pfReloading) location.reload(); }, 4000);
+    } else location.reload();
+  };
+  const later=document.getElementById("pfSwHide");
+  if(later) later.onclick=pfHideUpdate;
+  navigator.serviceWorker.addEventListener("controllerchange", ()=>{
+    // فقط جانشینیِ تازه‌ای که **خودمان** خواستیم باعثِ رفرش می‌شود؛ نصبِ اول
+    // (clients.claim) نباید صفحه را وسطِ کار از نو بالا بیاورد.
+    if(!pfAsked || pfReloading) return;
+    pfReloading=true;
+    location.reload();
+  });
+  window.addEventListener("load", async ()=>{
+    try{
+      const reg=await navigator.serviceWorker.register("/sw.js");
+      pfReg=reg;
+      pfWatchInstall(reg);   // پیش از هر awaitِ بعدی — وگرنه نصبِ سریع بی‌بنر می‌مانَد
+      if(reg.waiting) pfShowUpdate();      // نسخهٔ تازه از قبل در صف بود
+      else {
+        // هیچ نسخهٔ در انتظاری نیست؛ تنها حالتِ دیگری که کاربر باید بداند،
+        // «برگردانِ نسخه» است (پوستهٔ تازه ناقص بوده و کشِ قبلی نگه داشته شده).
+        const st=await pfAskWho();
+        if(st && (st.shell_ok===false || (st.kept|0)>0)) pfShowRollback();
+      }
+    }catch(e){ /* PWA اختیاری است؛ نبودش اپ را نمی‌شکند */ }
+  });
+}
+pfSwSetup();
+
+// پنجره‌ی عمومی (مودال) — بدونِ وابستگیِ بیرونی
+function openModal(title, html){
+  const old=document.getElementById("pipModal");
+  if(old) old.remove();
+  const ov=document.createElement("div");
+  ov.className="modal-overlay"; ov.id="pipModal";
+  ov.innerHTML=`<div class="modal-box">
+    <div class="modal-head"><h3>${title}</h3>
+      <button class="modal-close" title="بستن">×</button></div>
+    <div class="modal-content">${html}</div>
+  </div>`;
+  ov.addEventListener("click", e=>{ if(e.target===ov) ov.remove(); });
+  ov.querySelector(".modal-close").onclick=()=>ov.remove();
+  document.body.appendChild(ov);
+}
+
+// دکمه‌ی 📁 آرشیو اقتصادی — اخبارِ ۶ ساعتِ گذشته + جهتِ موردانتظار، بدونِ رفرشِ صفحه
+const archiveBtn=document.getElementById("archiveBtn");
+if(archiveBtn){
+  archiveBtn.onclick=async ()=>{
+    archiveBtn.disabled=true;
+    try{
+      archiveBtn.textContent="⏳ در حالِ خواندنِ آرشیو…";
+      // سقفِ زمانیِ همان درخواست (مثلِ فید): دکمه هیچ‌وقت در «در حالِ خواندن»
+      // گیر نمی‌ماند — یا آرشیو می‌آید یا پیامِ روشن می‌گیریم.
+      const data=await jfetch("/api/fundamental-archive?hours=6", 60000);
+      archiveBtn.textContent="📁 آرشیو اخبار ۶ ساعتِ گذشته";
+      if(data.error){
+        openModal("📁 آرشیو اقتصادی", `<div class="arc-empty">خطا: ${data.error}</div>`);
+        return;
+      }
+      const evs=data.events||[];
+      const rows = evs.length ? evs.map(e=>{
+        const v=e.verdict||{}, ef=v.effect||{};
+        let vd="";
+        if(v.found){
+          const cls = v.outcome==="صعودی"?"v-up":(v.outcome==="نزولی"?"v-dn":"v-fl");
+          const arr = v.outcome==="صعودی"?"▲":(v.outcome==="نزولی"?"▼":"◆");
+          const dd = v.outcome==="صعودی"?"صعودی":(v.outcome==="نزولی"?"نزولی":"خنثی");
+          const ff = v.beat?` · ${v.beat}`:"";
+          const dd2 = v.dir?` · ${e.country_fa||e.country||""} ${v.dir}`:"";
+          vd = `<div class="arc-v ${cls}"><span>${arr}</span><span>نتیجه: <span class="arc-num">${v.actual}</span></span><span>${dd}${ff}${dd2}</span></div>`;
+          // تأثیرِ همین نتیجه — نه دو گزارهٔ شرطیِ «اگر بالا/پایین شد»
+          const arw = x=>String(x||"").replace("صعود","").replace("نزول","").trim();
+          const pr = (ef.pairs||[]).map(x=>`${x[0]} ${arw(x[1])}`).join(" · ");
+          const gd = ef.gold?`${ef.gold[0]} ${arw(ef.gold[1])}`:"";
+          const imp = [pr, gd].filter(Boolean).join(" · ");
+          if(imp){ vd += `<div class="arc-i">تأثیرِ همین نتیجه: ${imp}</div>`; }
+        }else if(data.source_ok===false){
+          vd = `<div class="arc-v v-fl">◇ نتیجهٔ اعلام‌شده در دسترس نبود (منبعِ پاسخ نداد)</div>`;
+        }else{
+          // سکوت بدترین حالت است: خبرِ بی‌عدد (سخنرانی/…)
+          vd = `<div class="arc-v v-fl">◇ این خبر عددِ اعلام‌شده ندارد — نتیجه و تأثیری برای گفتن نیست</div>`;
+        }
+        return `<div class="arc-ev">
+          <div class="arc-t">${e.icon||""} ${e.title_fa||e.title||""}<span class="arc-en">${e.title||""}</span></div>
+          <div class="arc-m">${e.country_fa||e.country||""} · ${e.when_fa||""}${e.minutes_ago!=null?` · ${e.minutes_ago} دقیقه پیش`:""} · ${e.impact==="High"?"پرتأثیر":"متوسط"}</div>
+          ${vd}
+        </div>`;
+      }).join("") : `<div class="arc-empty">در ۶ ساعتِ گذشته خبرِ پرتأثیری در تقویم نبود.</div>`;
+      openModal(`📁 آرشیو اقتصادی — ۶ ساعتِ اخیر (${data.count||0} خبر)`,
+        rows + `<div class="arc-note">در این پنجره فقط «نتیجه» می‌آید: عددِ اعلام‌شدهٔ واقعی (Actual) + جهتِ آن برای ارز، و بعد «تأثیرِ همین نتیجه» روی جفت‌ارزها/طلا — چون خبر اعلام شده، گزارهٔ شرطیِ «اگر بالاتر از انتظار شد → …» این‌جا جایی ندارد. اگر عددی نیاید یعنی منبعِ اعلام‌شده در دسترس نبوده یا این خبر عددی نداشته (سخنرانی و …).</div>`);
+    }catch(err){
+      const cut=(err && err.name==="AbortError");
+      openModal("📁 آرشیو اقتصادی", `<div class="arc-empty">`+
+        (cut ? "آرشیو در ۶۰ ثانیه برنگشت (منبع کند/در دسترس نیست) — یک‌بارِ دیگر بزن."
+             : `ارتباط ناموفق: ${err}`) + `</div>`);
+    }finally{
+      archiveBtn.disabled=false;
+      archiveBtn.textContent="📁 آرشیو اخبار ۶ ساعتِ گذشته";
+    }
+  };
+}
+
+async function setOteAlarm(){
+  const d = window._last;
+  if(!d || !d.ote){return;}
+  const ab = document.getElementById("alarmBtn");
+  const am = document.getElementById("alarmMsg");
+  ab.disabled = true; am.textContent = "در حالِ ثبتِ آلارم…"; am.className="jmsg";
+  try{
+    const r = await fetch("/api/alarm", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        symbol: d.symbol, mode:"ote",
+        low: d.ote.low, high: d.ote.high,
+        direction: d.direction, style: d.style_key||"day"
+      })
+    });
+    const j = await r.json();
+    if(j.error){am.textContent="خطا: "+j.error; am.className="jmsg bad"; ab.disabled=false;}
+    else{am.textContent=`🔔 آلارم فعال شد — با رسیدنِ ${d.symbol} به ناحیه‌ی OTE هشدار می‌گیری`; am.className="jmsg good";}
+  }catch(err){
+    am.textContent="ارتباط ناموفق: "+err; am.className="jmsg bad"; ab.disabled=false;
+  }
+}
+
+async function saveJournal(){
+  const d = window._last;
+  if(!d || !d.plan){return;}
+  const jb = document.getElementById("jbtn");
+  const jmsg = document.getElementById("jmsg");
+  jb.disabled = true; jmsg.textContent = "در حالِ ثبت…"; jmsg.className = "jmsg";
+  try{
+    const r = await fetch("/api/journal", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(d)
+    });
+    const j = await r.json();
+    if(j.error){jmsg.textContent = "خطا: "+j.error; jmsg.className="jmsg bad"; jb.disabled=false;}
+    else{
+      // هشدارِ هم‌بستگی *در لحظهٔ ثبت* — اگر پوزیشن‌های باز با این معامله
+      // هم‌بسته باشند (یا خلافِ جهتشان باشد) همان‌جا گوشزد می‌شود.
+      const cw = (j.correlation && j.correlation.warnings) || [];
+      if(cw.length){
+        jmsg.textContent = `⚠ ثبت شد — معامله‌ی #${j.added} (${j.symbol}) · تذکرِ هم‌بستگی: ` + cw.join(" · ");
+        jmsg.className="jmsg bad";
+      }else{
+        jmsg.textContent = `✅ ثبت شد — معامله‌ی #${j.added} (${j.symbol}) · تضادِ هم‌بستگی ندیدم`;
+        jmsg.className="jmsg good";
+      }
+    }
+  }catch(err){
+    jmsg.textContent = "ارتباط ناموفق: "+err; jmsg.className="jmsg bad"; jb.disabled=false;
+  }
+}
+
+function fmt(x){
+  if(x==null)return "—";
+  const a=Math.abs(x);
+  if(a>=1000)return (+x).toFixed(1);
+  if(a>=10)return (+x).toFixed(3);
+  return (+x).toFixed(5);
+}
+function kzFa(k){
+  if(!k)return "";
+  const m={"London Open":"اوپنِ لندن","New York AM":"نیویورک صبح","London Close":"کلوزِ لندن",
+    "New York PM":"نیویورک بعدازظهر","Asian Range":"رِنجِ آسیایی"};
+  for(const [en,fa] of Object.entries(m))if(k.includes(en))return "کیل‌زونِ "+fa;
+  return "خارج از کیل‌زونِ اصلی";
+}
+function gateFa(g){
+  const s=(g||"").toUpperCase();
+  if(s.includes("RED"))return "قرمز (ورود ممنوع)";
+  if(s.includes("AMBER"))return "کهربایی (احتیاط)";
+  return "سبز (عادی)";
+}
+
+// ── چارتِ زندهٔ TradingView ──
+const TV_MAP = __TVMAP__;
+function tvSymbol(sym){
+  const s=(sym||"").trim().toUpperCase();
+  if(TV_MAP[s]) return TV_MAP[s];
+  if(s.length===6 && /^[A-Z]+$/.test(s)) return "FX_IDC:"+s;
+  return s;
+}
+function tvInterval(){
+  return ({scalp:"15",day:"60",swing:"240"})[style] || "60";
+}
+function showLiveChart(sym){
+  const box=document.getElementById("tvBox");
+  const lbl=document.getElementById("tvSymLbl");
+  const tv=tvSymbol(sym);
+  lbl.textContent = "— "+sym;
+  const url="https://s.tradingview.com/widgetembed/?symbol="+encodeURIComponent(tv)
+    +"&interval="+tvInterval()
+    +"&theme=dark&style=1&timezone=Etc/UTC&hide_side_toolbar=0&withdateranges=1&hideideas=1&locale=fa";
+  box.innerHTML=`<iframe src="${url}" allowtransparency="true" scrolling="no" allowfullscreen></iframe>`;
+}
+
+// ── آپلود و مرورِ اسکرین‌شات ──
+const shotFile=document.getElementById("shotFile");
+const shotPick=document.getElementById("shotPick");
+const shotNote=document.getElementById("shotNote");
+const shotMsg=document.getElementById("shotMsg");
+shotPick.onclick=()=>shotFile.click();
+shotFile.onchange=async()=>{
+  const f=shotFile.files[0];
+  if(!f)return;
+  if(f.size>12*1024*1024){shotMsg.textContent="فایل بیش از ۱۲ مگابایت است.";shotMsg.className="jmsg bad";return;}
+  shotMsg.textContent="در حالِ آپلود…";shotMsg.className="jmsg";shotPick.disabled=true;
+  try{
+    const dataurl=await new Promise((res,rej)=>{
+      const rd=new FileReader();rd.onload=()=>res(rd.result);rd.onerror=rej;rd.readAsDataURL(f);
+    });
+    const r=await fetch("/api/screenshot",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({symbol:symIn.value.trim(),note:shotNote.value.trim(),dataurl})
+    });
+    const j=await r.json();
+    if(j.error){shotMsg.textContent="خطا: "+j.error;shotMsg.className="jmsg bad";}
+    else{shotMsg.textContent="✅ آپلود شد.";shotMsg.className="jmsg good";shotNote.value="";loadShots();}
+  }catch(err){shotMsg.textContent="آپلود ناموفق: "+err;shotMsg.className="jmsg bad";}
+  finally{shotPick.disabled=false;shotFile.value="";}
+};
+
+async function loadShots(){
+  try{
+    const r=await fetch("/api/screenshots");
+    const list=await r.json();
+    const grid=document.getElementById("shotGrid");
+    if(!list.length){grid.innerHTML='<div class="aempty">هنوز اسکرین‌شاتی آپلود نکرده‌ای.</div>';return;}
+    grid.innerHTML=list.map(s=>{
+      const src="/api/screenshot?id="+encodeURIComponent(s.id);
+      const sym=s.symbol?`<b>${s.symbol}</b> · `:"";
+      const note=s.note?`${s.note}`:"بدونِ یادداشت";
+      return `<div class="shot">
+        <img src="${src}" data-full="${src}" alt="chart">
+        <div class="meta">${sym}${note}<br>${s.created||""}
+          <br><button class="sdel" data-id="${s.id}" title="این اسکرین‌شات را برای همیشه حذف کن.">حذف</button></div>
+      </div>`;
+    }).join("");
+    grid.querySelectorAll("img").forEach(im=>{
+      im.onclick=()=>{const lb=document.getElementById("lightbox");
+        document.getElementById("lightboxImg").src=im.dataset.full;lb.classList.add("on");};
+    });
+    grid.querySelectorAll(".sdel").forEach(b=>{
+      b.onclick=async()=>{await fetch("/api/screenshot?id="+encodeURIComponent(b.dataset.id),{method:"DELETE"});loadShots();};
+    });
+  }catch(e){}
+}
+document.getElementById("lightbox").onclick=function(){this.classList.remove("on");};
+loadShots();
+
+// ── رِندرِ آلارم‌ها + پولینگِ زنده ──
+async function loadAlarms(){
+  try{
+    const r = await fetch("/api/alarms");
+    const list = await r.json();
+    const box = document.getElementById("alarmsList");
+    const stEl = document.getElementById("alarmsState");
+    const nGap = list.filter(a=>a.mode==="gap").length, nOte = list.length - nGap;
+    if(stEl){
+      if(!list.length) stEl.textContent = "· بدونِ آلارم";
+      else if(nGap && !nOte) stEl.textContent = "· "+nGap+" گپ‌بانِ فعال";
+      else if(nGap) stEl.textContent = "· "+nOte+" آلارمِ قیمت و "+nGap+" گپ‌بان";
+      else stEl.textContent = "· "+nOte+" آلارمِ فعال";
+    }
+    if(!list.length){box.innerHTML='<div class="aempty">هنوز آلارمی نگذاشته‌ای.</div>';return;}
+    box.innerHTML = list.map(a=>{
+      const trig = a.triggered;
+      // گپ‌بان‌ها ساختارِ دیگری دارند: آدرس ندارند، تایم‌فریم و وضعیتِ پویش و
+      // آخرین هشدار دارند — جدا رندر می‌شوند تا مثلِ آلارمِ قیمتِ ناقص به‌نظر نرسند.
+      if(a.mode==="gap"){
+        const hits=a.hits||[], last=hits.length?hits[hits.length-1]:null;
+        const seeded=a.seeded
+          ? `پایه‌گذاری شد (${a.scanned||0} گپ دید · ${a.reliable_now||0} قابلِ اتکا)`
+          : "دورِ اول: پایه‌گذاریِ بی‌صدا — هنوز هشداری ندارد";
+        const scanline=a.last_scan ? `آخرین پویش: ${a.last_scan}` : "در انتظارِ اولین پویش (تا ۵ دقیقه)";
+        const px=a.last_price!=null ? `<span class="apx">فعلی: ${fmt(a.last_price)}</span>` : "";
+        return `<div class="alarm-item">
+          <span class="asym">${a.symbol}</span>
+          <span class="arng">گپ‌بان · تایم‌فریم ${a.tf||"—"}</span>
+          ${px}
+          <span class="astat"><span class="pill waiting">👁 زیرِ نظارت</span></span>
+          <button class="adel" data-id="${a.id}" title="این نظارتِ گپ را حذف کن؛ دیگر پویش نمی‌شود.">حذف</button>
+          <div class="arng" style="width:100%">${scanline} · ${seeded}${a.alerts?` · 🧩 هشدارها: ${a.alerts}`:""}</div>
+          ${last?`<div class="arng" style="width:100%">🔔 آخرین گپِ قابلِ اتکا (${last.at||""}): <b>${last.grade||"—"}</b> — ${last.why||""}</div>`:""}
+        </div>`;
+      }
+      const dirFa = (a.direction==="صعودی"||a.direction===1)?"خرید":((a.direction==="نزولی"||a.direction===-1)?"فروش":"—");
+      const pill = trig
+        ? `<span class="pill hit">✅ رسید!</span>`
+        : `<span class="pill waiting">⏳ در انتظار</span>`;
+      const reason = trig && a.hit_reason ? `<div class="arng" style="width:100%">${a.hit_reason} · ${a.triggered_at||""}</div>` : "";
+      const px = a.last_price!=null ? `<span class="apx">فعلی: ${fmt(a.last_price)}</span>` : "";
+      return `<div class="alarm-item ${trig?'trig':''}">
+        <span class="asym">${a.symbol}</span>
+        <span class="arng">${dirFa} · OTE ${fmt(a.low)}–${fmt(a.high)}</span>
+        ${px}
+        <span class="astat">${pill}</span>
+        <button class="adel" data-id="${a.id}" title="این آلارم را حذف کن؛ دیگر بررسی نمی‌شود.">حذف</button>
+        ${reason}
+      </div>`;
+    }).join("");
+    box.querySelectorAll(".adel").forEach(b=>{
+      b.onclick = async ()=>{
+        await fetch("/api/alarm?id="+encodeURIComponent(b.dataset.id), {method:"DELETE"});
+        loadAlarms();
+      };
+    });
+  }catch(e){}
+}
+loadAlarms();
+setInterval(loadAlarms, 30000);
+
+// ── پشتیبان‌گیریِ داده: برون‌بری/درون‌بریِ JSON (ژورنال + آلارم‌ها + تنظیماتِ ریسک) ──
+// برون‌بری یک اسنپ‌شاتِ کامل می‌سازد؛ درون‌بری ادغامِ بی‌خطر است (تکراری‌ها
+// نادیده می‌روند و هیچ ردیفی پاک نمی‌شود)، پس اجرای دوباره هم بی‌خطر است.
+function pfBkMsg(t, bad){
+  const el=document.getElementById("bkMsg");
+  if(!el) return;
+  el.textContent=t;
+  el.className = bad ? "jmsg bad" : "jmsg good";
+}
+async function pfExportData(){
+  pfBkMsg("در حالِ آماده‌سازیِ پشتیبان…", false);
+  try{
+    const r=await fetch("/api/export",{cache:"no-store"});
+    const j=await r.json();
+    if(!r.ok || !j || j.kind!=="pipfound-backup") throw new Error((j&&j.error)||("HTTP "+r.status));
+    const blob=new Blob([JSON.stringify(j,null,2)],{type:"application/json"});
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download="pipfound-backup-"+new Date().toISOString().slice(0,16).replace(/[:T]/g,"-")+".json";
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),4000);
+    const c=j.counts||{};
+    pfBkMsg("✅ برون‌بری شد — ژورنال: "+(c.journal||0)+" ردیف · آلارم: "+(c.alarms||0), false);
+  }catch(e){ pfBkMsg("⚠ برون‌بری نشد: "+e, true); }
+}
+async function pfImportData(){
+  const inp=document.getElementById("impFile");
+  const f=inp && inp.files && inp.files[0];
+  if(!f) return;
+  pfBkMsg("در حالِ درون‌بریِ «"+f.name+"»…", false);
+  try{
+    const txt=await f.text();
+    try{ JSON.parse(txt); }catch(e){ throw new Error("فایلِ JSON خوانده نشد"); }
+    const r=await fetch("/api/import",{method:"POST",headers:{"Content-Type":"application/json"},body:txt});
+    const j=await r.json();
+    if(!r.ok || !j || j.ok===false) throw new Error((j&&(j.error||(j.errors||[]).join(" · ")))||("HTTP "+r.status));
+    pfBkMsg("✅ درون‌بری شد — ژورنال: "+j.journal_added+" تازه ("+j.journal_skipped+" تکراری) · آلارم: "+j.alarms_added+" · تنظیمات: "+(j.settings_applied?"اعمال شد":"—"), false);
+    inp.value="";
+    loadAlarms(); loadRisk();
+  }catch(e){ pfBkMsg("⚠ درون‌بری نشد: "+e, true); }
+}
+// ── کرکره‌های نمای اصلی: آلارم‌ها · تنظیماتِ بک‌تست · مدیریتِ ریسک · پشتیبانِ داده ──
+// خواستهٔ کاربر: هیچ‌کدام از این بخش‌های «نگهداری» در نمای اصلی همیشه‌باز نباشد؛
+// نوار کلیدپذیر است و بدنه فقط با کلیک باز می‌شود. وضعیتِ هر بخش هم به‌شکلِ خلاصه
+// روی همان نوار می‌آید تا جمع‌بودن به‌معنای «بی‌خبری» نباشد.
+// خواستهٔ دومِ کاربر: هر بخش «همان‌طور که کاربر گذاشته» بماند — یعنی باز/بسته‌بودن
+// بینِ بازدیدها یاد می‌ماند. عمداً localStorage است (نه sessionStorage) چون این یاد
+// باید از بارگذاریِ بعدی هم بماند. خواندن/نوشتنِ حافظه داخلِ try است: در حالتِ
+// حریمِخصوصی localStorage می‌پرت‌د و خرابیِ حافظه هرگز نباید صفحه یا کلید را ببرد.
+// برعکس: نبودِ یاد = پیش‌فرضِ تمیز (همه بسته)، پس تمیزبودنِ نمای اول برنمی‌گردد
+// مگر خودِ کاربر یک بخش را باز بگذارد.
+const PF_FOLD_KEY="pf-folds-v1";
+function pfFoldsRead(){
+  try{
+    const m=JSON.parse(window.localStorage.getItem(PF_FOLD_KEY)||"null");
+    return (m && typeof m==="object")?m:{};
+  }catch(e){ return {}; }
+}
+function pfFoldsWrite(m){
+  try{ window.localStorage.setItem(PF_FOLD_KEY, JSON.stringify(m)); }catch(e){}
+}
+function pfFold(boxId, toggleId, bodyId){
+  const box=document.getElementById(boxId), tgl=document.getElementById(toggleId),
+        body=document.getElementById(bodyId);
+  if(!box||!tgl||!body) return false;
+  // یادِ بازدیدِ قبل: فقط «بازِ صریح» برمی‌گردد؛ هر مقدارِ دیگر یعنی بسته.
+  if(pfFoldsRead()[boxId]===true) box.classList.add("open");
+  const paint=()=>{
+    const open=box.classList.contains("open");
+    tgl.setAttribute("aria-expanded", open?"true":"false");
+    body.setAttribute("aria-hidden", open?"false":"true");
+  };
+  tgl.onclick=()=>{
+    box.classList.toggle("open");
+    const m=pfFoldsRead(); m[boxId]=box.classList.contains("open"); pfFoldsWrite(m);
+    paint();
+  };
+  paint();
+  return true;
+}
+pfFold("alarmsDock","alarmsToggle","alarmsBody");
+pfFold("btPanel","btToggle","btBody");
+pfFold("riskPanel","rkToggle","rkBody");
+pfFold("bkDock","bkToggle","bkBody");
+pfFold("gapDock","gapToggle","gapBody");
+
+// ── پرسشِ «تأییدِ شکافِ ارزش منصفانه» ────────────────────────────────────
+// کاربر آدرسِ ناحیهٔ گپ (کف/سقف) را در یک تایم‌فریم می‌دهد و اپ همان گپ را در
+// دادهٔ زنده پیدا می‌کند و ۱۲ معیارِ تأیید را نمره می‌دهد، درجه (A+..D) می‌دهد و
+// می‌گوید قابلِ اتکاست یا نه. خروجی یک «داوری» است، نه فهرستِ خام. حالتِ دوم
+// (بدونِ آدرس) گپ‌های بازِ همان تایم‌فریم را از پرتأییدترین می‌چیند.
+const gapGradeColor=g=>({"A+":"var(--grade-ap)","A":"var(--grade-a)",
+  "B":"var(--grade-b)","C":"var(--grade-c)"}[g]||"var(--grade-no)");
+const gapVal=v=>(v===null||v===undefined||v==="")?"—":v;
+function gapField(id){const el=document.getElementById(id);return el?el.value:"";}
+function gapChecksHtml(checks){
+  return (checks||[]).map(c=>{
+    const ok=c.status==="✓";
+    return `<div class="gap-ck ${ok?"ok":"no"}"><span>${c.status}</span>`
+      +`<span style="flex:1">${c.name}`
+      +(c.detail?` — <span class="jmsg">${c.detail}</span>`:"")+`</span>`
+      +`<span class="gstw">${gapVal(c.got)}/${gapVal(c.weight)}</span></div>`;
+  }).join("");
+}
+function gapCardHtml(g){
+  if(!g) return "";
+  if(g.ok===false) return `<div class="err">${g.error||"خطای نامشخص"}</div>`;
+  const q=g.query||{}, sc=g.score||{}, lv=g.levels||{};
+  const lvl=(g.found&&lv.entry_low!=null)
+    ? `<div class="gap-lvl">`
+      +`<span>ورود (لیمیت): <b>${lv.entry_low} – ${lv.entry_high}</b></span>`
+      +`<span>ابطال: <b>${gapVal(lv.invalidate)}</b></span>`
+      +`<span>استاپ: <b>${gapVal(lv.stop)}</b></span>`
+      +`<span>هدف: <b>${gapVal(lv.target)}</b></span>`
+      +`<span>R:R ≈ <b>${gapVal(lv.rr)}</b></span></div>`
+      +(lv.note?`<div class="gap-near">${lv.note}</div>`:"")
+    : "";
+  const near=(!g.found&&(g.nearest||[]).length)
+    ? `<div class="gap-near"><b>نزدیک‌ترین گپ‌های همین تایم‌فریم به آدرسِ تو:</b><br>`
+      + g.nearest.map(n=>`${n.bottom} – ${n.top} (${n.type==="bullish"?"صعودی":"نزولی"} · ${n.state_fa||""})`).join("<br>")
+      + `</div>`
+    : "";
+  const caps=(g.capped&&g.cap)?`<div class="badge g-amber">سقفِ اعمال‌شده: ${g.cap}</div>`:"";
+  const born=(g.gap&&g.gap.born_ts)
+    ? `<span>تولدِ گپ: <b>${new Date(g.gap.born_ts*1000).toISOString().slice(0,16).replace("T"," ")} UTC</b></span>`
+    : "";
+  return `<div class="card">
+    <div class="rhead">
+      <div class="sym">${g.symbol} · ${g.tf}${g.htf?` <span class="jmsg">(بایاسِ ${g.htf})</span>`:""}</div>
+      <span class="price">قیمت: ${gapVal(g.price)}</span>
+      <div class="spacer"></div>
+      <div class="grade" style="background:${gapGradeColor(g.grade)}">${g.grade||"—"}</div>
+    </div>
+    <div class="metaline">
+      <span>آدرسِ پرسش: <b>${q.bottom} → ${q.top}</b></span>
+      <span>وضعیتِ گپ: <b>${g.state_fa||gapVal(g.state)}</b></span>
+      <span>هم‌پوشانیِ آدرس با گپِ واقعی: <b>${Math.round((g.overlap_pct||0)*100)}٪</b></span>
+      ${born}
+    </div>
+    <div class="scorebar"><div class="scorefill" style="width:${sc.percent||0}%;background:${gapGradeColor(g.grade)}"></div></div>
+    <div class="scoretxt">امتیازِ تأیید: <b>${sc.percent}٪</b> (${gapVal(sc.got)} از ${gapVal(sc.max)})`
+      +`${(g.capped&&g.score&&g.score.grade_raw&&g.score.grade_raw!==g.grade)?` · درجهٔ خام: ${g.score.grade_raw}`:""}</div>
+    ${g.reliable?`<div class="badge g-green">✅ قابلِ اتکا برای ورود (تأییدِ کافی)</div>`
+      :`<div class="badge g-amber">⚠️ تأییدِ ناکافی — به‌تنهایی برای ورود کافی نیست</div>`}
+    ${g.verdict?`<div class="verdict">${g.verdict}</div>`:""}
+    <div style="margin-top:12px">${gapChecksHtml(g.checks)}</div>
+    ${lvl}
+    ${(g.invalidations&&g.invalidations.length)?`<div class="gap-near"><b>ابطال‌ها:</b><br>${g.invalidations.map(x=>"• "+x).join("<br>")}</div>`:""}
+    ${caps}
+    ${near}
+  </div>`;
+}
+function gapStateSet(t){
+  const el=document.getElementById("gapState"); if(el) el.textContent=t;
+}
+// ── گپ‌بان: نظارتِ پس‌زمینه روی یک نماد+تایم‌فریم ─────────────────────────
+// خواستهٔ کاربر: «بدونِ اینکه پرسشی بفرستم، وقتی روی نمادِ تحتِ نظارت گپِ تازه
+// با نمرهٔ A+/A ساخته شد خبرم کن.» این دکمه نظارت را می‌سازد و کارِ پویش دستِ
+// سرور است (کارگرِ گپ‌بان) — صفحه لازم نیست باز بماند.
+async function pfGapWatch(){
+  const msg=document.getElementById("gapMsg"), wb=document.getElementById("gapWatch"),
+        symIn=document.getElementById("gapSym");
+  const sym=(gapField("gapSym")||"").trim().toUpperCase();
+  const tf=(gapField("gapTf")||"").trim();
+  if(!sym){ if(symIn) symIn.focus(); if(msg) msg.textContent="اول نماد را بده."; return; }
+  if(wb) wb.disabled=true;
+  if(msg){ msg.textContent="در حالِ ثبتِ نظارتِ گپ…"; msg.className="jmsg"; }
+  try{
+    const r=await fetch("/api/alarm",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({symbol:sym, mode:"gap", tf:tf})});
+    const j=await r.json();
+    if(j.error){ if(msg){ msg.textContent="خطا: "+j.error; msg.className="jmsg bad"; } }
+    else{
+      if(msg){
+        msg.textContent=`👁 ${sym} ${tf} زیرِ نظارتِ گپ رفت — دورِ اول بی‌صدا پایه‌گذاری می‌شود و از این به بعد هر گپِ تازه با نمرهٔ A+ یا A نوتیف می‌دهد. (در بخشِ «آلارم‌های فعال» می‌بینی‌اش.)`;
+        msg.className="jmsg good";
+      }
+      loadAlarms();
+    }
+  }catch(err){ if(msg){ msg.textContent="ارتباط ناموفق: "+err; msg.className="jmsg bad"; } }
+  finally{ if(wb) wb.disabled=false; }
+}
+async function pfGapAsk(listMode){
+  const res=document.getElementById("gapRes"), msg=document.getElementById("gapMsg"),
+        go=document.getElementById("gapGo"), ls=document.getElementById("gapList"),
+        symIn=document.getElementById("gapSym");
+  const sym=(gapField("gapSym")||"").trim().toUpperCase();
+  const tf=(gapField("gapTf")||"").trim();
+  const lo=(gapField("gapLo")||"").trim(), hi=(gapField("gapHi")||"").trim();
+  if(!sym){ if(symIn) symIn.focus(); if(msg) msg.textContent="اول نماد را بده."; return; }
+  if(!listMode&&(!lo||!hi)){
+    if(msg) msg.textContent="کف و سقفِ ناحیه را بده، یا «گپ‌های همین تایم‌فریم» را بزن.";
+    return;
+  }
+  if(go) go.disabled=true; if(ls) ls.disabled=true;
+  if(msg) msg.textContent="در حالِ بررسی…";
+  if(res) res.innerHTML='<div class="status">گپ را در دادهٔ زنده می‌جوییم و معیارها را نمره می‌دهیم… <span class="spin"></span></div>';
+  try{
+    const qs=new URLSearchParams({symbol:sym, tf:tf});
+    if(!listMode){ qs.set("lo", lo); qs.set("hi", hi); }
+    const r=await fetch(`/api/gap?${qs.toString()}`,{cache:"no-store"});
+    const d=await r.json();
+    if(msg) msg.textContent="";
+    if(d.ok===false){
+      gapStateSet(d.error||"پرسش انجام نشد");
+      if(res) res.innerHTML=`<div class="err">${d.error||"پرسش انجام نشد"}</div>`;
+      return;
+    }
+    if(d.mode==="list"){
+      const gs=d.gaps||[];
+      gapStateSet(gs.length?`${d.symbol} ${d.tf}: ${gs.length} گپِ باز`
+                          :`${d.symbol} ${d.tf}: گپِ بازی نیست`);
+      if(res) res.innerHTML = gs.length
+        ? `<div class="gap-near">${d.summary||""}</div>`+gs.map(gapCardHtml).join("")
+        : `<div class="err">در ${d.tf} گپِ بازی برای ${d.symbol} پیدا نشد — این تایم‌فریم ایمبالانسِ بازِ کمی دارد.</div>`;
+    }else{
+      gapStateSet(d.found?`${d.symbol} ${d.tf}: ${d.grade||"—"} ${d.score&&d.score.percent!=null?d.score.percent+"%":""}`
+                          :`${d.symbol} ${d.tf}: گپ پیدا نشد`);
+      if(res) res.innerHTML=gapCardHtml(d);
+    }
+  }catch(err){
+    gapStateSet("ارتباط با سرور قطع شد");
+    if(res) res.innerHTML=`<div class="err">ارتباط با سرور ناموفق بود: ${err}</div>`;
+  }finally{ if(go) go.disabled=false; if(ls) ls.disabled=false; }
+}
+(function(){
+  const go=document.getElementById("gapGo"), ls=document.getElementById("gapList"),
+        wb=document.getElementById("gapWatch"), sym=document.getElementById("gapSym");
+  if(go) go.onclick=()=>pfGapAsk(false);
+  if(ls) ls.onclick=()=>pfGapAsk(true);
+  if(wb) wb.onclick=pfGapWatch;
+  // راحتیِ کاربر: اگر کادرِ نماد خالی بود، روی فوکوس نمادِ اصلیِ صفحه را پیش‌پر کن.
+  if(sym) sym.addEventListener("focus",()=>{
+    if(!sym.value.trim()){
+      const main=document.getElementById("sym");
+      if(main&&main.value) sym.value=main.value;
+    }
+  });
+})();
+const expBtn=document.getElementById("expBtn"), impBtn=document.getElementById("impBtn"), impFile=document.getElementById("impFile");
+if(expBtn) expBtn.onclick=pfExportData;
+if(impBtn&&impFile) impBtn.onclick=()=>impFile.click();
+if(impFile) impFile.onchange=pfImportData;
+
+// ── پشتیبانِ خودکار: زمان‌بندی + نگه‌داشتِ چند نسخهٔ اخیر ──
+// برگرداندنِ هر نسخه از همان مسیرِ درون‌بری می‌رود؛ یعنی ادغامِ بی‌خطر:
+// فقط چیزهای تازه اضافه می‌شوند و هیچ ردیفِ فعلی پاک نمی‌شود (تکرارپذیر).
+function pfAbMsg(t, bad){
+  const el=document.getElementById("abMsg");
+  if(!el) return;
+  el.textContent=t;
+  el.className = bad ? "jmsg bad" : "jmsg good";
+}
+function pfAbBytes(n){
+  n=Number(n)||0;
+  if(n<1024) return n+" بایت";
+  if(n<1048576) return (n/1024).toFixed(1)+" کیلوبایت";
+  return (n/1048576).toFixed(2)+" مگابایت";
+}
+async function loadAutobackup(){
+  const st=document.getElementById("abStat");
+  try{
+    const r=await fetch("/api/autobackup",{cache:"no-store"});
+    const j=await r.json();
+    if(!r.ok||!j||j.ok===false) throw new Error((j&&j.error)||("HTTP "+r.status));
+    const cf=j.settings||{};
+    const tg=document.getElementById("abToggle"), ev=document.getElementById("abEvery"), kp=document.getElementById("abKeep");
+    if(tg) tg.checked=!!cf.enabled;
+    if(ev&&document.activeElement!==ev) ev.value=cf.interval_h;
+    if(kp&&document.activeElement!==kp) kp.value=cf.keep;
+    if(st){
+      const when = !cf.enabled ? "خاموش است"
+        : (j.due_now ? "نوبتِ نسخهٔ تازه رسیده"
+           : (j.next_in_h==null ? "—" : "نسخهٔ بعدی تا ~"+j.next_in_h+" ساعتِ دیگر"));
+      st.textContent="📦 "+j.count+" نسخه ("+pfAbBytes(j.total_bytes)+") · نگه‌داشتِ "+cf.keep
+        +" نسخه · هر "+cf.interval_h+" ساعت · "+when+" · پوشه: "+j.dir;
+    }
+    const bs=document.getElementById("bkState");
+    if(bs) bs.textContent = cf.enabled
+      ? "· پشتیبانِ خودکار روشن · هر "+cf.interval_h+" ساعت · "+j.count+" نسخه"
+      : "· پشتیبانِ خودکار خاموش";
+    const list=document.getElementById("abList");
+    if(list){
+      const rows=(j.backups||[]).map(b=>
+        '<div class="abrow"><span class="abname">'+b.name+'</span>'
+        +'<span class="abmeta">'+b.at+" · "+pfAbBytes(b.bytes)+"</span>"
+        +'<button class="upbtn abrestore" data-name="'+b.name+'" title="این نسخه را برگردان. مثلِ درون‌بری است: فقط چیزهای تازه اضافه می‌شود و هیچ ردیفِ فعلی پاک نمی‌شود.">↩️ برگرداندن</button></div>'
+      ).join("");
+      list.innerHTML = rows || '<div class="aempty">هنوز نسخه‌ای ساخته نشده.</div>';
+      list.querySelectorAll(".abrestore").forEach(b=>{ b.onclick=()=>pfAbRestore(b.dataset.name); });
+    }
+  }catch(e){
+    if(st) st.textContent="⚠ وضعیتِ پشتیبانِ خودکار خوانده نشد: "+e;
+    const bs=document.getElementById("bkState");
+    if(bs) bs.textContent="· ⚠ خوانده نشد";
+  }
+}
+async function pfAbSave(){
+  const tg=document.getElementById("abToggle"), ev=document.getElementById("abEvery"), kp=document.getElementById("abKeep");
+  pfAbMsg("در حالِ ذخیره…", false);
+  try{
+    const body={enabled:!!(tg&&tg.checked), interval_h:Number((ev&&ev.value)||24), keep:Number((kp&&kp.value)||7)};
+    const r=await fetch("/api/autobackup",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    const j=await r.json();
+    if(!r.ok||j.ok===false) throw new Error((j&&(j.error||(j.errors||[]).join(" · ")))||("HTTP "+r.status));
+    pfAbMsg("✅ ذخیره شد", false);
+    loadAutobackup();
+  }catch(e){ pfAbMsg("⚠ ذخیره نشد: "+e, true); }
+}
+async function pfAbNow(){
+  pfAbMsg("در حالِ ساختِ نسخه…", false);
+  try{
+    const r=await fetch("/api/autobackup",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({run_now:true})});
+    const j=await r.json();
+    if(!r.ok||j.ok===false) throw new Error((j&&(j.error||(j.errors||[]).join(" · ")))||("HTTP "+r.status));
+    const made=j.ran||{};
+    pfAbMsg("✅ نسخه ساخته شد: "+made.name+" ("+pfAbBytes(made.bytes)+(made.deleted?(" · "+made.deleted+" نسخهٔ قدیمی هرس شد"):"")+")", false);
+    loadAutobackup();
+  }catch(e){ pfAbMsg("⚠ نسخه ساخته نشد: "+e, true); }
+}
+async function pfAbRestore(name){
+  pfAbMsg("در حالِ برگرداندنِ «"+name+"»…", false);
+  try{
+    const r=await fetch("/api/autobackup?file="+encodeURIComponent(name),{cache:"no-store"});
+    const doc=await r.json();
+    if(!r.ok) throw new Error((doc&&doc.error)||("HTTP "+r.status));
+    const ir=await fetch("/api/import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(doc)});
+    const ij=await ir.json();
+    if(!ir.ok||ij.ok===false) throw new Error((ij&&(ij.error||(ij.errors||[]).join(" · ")))||("HTTP "+ir.status));
+    pfAbMsg("✅ برگردانده شد — ژورنال: "+ij.journal_added+" تازه ("+ij.journal_skipped+" تکراری) · آلارم: "+ij.alarms_added, false);
+    loadAlarms(); loadRisk(); loadAutobackup();
+  }catch(e){ pfAbMsg("⚠ برگرداندن نشد: "+e, true); }
+}
+const abToggle=document.getElementById("abToggle"), abSave=document.getElementById("abSave"), abNow=document.getElementById("abNow");
+if(abSave) abSave.onclick=pfAbSave;
+if(abNow) abNow.onclick=pfAbNow;
+if(abToggle) abToggle.onchange=pfAbSave;
+loadAutobackup();
+setInterval(loadAutobackup, 60000);
+
+// ثبتِ service worker تا اپ مثلِ یک اپِ نصب‌پذیر بالا بیاید (فقط روی http/https)
+  // ثبتِ سرویس‌ورکر + بنرِ «نسخهٔ تازه» در pfSwSetup() انجام می‌شود (بالاتر در همین اسکریپت).
+
+// نشانگرِ بازنگریِ کد + وضعیتِ ری‌استارتِ خودکارِ «کهنه»
+let revFirst=null, revRetry=null;
+async function loadRev(){
+  const el=document.getElementById("revChip"); if(!el) return;
+  try{
+    const r=await fetch("/api/revision",{cache:"no-store"});
+    const j=await r.json();
+    if(revRetry){ clearTimeout(revRetry); revRetry=null; }
+    const ar=j.autorestart||{}, blocked=ar.blocked;
+    const sha=(j.loaded&&j.loaded.sha)||"?";
+    const up=Math.round(j.uptime_s||0);
+    const upTxt=up<90 ? up+"s" : (up<5400 ? Math.round(up/60)+"m" : Math.round(up/3600)+"h");
+    const extra=[];
+    if(j.loaded&&j.loaded.dirty) extra.push("±dirty");
+    if(j.sha_drift) extra.push("disk:"+((j.disk&&j.disk.sha)||"?"));
+    if(revFirst===null) revFirst=sha;
+    const pageOld=(revFirst!==sha);
+    let cls="revchip", head="";
+    if(pageOld){ cls+=" warn"; head="⟳ صفحه قدیمی است — رفرش کن · "; }
+    else if(j.stale && blocked){ cls+=" bad"; head="⚠ کدِ تازه خراب است · "; }
+    else if(j.stale && ar.enabled){ cls+=" warn"; head="♻ در حالِ ری‌استارت · "; }
+    else if(j.stale){ cls+=" bad"; head="⚠ کهنه · "; }
+    el.textContent=head+sha+" · "+upTxt+(extra.length ? " · "+extra.join(" ") : "");
+    el.className=cls;
+    const p=[];
+    p.push(pageOld
+      ? "این صفحه با بازنگریِ "+revFirst+" بار شده و سرور الان "+sha+" را سرو می‌کند — برای دیدنِ رابطِ تازه صفحه را رفرش کن."
+      : "کدِ سروشده با دیسک یکی است.");
+    p.push("ری‌استارتِ خودکارِ کهنه: "+(ar.enabled ? "روشن (هر "+(ar.interval_s||5)+" ثانیه بررسی می‌شود)" : "خاموش"));
+    if(ar.last && ar.last.at) p.push("آخرین ری‌استارت: "+ar.last.at+" (از "+(ar.last.from||"?")+" به "+(ar.last.to||"?")+") · فایل‌ها: "+((ar.last.files||[]).join(", ")||"—"));
+    if(blocked) p.push("⚠ کدِ تازه روی دیسک سالم نیست، پس ری‌استارت انجام نمی‌شود: "+blocked.detail);
+    const chg=(j.changed_files||[]).map(c=>c.file).join(", ");
+    if(j.stale && chg) p.push("فایل‌های تازه‌تر از استارتِ پروسه: "+chg);
+    p.push("pid "+(j.pid||"")+" · استارتِ پروسه: "+(j.boot_local||""));
+    el.title=p.join(" · ");
+  }catch(e){
+    // سرور ممکن است همین الان خودش را از نو اجرا کرده باشد → زودتر دوباره بپرس
+    el.textContent="♻ در حالِ ری‌استارت…";
+    el.className="revchip warn";
+    el.title="ارتباط با سرور قطع بود (ری‌استارتِ خودکار؟): "+e;
+    if(!revRetry) revRetry=setTimeout(loadRev, 3000);
+  }
+}
+loadRev();
+setInterval(loadRev, 30000);
+
+// چیپِ «سنِ داده / باز-بستهٔ بازار» — مستقل از چیپِ کد و بدونِ هزینه‌ی شبکه‌ی سنگین:
+// اندپوینت فقط وضعیتِ آخرین تحلیل را می‌خواند و سنِ داده را همین‌حالا بازمحاسبه می‌کند.
+async function loadData(){
+  const el=document.getElementById("dataChip"); if(!el) return;
+  try{
+    const r=await fetch("/api/data_status",{cache:"no-store"});
+    const j=await r.json();
+    const f=j.fresh||{}, a=j.analyzed||{};
+    window._lastSeen=(a&&a.symbol)?a:null;   // حافظهٔ آخرین تحلیل (برای دکمه‌ی بروزرسانی)
+    const st=f.state||a.state;
+    const icon = st==="open"?"🟢" : st==="closed"?"🔴" : st?"🟡":"⚪";
+    const label = st==="open"?"داده زنده" : st==="closed"?"بازار بسته" : st==="thin"?"سشنِ نازک" : st==="delayed"?"داده عقب" : "داده؟";
+    const shortAge = f.age_human && st==="open" ? " · "+f.age_human : "";
+    el.textContent = icon+" "+label+shortAge;
+    el.className = "revchip"+(st==="closed"?" bad" : (st&&st!=="open"?" warn" : ""));
+    const p=[];
+    if(!st) p.push("هنوز هیچ تحلیلی ثبت نشده — بعد از اولین تحلیل، سنِ داده همین‌جا می‌آید.");
+    else p.push((f.reason||a.reason||"")+(!f.reason&&a.reason?" (واحد در زمانِ تحلیل)":""));
+    if(a.symbol) p.push("آخرین تحلیل: "+a.symbol+(a.tf?" · "+a.tf:"")+(a.style?" · سبکِ "+a.style:"")+(a.at?" · "+a.at:""));
+    if(f.last_bar_ts) p.push("آخرین کندلِ بسته: "+(f.last_bar_utc||"?")+" UTC · سنِ داده: "+(f.age_human||"—"));
+    p.push("ساعتِ نیویورک: "+(f.et_now||j.et_now||"—"));
+    if(j.killzone) p.push("کیل‌زون: "+j.killzone);
+    if(st && st!=="open") p.push("⚠ در این حالت پلن «الان قابلِ اجرا» نیست — فقط آماده‌سازیِ سناریو.");
+    el.title=p.join(" · ");
+  }catch(e){
+    el.textContent="⚪ داده؟";
+    el.className="revchip";
+    el.title="وضعیتِ داده در دسترس نیست: "+e;
+  }
+}
+loadData();
+setInterval(loadData, 30000);
+
+// ── پنلِ ریسک: سرمایه/درصد/سقف‌ها + وضعیتِ امروز (از ژورنال) ──────────
+// عناصر با `getElementById` صریح گرفته می‌شوند (نه هِلپِرِ غیرمستقیم) تا نگهبانِ
+// سلامت هم بتواند سیم‌کشی‌شان را ببیند و اگر روزی قطع شد، کامیت/CI رد شود.
+const rkBalanceEl = document.getElementById("rkBalance");
+const rkRiskEl    = document.getElementById("rkRisk");
+const rkDailyEl   = document.getElementById("rkDaily");
+const rkOpenEl    = document.getElementById("rkOpen");
+const rkStatEl    = document.getElementById("rkStat");
+const rkSaveEl    = document.getElementById("rkSave");
+const rkMsgEl     = document.getElementById("rkMsg");
+// مقدار را فقط وقتی می‌گذاریم که کاربر در حالِ تایپ در همان کادر نباشد
+function _rkSet(el, v){ if(!el) return; if(document.activeElement===el) return; el.value=(v==null?"":v); }
+function rkSetState(t){
+  const el=document.getElementById("rkState"); if(el) el.textContent=t;
+}
+function rkRenderStat(j){
+  const el=rkStatEl; if(!el) return;
+  const s=(j&&j.settings)||{}, d=(j&&j.daily)||{};
+  const ccy=s.account_ccy||"USD";
+  const bal=Number(s.balance||0), rp=Number(s.risk_pct||0), rpct=Number(d.realized_pct||0);
+  const perTrade=(bal>0&&rp>0)?(bal*rp/100):0;
+  const cls = d.breached ? "bad" : (rpct<0 ? "warn" : "good");
+  const parts=[];
+  parts.push("سرمایه: <b>"+(s.balance!=null?Number(s.balance).toLocaleString():"—")+" "+ccy+"</b>");
+  parts.push("ریسکِ هر معامله: <b>"+(s.risk_pct!=null?s.risk_pct:"—")+"٪</b>"+(perTrade?" (= <b>"+perTrade.toFixed(2)+" "+ccy+"</b>)":""));
+  parts.push("امروز: <b class=\""+cls+"\">"+(rpct>0?"+":"")+rpct+"٪</b> ("+Number(d.realized_r||0)+"R · "+(d.closed_today||0)+" معاملهٔ بسته)");
+  if(d.remaining_pct!=null) parts.push("باقی‌مانده تا سقفِ "+d.limit_pct+"٪: <b>"+d.remaining_pct+"٪</b>"+(d.remaining_amount!=null?" ("+d.remaining_amount+" "+ccy+")":""));
+  parts.push("ریسکِ باز: <b class=\""+(d.open_breached?"bad":"")+"\">"+Number(d.open_risk_pct||0)+"٪</b> از سقفِ "+d.open_risk_limit_pct+"٪ ("+(d.open_count||0)+" پوزیشن)");
+  if(d.breached) parts.push("<span class=\"bad\">⛔ سقفِ ضررِ روزانه پر شده — امروز ورودِ جدید مجاز نیست.</span>");
+  else if(d.open_breached) parts.push("<span class=\"bad\">⛔ سقفِ ریسکِ باز پر شده — اول یک پوزیشنِ باز را ببند.</span>");
+  el.innerHTML = parts.join(" · ");
+  rkSetState("· امروز "+(rpct>0?"+":"")+rpct+"٪ · ریسکِ باز "+Number(d.open_risk_pct||0)+"٪");
+}
+async function loadRisk(){
+  try{
+    const r = await fetch("/api/risk",{cache:"no-store"});
+    const j = await r.json();
+    if(!j || j.ok===false){
+      if(rkStatEl) rkStatEl.textContent = "ماژولِ ریسک در دسترس نیست: "+((j&&j.error)||"؟");
+      rkSetState("· در دسترس نیست");
+      return;
+    }
+    const s=j.settings||{};
+    _rkSet(rkBalanceEl, s.balance);
+    _rkSet(rkRiskEl,    s.risk_pct);
+    _rkSet(rkDailyEl,   s.daily_loss_limit_pct);
+    _rkSet(rkOpenEl,    s.max_open_risk_pct);
+    rkRenderStat(j);
+  }catch(e){
+    if(rkStatEl) rkStatEl.textContent = "وضعیتِ ریسک در دسترس نیست: "+e;
+    rkSetState("· در دسترس نیست");
+  }
+}
+async function saveRisk(){
+  const btn=rkSaveEl, msg=rkMsgEl;
+  const num = (el) => { const v=((el||{}).value||"").trim(); return v===""?null:Number(v); };
+  btn.disabled=true; msg.textContent="در حالِ ذخیره…"; msg.className="jmsg";
+  try{
+    const r = await fetch("/api/risk",{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({balance:num(rkBalanceEl), risk_pct:num(rkRiskEl),
+                            daily_loss_limit_pct:num(rkDailyEl), max_open_risk_pct:num(rkOpenEl)})
+    });
+    const j = await r.json();
+    if(j.error){ msg.textContent="خطا: "+j.error; msg.className="jmsg bad"; return; }
+    msg.textContent="✅ ذخیره شد"; msg.className="jmsg good";
+    rkRenderStat(j);
+    // اگر تحلیلی روی صفحه است، سایزِ پوزیشن را فوراً با تنظیماتِ تازه دوباره بگیر
+    const l = window._last;
+    if(l && l.symbol){
+      const rr = await fetch("/api/analyze?symbol="+encodeURIComponent(l.symbol)+"&style="+(l.style_key||"day"));
+      const nd = await rr.json();
+      if(!nd.error) render(nd);
+    }
+  }catch(e){
+    msg.textContent="ارتباط ناموفق: "+e; msg.className="jmsg bad";
+  }finally{
+    btn.disabled=false;
+    setTimeout(()=>{ if(msg.textContent==="✅ ذخیره شد") msg.textContent=""; }, 4000);
+  }
+}
+if(rkSaveEl) rkSaveEl.onclick = saveRisk;
+[rkBalanceEl, rkRiskEl, rkDailyEl, rkOpenEl].forEach(el=>{
+  if(el) el.addEventListener("keydown", e=>{ if(e.key==="Enter") saveRisk(); });
+});
+loadRisk();
+
+// علامتِ پایانِ بوت — اگر این خط اجرا نشود، هشدارِ قرمزِ نگهبانِ بوت بالای صفحه می‌آید
+window.__pipfoundBooted = true;
+</script>
+</body>
+</html>
+"""
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  صفحه‌ی جداگانه‌ی فاندمنتال — تقویمِ اقتصادی + تحلیلِ اثرِ خبرها
+# ═══════════════════════════════════════════════════════════════════
+FUND_PAGE = r"""<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pipfound — فاندمنتال (اخبارِ اقتصادی)</title>
+<style>
+:root{
+  --bg:#0b0f17; --panel:#141a26; --panel2:#1b2333; --line:#28324a;
+  --txt:#e8eefc; --muted:#8a97b3; --accent:#0ea5e9; --accent2:#6366f1;
+  --good:#22c55e; --bad:#ef4444; --warn:#f59e0b;
+}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(1200px 600px at 80% -10%,#16223b 0%,var(--bg) 55%);
+  color:var(--txt);font-family:-apple-system,BlinkMacSystemFont,"Vazirmatn","Segoe UI",Tahoma,sans-serif;
+  min-height:100vh;padding:28px 16px}
+.wrap{max-width:960px;margin:0 auto}
+h1{font-size:22px;margin:0 0 4px;font-weight:800;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+.sub{color:var(--muted);font-size:13px;margin:0 0 18px}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
+.toolbar .seg{display:flex;gap:4px;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:4px}
+.toolbar .seg button{background:transparent;border:0;color:var(--muted);padding:9px 14px;border-radius:9px;
+  cursor:pointer;font-size:13px;font-weight:700;font-family:inherit;transition:.15s}
+.toolbar .seg button.active{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#04121f}
+.toolbar .refresh{margin-inline-start:auto;background:var(--panel2);border:1px solid var(--line);color:var(--txt);
+  border-radius:10px;padding:9px 16px;font-size:13px;font-weight:700;cursor:pointer;font-family:inherit}
+.toolbar .refresh:hover{border-color:var(--accent)}
+.gen{color:var(--muted);font-size:12px;margin-bottom:14px}
+.note{background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);border-radius:12px;
+  padding:12px 16px;font-size:13px;line-height:1.8;color:#f6d99a;margin-bottom:18px}
+.next{background:linear-gradient(135deg,rgba(14,165,233,.12),rgba(99,102,241,.10));
+  border:1px solid rgba(14,165,233,.4);border-radius:14px;padding:16px;margin-bottom:20px}
+.next .lbl{font-size:12px;color:var(--muted);margin-bottom:4px}
+.next .ttl{font-size:17px;font-weight:800}
+.next .cd{font-variant-numeric:tabular-nums;color:var(--accent);font-weight:800}
+.ev{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:0;margin-bottom:14px;overflow:hidden}
+.ev-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:16px 18px;cursor:pointer}
+.ev-head:hover{background:var(--panel2)}
+.ev-icon{font-size:22px}
+.ev-main{flex:1;min-width:200px}
+.ev-title{font-size:15.5px;font-weight:800;line-height:1.4}
+.ev-title .en{color:var(--muted);font-size:12.5px;font-weight:600}
+.ev-meta{color:var(--muted);font-size:12.5px;margin-top:4px;line-height:1.7}
+.imp{font-size:11px;padding:4px 10px;border-radius:8px;font-weight:800;white-space:nowrap}
+.imp.High{background:rgba(239,68,68,.14);color:#fca5a5;border:1px solid rgba(239,68,68,.4)}
+.imp.Medium{background:rgba(245,158,11,.13);color:#fcd34d;border:1px solid rgba(245,158,11,.35)}
+.ccy{font-size:12px;padding:4px 10px;border-radius:8px;background:var(--panel2);border:1px solid var(--line);
+  font-weight:800;white-space:nowrap}
+.cd-badge{font-size:12px;padding:4px 10px;border-radius:8px;background:rgba(14,165,233,.12);
+  color:#7dd3fc;border:1px solid rgba(14,165,233,.35);font-weight:800;white-space:nowrap}
+.chev{color:var(--muted);font-size:13px;transition:.2s}
+.ev.open .chev{transform:rotate(180deg)}
+.ev-body{display:none;padding:0 18px 18px;border-top:1px solid var(--line)}
+.ev.open .ev-body{display:block}
+.times{display:flex;gap:20px;flex-wrap:wrap;font-size:13px;margin:14px 0;color:#cdd8ef}
+.times b{color:var(--txt)}
+.fc{display:flex;gap:20px;flex-wrap:wrap;font-size:13px;margin-bottom:14px}
+.fc .box{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:8px 14px}
+.fc .box .k{color:var(--muted);font-size:11px}
+.fc .box .v{font-weight:800;font-variant-numeric:tabular-nums}
+.why{background:rgba(99,102,241,.08);border-right:3px solid var(--accent2);border-radius:8px;
+  padding:10px 14px;font-size:13px;line-height:1.85;color:#dbe0ff;margin-bottom:14px}
+.scen{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:640px){.scen{grid-template-columns:1fr}}
+.scard{border-radius:12px;padding:14px}
+.scard.beat{background:rgba(34,197,94,.07);border:1px solid rgba(34,197,94,.3)}
+.scard.miss{background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.28)}
+.scard .sh{font-size:13px;font-weight:800;margin-bottom:6px}
+.scard.beat .sh{color:#86efac}
+.scard.miss .sh{color:#fca5a5}
+.scard.res{background:rgba(148,163,184,.07);border:1px solid rgba(148,163,184,.28)}
+.scard.res .sh{color:#cbd5e1}
+.res-num{font-size:13.5px;font-weight:800;display:flex;gap:8px;flex-wrap:wrap;align-items:baseline}
+.res-num b{font-variant-numeric:tabular-nums;font-size:17px}
+.res-imp{margin-top:10px;font-size:12.5px;line-height:1.75;color:#dbe0ff;
+  background:rgba(99,102,241,.08);border:1px solid rgba(99,102,241,.25);border-radius:8px;padding:9px 12px}
+.res-wait{font-size:13px;color:var(--muted);line-height:1.8}
+.cd-badge.past{background:rgba(34,197,94,.12);color:#86efac;border-color:rgba(34,197,94,.35)}
+.scard .cd-dir{font-size:13px;font-weight:800;margin-bottom:10px;color:var(--txt)}
+.pairtbl{width:100%;border-collapse:collapse;font-size:13px}
+.pairtbl td{padding:5px 4px;border-bottom:1px dashed var(--line)}
+.pairtbl td:first-child{font-weight:700;font-variant-numeric:tabular-nums}
+.pairtbl td:last-child{text-align:left;font-weight:800}
+.dir-up{color:var(--good)}
+.dir-dn{color:var(--bad)}
+.dir-neu{color:var(--muted)}
+.gold{margin-top:10px;font-size:12.5px;line-height:1.75;color:#e9d9a6;
+  background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.25);border-radius:8px;padding:9px 12px}
+.gold .g-dir{font-weight:800}
+.empty{text-align:center;color:var(--muted);padding:40px;font-size:14px}
+.err{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);color:#fca5a5;
+  border-radius:12px;padding:16px;font-size:14px}
+.back{display:inline-block;margin-bottom:16px;color:var(--accent);text-decoration:none;font-size:13px;font-weight:700}
+.back:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back" href="/">← بازگشت به تحلیلگر</a>
+  <h1>📰 فاندمنتال — اخبارِ اقتصادی</h1>
+  <p class="sub">اخبارِ پرتأثیرِ پیشِ‌رو (GDP، تورم، اشتغال، نرخِ بهره) با ساعتِ دقیقِ اعلام و تحلیلِ اثر روی جفت‌ارزهای مهم و طلا/نقره.</p>
+
+  <div class="toolbar">
+    <div class="seg" id="impSeg">
+      <button data-imp="high" class="active">فقط پرتأثیر (High)</button>
+      <button data-imp="all">همه (High + Medium)</button>
+    </div>
+    <div class="seg" id="horSeg">
+      <button data-h="48">۴۸ ساعت</button>
+      <button data-h="120" class="active">۵ روز</button>
+      <button data-h="180">هفتگی</button>
+    </div>
+    <div class="seg" id="pastSeg" title="چند ساعت از خبرهای اعلام‌شده در فید بماند">
+      <button data-p="6" class="active">گذشته: ۶ ساعت</button>
+      <button data-p="12">۱۲ ساعت</button>
+      <button data-p="24">۲۴ ساعت</button>
+    </div>
+    <button class="refresh" id="refresh">↻ به‌روزرسانی</button>
+  </div>
+
+  <div class="gen" id="gen"></div>
+  <div class="note" id="note"></div>
+  <div id="nextWrap"></div>
+  <div id="list"><div class="empty">در حالِ بارگذاریِ تقویم…</div></div>
+</div>
+
+<script>
+let impMode="high", horHours=120, DATA=null;
+// `pastHours` پنجرهٔ گذشتهٔ فید (۶/۱۲/۲۴ ساعت) است و به سرور می‌رود.
+// `T0` لحظهٔ خواندنِ فید و `openKeys` کارت‌های بازِ کاربر را نگه می‌دارد تا
+// بازخوانیِ ۶۰ثانیه‌ای فهرست، کارتِ باز را نبندد و صفحه «رفرش» به‌نظر نرسد.
+let pastHours=6, T0=Date.now(), openKeys=new Set();
+const $=s=>document.querySelector(s);
+const evKey=e=>`${e.iso}|${e.title}`;
+
+function dirClass(d){ if(d.includes("صعود"))return "dir-up"; if(d.includes("نزول"))return "dir-dn"; return "dir-neu"; }
+
+function pairRows(pairs){
+  return pairs.map(p=>`<tr><td>${p[0]}</td><td class="${dirClass(p[1])}">${p[1]}</td></tr>`).join("");
+}
+
+function scenCard(cls, s){
+  const g=s.gold;
+  return `<div class="scard ${cls}">
+    <div class="sh">${s.label}</div>
+    <div class="cd-dir">${s.ccy_dir}</div>
+    <table class="pairtbl"><tbody>${pairRows(s.pairs)}</tbody></table>
+    <div class="gold">🥇 <span class="g-dir ${dirClass(g[1])}">${g[0]}: ${g[1]}</span><br>${g[2]}</div>
+  </div>`;
+}
+
+function resCard(e, v){
+  if(!v.found){
+    const txt = (DATA && DATA.source_ok === false)
+      ? "◇ منبعِ نتیجه پاسخ نداد — نتیجه و تأثیری برای گفتن نیست"
+      : "⏳ تازه اعلام شد — عددِ اعلام‌شده هنوز از منبع نرسیده";
+    return `<div class="scard res"><div class="sh">نتیجه</div><div class="res-wait">${txt}</div></div>`;
+  }
+  const arr = v.outcome==="صعودی"?"▲":(v.outcome==="نزولی"?"▼":"◆");
+  const dd = v.outcome==="صعودی"?"صعودی":(v.outcome==="نزولی"?"نزولی":"خنثی");
+  const ff = v.beat?` · ${v.beat}`:"";
+  const dd2 = v.dir?` · ${e.country_fa||""} ${v.dir}`:"";
+  const ef = v.effect||{};
+  const arw = x=>String(x||"").replace("صعود","").replace("نزول","").trim();
+  const pr = (ef.pairs||[]).map(x=>`${x[0]} ${arw(x[1])}`).join(" · ");
+  const gd = ef.gold?`${ef.gold[0]} ${arw(ef.gold[1])}`:"";
+  const imp = [pr, gd].filter(Boolean).join(" · ");
+  return `<div class="scard res">
+    <div class="sh">نتیجهٔ اعلام‌شده</div>
+    <div class="res-num"><span>${arr}</span><span>نتیجه: <b>${v.actual}</b></span><span>${dd}${ff}${dd2}</span></div>
+    ${imp?`<div class="res-imp">تأثیرِ همین نتیجه: ${imp}</div>`:""}
+  </div>`;
+}
+
+function evCard(e,idx){
+  const a=e.analysis||{};
+  const v=e.verdict||{};
+  const past=!!e.passed;
+  const fcBox = e.forecast?`<div class="box"><div class="k">پیش‌بینی</div><div class="v">${e.forecast}</div></div>`:"";
+  const prBox = e.previous?`<div class="box"><div class="k">قبلی</div><div class="v">${e.previous}</div></div>`:"";
+  const enTtl = e.title_fa? `<div class="en">${e.title}</div>` : "";
+  const faTtl = e.title_fa || e.title;
+  const badge = past
+    ? (v.found?`✅ اعلام شد${e.minutes_ago!=null?` · ${e.minutes_ago} دقیقه پیش`:""}`:"⏳ نتیجه به‌زودی")
+    : `⏳ ${e.countdown}`;
+  // سوییچِ فید: رویدادِ اعلام‌شده «نتیجه + تأثیرِ محقق» را می‌گیرد، نه دو سناریوی
+  // شرطی — بارِ این رویدادها عمداً `analysis` ندارد (تحلیلِ شرطی فقط برای پیشِ‌رو).
+  const body = past
+    ? resCard(e, v)
+    : `<div class="why">💡 ${a.why}</div>
+      <div class="scen">
+        ${scenCard("beat", a.beat)}
+        ${scenCard("miss", a.miss)}
+      </div>`;
+  return `<div class="ev${openKeys.has(evKey(e))?" open":""}" data-i="${idx}" data-key="${evKey(e)}">
+    <div class="ev-head">
+      <span class="ev-icon">${a.icon||e.icon||""}</span>
+      <div class="ev-main">
+        <div class="ev-title">${faTtl}${enTtl}</div>
+        <div class="ev-meta">${a.cat||e.cat||""} · ${e.et}<br>${e.tehran}</div>
+      </div>
+      <span class="ccy">${e.country_fa} (${e.country})</span>
+      <span class="imp ${e.impact}">${e.impact==="High"?"پرتأثیر":"متوسط"}</span>
+      <span class="cd-badge${past?" past":""}"${past&&v.found&&e.minutes_ago!=null?` data-m="${e.minutes_ago}" data-t0="${T0}"`:``}${!past&&e.in_s!=null?` data-in-s="${e.in_s}"`:``}>${badge}</span>
+      <span class="chev">▾</span>
+    </div>
+    <div class="ev-body">
+      <div class="times">
+        <span>🗽 <b>${e.et}</b></span>
+        <span>🇮🇷 <b>${e.tehran}</b></span>
+      </div>
+      <div class="fc">${fcBox}${prBox}</div>
+      ${body}
+    </div>
+  </div>`;
+}
+
+function render(){
+  if(!DATA) return;
+  if(DATA.error){ $("#list").innerHTML=`<div class="err">خطا: ${DATA.error}</div>`; return; }
+  $("#gen").textContent="تولیدِ گزارش: "+(DATA.generated_tehran||"");
+  $("#note").textContent="⚠️ "+(DATA.note||"");
+  let evs=DATA.events||[];
+  if(impMode==="high") evs=evs.filter(e=>e.impact==="High");
+  renderNext();
+  if(!evs.length){ $("#list").innerHTML='<div class="empty">در این بازه خبری با این سطحِ تأثیر پیدا نشد.</div>'; return; }
+  $("#list").innerHTML=evs.map((e,i)=>evCard(e,i)).join("");
+  bindHeads($("#list"));
+}
+
+// کادرِ «نزدیک‌ترین خبرِ پرتأثیر» جدا شد تا بعد از سوییچِ لحظه‌ایِ یک خبر،
+// فقط همین کادر تازه شود (نه کلِ فهرست).
+function renderNext(){
+  const nh=DATA && DATA.next_high;
+  $("#nextWrap").innerHTML = (nh && nh.analysis) ? `<div class="next">
+    <div class="lbl">نزدیک‌ترین خبرِ پرتأثیر</div>
+    <div class="ttl">${nh.analysis.icon} ${nh.title_fa||nh.title} — ${nh.country_fa}</div>
+    <div class="ev-meta" style="margin-top:6px">${nh.et} · 🇮🇷 ${nh.tehran}</div>
+    <div style="margin-top:6px">تا اعلام: <span class="cd">${nh.countdown}</span></div>
+  </div>` : "";
+}
+
+// هندلرِ باز/بستهٔ کارت‌ها — هم بعد از رندرِ کامل، هم بعد از سوییچِ تک‌کارت.
+function bindHeads(root){
+  root.querySelectorAll(".ev-head").forEach(h=>{
+    h.onclick=()=>{
+      const c=h.closest(".ev"), k=c.dataset.key;
+      // کلیدِ کارتِ باز نگه داشته می‌شود تا رندرِ بعدیِ فهرست (هر ۶۰ ثانیه)
+      // کارِ بازِ کاربر را نبندد.
+      if(c.classList.toggle("open")) openKeys.add(k); else openKeys.delete(k);
+    };
+  });
+}
+
+// بجِ «N دقیقه پیش» هر ۳۰ ثانیه زنده می‌شود — نه با رفرشِ صفحه، نه با
+// درخواستِ تازه، نه با رندرِ دوبارهٔ فهرست. مبنا `data-m`ِ سرور (`minutes_ago`
+// در لحظهٔ خواندنِ فید) + زمانِ سپری‌شده از همان لحظه است؛ پس ساعتِ دستگاهِ
+// کاربر هیچ نقشی ندارد و عقب/جلو بودنِ ساعت هم عدد را خراب نمی‌کند.
+function tickBadges(){
+  const ms=Date.now()-T0, mins=Math.floor(ms/60000);
+  document.querySelectorAll("#list .cd-badge.past[data-m]").forEach(b=>{
+    // مبنای هر بج لحظهٔ رسیدنِ *همان* داده است (کارتِ سوییچ‌شده بعد از T0
+    // آمده؛ وگرنه چند دقیقهٔ اضافه به عددش می‌خورد).
+    const t0=parseInt(b.dataset.t0,10);
+    const m=(parseInt(b.dataset.m,10)||0)+Math.floor((isFinite(t0)?(Date.now()-t0):ms)/60000);
+    b.textContent=`✅ اعلام شد · ${m} دقیقه پیش`;
+  });
+  // لحظهٔ اعلام: هر کارتِ پیش‌رویی که شمارشِ معکوسش به صفر رسیده، همین‌جا
+  // سوییچ می‌شود (بدونِ بازخوانیِ کلِ فهرست و بدونِ انتظار برای پنجرهٔ ۶۰ثانیه‌ای).
+  document.querySelectorAll("#list .cd-badge[data-in-s]").forEach(b=>{
+    // توجه: `data-in-s` در dataset به `inS` می‌رود (نه `in_s`)؛ با کلیدِ
+    // اشتباه عدد `undefined` می‌شد و همهٔ کارت‌های پیشِ‌رو فوراً "رسیده" حساب
+    // می‌شدند ⇒ خواندن با `getAttribute` صریح است.
+    const left=(parseInt(b.getAttribute("data-in-s"),10)||0)-Math.floor(ms/1000);
+    const c=b.closest(".ev");
+    if(left<=0 && c && !c.dataset.flip) flipEvent(c.dataset.key);
+  });
+}
+
+async function load(){
+  // فقط بارِ اول جای‌گیرِ بارگذاری می‌گذارد؛ بازخوانیِ دوره‌ای نباید فهرستِ
+  // کاربر را یک لحظه خالی کند (همان چیزی که مثلِ «رفرشِ صفحه» حس می‌شود).
+  const paint=s=>{ if(!DATA) $("#list").innerHTML=`<div class="empty">در حالِ بارگذاریِ تقویم… ${s} ثانیه</div>`; };
+  if(!DATA) paint(0);
+  try{
+    DATA=await jget("/api/fundamental?hours="+horHours+"&past="+pastHours, paint);
+    T0=Date.now();
+    render();
+  }catch(err){
+    const msg=(err && err.name==="AbortError")
+      ? `فید در ${Math.round(FEED_TIMEOUT_MS/1000)} ثانیه برنگشت (منبع کند/در دسترس نیست).`
+      : `ارتباط ناموفق: ${err}`;
+    $("#list").innerHTML=`<div class="err">${msg} <button type="button" onclick="load()">تلاشِ دوباره</button></div>`;
+  }
+}
+
+// ⏱️ درخواستِ JSON با ساعتِ زنده + سقفِ زمانی (۹۰ ثانیه).
+// چرا: تقویم/ستونِ Actual در حالتِ سرد چند ثانیه‌ای می‌آیند؛ اگر آن میانه شبکه
+// کند باشد، صفحهٔ فاندمنتال بی‌نهایت «در حالِ بارگذاری» می‌مانْد و کاربر فقط
+// انتظار و اسپینرِ بی‌پیام می‌دید. حالا ثانیه‌ها شمرده می‌شود و پس از سقف، پیامِ
+// روشن + دکمهٔ تلاشِ دوباره می‌آید (اعلام وابستگی به تعریفِ تابع ندارد —
+// `jget` declaration است و در همین اسکوپ hoist می‌شود).
+const FEED_TIMEOUT_MS=90000;
+async function jget(url, onTick){
+  const t0=Date.now();
+  const AC=(typeof AbortController==="function")?new AbortController():null;
+  const tick=onTick?setInterval(()=>onTick(Math.floor((Date.now()-t0)/1000)),500):null;
+  const to=AC?setTimeout(()=>AC.abort(),FEED_TIMEOUT_MS):null;
+  if(onTick) onTick(0);
+  try{ const r=await fetch(url, AC?{signal:AC.signal}:undefined); return await r.json(); }
+  finally{ if(tick)clearInterval(tick); if(to)clearTimeout(to); }
+}
+
+// ⏱️ سوییچِ لحظه‌ایِ اعلام: کارتِ پیشِ‌رو درست وقتی شمارشِ معکوسش به صفر
+// می‌رسد، از سرور فقط «همین یک رویداد» را می‌پرسد و اگر عدد اعلام شده باشد
+// همان‌جا «نتیجه + تأثیرِ محقق» می‌گیرد — بدونِ بازخوانیِ کلِ فهرست و بدونِ
+// انتظار برای پنجرهٔ ۶۰ثانیه‌ای. اگر عدد هنوز از منبع نرسیده باشد، ردیفِ
+// صادقِ انتظار می‌مانَد و با یک سقفِ مشخص (نه چرخهٔ بی‌پایان) دوباره پرسیده
+// می‌شود؛ و اگر ساعتِ ما کمی جلوتر از سرور باشد، کارت دست‌نخورده می‌مانَد.
+const FLIP_RETRY_MS=60000, FLIP_RETRY_MAX=8, flipTries={};
+const findCard=k=>Array.from(document.querySelectorAll("#list .ev")).find(x=>x.dataset.key===k);
+
+async function flipEvent(key){
+  const iso=String(key||"").split("|")[0];
+  const card=findCard(key);
+  if(!iso || !card) return;
+  card.dataset.flip="1";
+  try{
+    const d=await jget(`/api/fundamental?event=${encodeURIComponent(iso)}&hours=${horHours}&past=${pastHours}`);
+    const ev=(d && d.event)||null;
+    if(!ev || ev.passed!==true){
+      // سرور می‌گوید هنوز اعلام نشده (یا رویداد از پنجره بیرون رفته) ⇒ هیچ
+      // ادعایی ساخته نمی‌شود؛ کارت همان‌طور می‌مانَد و تیکِ بعدی دوباره می‌سنجد.
+      delete card.dataset.flip;
+      return;
+    }
+    const nk=evKey(ev);   // عنوانِ همین رویداد ممکن است در منبع عوض شده باشد
+    patchEvent(ev, key);
+    DATA.next_high=(d && d.next_high)||null;
+    renderNext();
+    if(!((ev.verdict||{}).found)){
+      // اعلام شد ولی عددش هنوز نرسیده: صادقانه منتظر می‌مانیم و با سقف
+      // دوباره می‌پرسیم (وقتی عدد رسید، همین مسیر کارت را کامل می‌کند).
+      const n=(flipTries[key]||0)+1; flipTries[key]=n;
+      if(n<=FLIP_RETRY_MAX) setTimeout(()=>flipEvent(nk), FLIP_RETRY_MS);
+    }else{
+      delete flipTries[key];
+    }
+  }catch(err){
+    const c=findCard(key); if(c) delete c.dataset.flip;
+  }
+}
+
+// فقط کارتِ همان رویداد درجا جایگزین می‌شود (نه بازسازیِ کلِ فهرست) و حالِ
+// باز/بستهٔ کاربر حفظ می‌شود؛ سطرِ همان رویداد در DATA هم به‌روز می‌شود تا
+// رندرِ بعدی همان تصویر را نشان دهد.
+function patchEvent(ev, key){
+  // کلیدِ کارت از (زمان | عنوان) ساخته می‌شود؛ اگر منبع عنوانِ همان رویداد را
+  // عوض کرده باشد سرور کلیدِ تازه می‌دهد. در آن حالت سطرِ DATA جایگزین می‌شود
+  // (نه اضافه) و کارت با کلیدِ تازه پیدا می‌شود — وگرنه یک سطرِ تکراری
+  // می‌مانْد و کارتِ سوییچ‌شده گم می‌شد.
+  const nk=evKey(ev);
+  if(DATA && Array.isArray(DATA.events)){
+    const i=DATA.events.findIndex(x=>evKey(x)===key);
+    if(i>=0) DATA.events[i]=ev; else DATA.events.push(ev);
+  }
+  const card=findCard(key);
+  if(!card) return;
+  const wasOpen=card.classList.contains("open") || openKeys.has(key);
+  const idx=parseInt(card.dataset.i,10)||0;
+  card.outerHTML=evCard(ev, idx);
+  const nc=findCard(nk);
+  if(!nc) return;
+  bindHeads(nc);
+  if(nk!==key) openKeys.delete(key);
+  if(wasOpen){ openKeys.add(nk); nc.classList.add("open"); }
+  // عددِ «دقیقه پیش»ِ همین کارت از لحظهٔ همین سوییچ شمرده می‌شود، نه از T0ِ
+  // خواندنِ قبلیِ فید — وگرنه عددِ بج چند دقیقه جلو می‌زند.
+  const nb=nc.querySelector(".cd-badge[data-m]");
+  if(nb) nb.setAttribute("data-t0", String(Date.now()));
+}
+
+$("#impSeg").addEventListener("click",e=>{
+  const b=e.target.closest("button"); if(!b)return;
+  document.querySelectorAll("#impSeg button").forEach(x=>x.classList.remove("active"));
+  b.classList.add("active"); impMode=b.dataset.imp; render();
+});
+$("#horSeg").addEventListener("click",e=>{
+  const b=e.target.closest("button"); if(!b)return;
+  document.querySelectorAll("#horSeg button").forEach(x=>x.classList.remove("active"));
+  b.classList.add("active"); horHours=parseInt(b.dataset.h,10); load();
+});
+$("#pastSeg").addEventListener("click",e=>{
+  const b=e.target.closest("button"); if(!b)return;
+  document.querySelectorAll("#pastSeg button").forEach(x=>x.classList.remove("active"));
+  b.classList.add("active"); pastHours=parseInt(b.dataset.p,10); load();
+});
+$("#refresh").onclick=load;
+load();
+// بجِ «N دقیقه پیش» هر ۳۰ ثانیه زنده می‌شود و فهرست هر ۶۰ ثانیه از سرور
+// تازه می‌شود؛ هیچ‌کدام رفرشِ صفحه یا بستنِ کارتِ باز نیستند.
+setInterval(tickBadges, 30000);
+setInterval(load, 60000);
+</script>
+</body>
+</html>
+"""
+
+
+# شمارشِ درخواست‌های در جریان — ری‌استارتِ خودکار فقط وقتی انجام می‌شود که
+# هیچ درخواستی وسطِ کار نباشد (مثلاً وسطِ یک بک‌تستِ چنددقیقه‌ای قطع نشود).
+_REQ_ACTIVE = [0]
+_REQ_LOCK = threading.Lock()
+_REQ_IDLE = threading.Event()
+_REQ_IDLE.set()
+
+
+def _req_enter():
+    with _REQ_LOCK:
+        _REQ_ACTIVE[0] += 1
+        _REQ_IDLE.clear()
+
+
+def _req_leave():
+    with _REQ_LOCK:
+        _REQ_ACTIVE[0] = max(0, _REQ_ACTIVE[0] - 1)
+        if _REQ_ACTIVE[0] == 0:
+            _REQ_IDLE.set()
+
+
+# ── نصب روی دستگاه (PWA روی LAN) ─────────────────────────────────
+# host=0.0.0.0 یعنی «باز برای شبکه»؛ در آن حالت بدونِ گیتِ توکن، هر دستگاهی
+# داخلِ شبکه هم می‌تواند ببیند و هم در ژورنال بنویسد. --lan خودش یک توکنِ
+# تصادفی می‌سازد و HTTPSِ خودگواهی‌شده می‌آورد (نصبِ PWA روی سافاری فقط روی
+# https کار می‌کند) و یک پورتِ HTTPِ محلی برای «راه‌اندازیِ اولیه» باز می‌کند.
+_ACCESS_TOKEN = ""      # خالی = بدونِ گیت (فقط host 127.0.0.1)
+_ACCESS_COOKIE = "pf_tok"
+_TLS_CERT = None        # مسیرِ گواهیِ موقت در حالتِ --lan
+_TLS_KEY = None
+_TLS_PORT = None        # پورتِ HTTPS واقعی (وقتی بوت‌استرپِ HTTP فعال است)
+lan_open = False        # host=0.0.0.0 بدونِ TLS (فقط برای گزارشِ /api/install)
+CURRENT_PORT = 8787     # در main() ست می‌شود؛ برای گزارشِ /api/install
+
+
+def _install_info():
+    """اطلاعاتِ اتصال برای پنلِ نصب: آدرسِ LAN و آدرس‌های هر اینترفیس."""
+    import socket
+    addrs = []
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip not in addrs and not ip.startswith("127."):
+                addrs.append(ip)
+    except Exception:
+        pass
+    lan_port = _TLS_PORT or CURRENT_PORT
+    scheme = "https" if _TLS_PORT else "http"
+    lan_url = f"{scheme}://<ip-of-this-mac>:{lan_port}" if not addrs else \
+              f"{scheme}://{addrs[0]}:{lan_port}"
+    return {
+        "ok": True,
+        "lan": {"enabled": bool(_TLS_PORT or _ACCESS_TOKEN or lan_open),
+                "url": lan_url, "port": lan_port, "scheme": scheme,
+                "https": bool(_TLS_PORT), "token_required": bool(_ACCESS_TOKEN),
+                "addresses": addrs},
+        "local": f"http://127.0.0.1:{CURRENT_PORT}",
+    }
+
+
+def _make_self_signed_cert():
+    """گواهیِ خودگواهی‌شده با opensslِ سیستم (stdlib گواهی نمی‌سازد).
+    مسیرِ فایل‌ها در ~/pipfound/tls تا بینِ ری‌استارت‌ها ثابت بماند."""
+    import subprocess
+    d = os.path.join(HOME, "pipfound", "tls")
+    os.makedirs(d, exist_ok=True)
+    cert, key = os.path.join(d, "cert.pem"), os.path.join(d, "key.pem")
+    if not (os.path.isfile(cert) and os.path.isfile(key)):
+        subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+             "-keyout", key, "-out", cert, "-days", "825",
+             "-subj", "/CN=pipfound-local",
+             "-addext", "subjectAltName=DNS:localhost,IP:127.0.0.1"],
+            check=True, capture_output=True, timeout=60)
+    return cert, key
+
+
+def _check_auth(self, qs):
+    """گیتِ توکن: کوکیِ معتبر یا ?token= یا هدرِ Authorization.
+    مسیرهای آزاد: ورود (?token=) و سلامتِ سرور."""
+    if not _ACCESS_TOKEN:
+        return True
+    def _same(a):
+        """مقایسهٔ ثابت‌زمان (`==` روی رشته زودتر برمی‌گردد و زمانِ پاسخ لو می‌دهد)."""
+        return hmac.compare_digest(str(a or ""), str(_ACCESS_TOKEN))
+
+    cookies = (self.headers.get("Cookie") or "")
+    m = re.search(rf"{ _ACCESS_COOKIE }=([A-Za-z0-9_\-]+)", cookies)
+    if m and _same(m.group(1)):
+        return True
+    if _same(qs.get("token", [""])[0]):
+        return True
+    auth = self.headers.get("Authorization") or ""
+    if auth.startswith("Bearer ") and _same(auth[7:]):
+        return True
+    return False
+
+
+def _auth_page(self, tried=False):
+    """صفحهٔ ورودِ توکن — بعد از ورود، کوکیِ یک‌ساله ست می‌شود."""
+    html = ("<!doctype html><html lang=\"fa\" dir=\"rtl\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            "<title>pipfound — ورود</title>"
+            "<style>body{margin:0;background:#0b0f17;color:#e8eefc;min-height:100vh;"
+            "display:grid;place-items:center;font-family:-apple-system,Vazirmatn,Tahoma,sans-serif}"
+            ".c{background:#141a26;border:1px solid #28324a;border-radius:16px;padding:28px;"
+            "max-width:360px;width:calc(100% - 40px);text-align:center}"
+            "h1{font-size:19px;margin:0 0 6px}p{color:#8a97b3;font-size:13px;margin:0 0 18px}"
+            "input{width:100%;padding:12px;border-radius:10px;border:1px solid #28324a;"
+            "background:#1b2333;color:#e8eefc;font-size:15px;direction:ltr;text-align:center}"
+            "button{margin-top:12px;width:100%;padding:12px;border:0;border-radius:10px;"
+            "background:linear-gradient(135deg,#0ea5e9,#6366f1);color:#04121f;font-weight:800;"
+            "font-size:14px;cursor:pointer}.err{color:#fca5a5;font-size:13px;margin-top:10px}</style></head>"
+            "<body><div class=\"c\"><h1>🔐 ورود به pipfound</h1>"
+            "<p>این سرور روی شبکهٔ خانه باز است؛ توکنِ دسترسی که هنگامِ بالا آمدن در ترمینال چاپ شده را وارد کن.</p>"
+            "<form method=\"GET\" action=\"/\"><input name=\"token\" placeholder=\"توکنِ دسترسی\" autofocus>"
+            "<button>ورود</button></form>"
+            "<div class=\"err\">" + ("توکن درست نیست — دوباره تلاش کن" if tried else "") + "</div>"
+            "</div></body></html>")
+    return self._send(200, html, "text/html; charset=utf-8")
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass  # سکوت
+
+    def handle_one_request(self):
+        _req_enter()
+        try:
+            return super().handle_one_request()
+        finally:
+            _req_leave()
+
+    def _send(self, code, body, ctype="application/json; charset=utf-8"):
+        data = body.encode("utf-8") if isinstance(body, str) else body
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            # کلاینت وسطِ محاسبه‌ی سنگین اتصال را بست (تایم‌اوت/رفرش) — بی‌صدا رد کن
+            pass
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        qs = parse_qs(u.query)
+        # گیتِ توکن فقط وقتی فعال است که سرور روی شبکه باز باشد (--lan / --token)
+        # فقط /api/health و /api/install آزادند (وضعیتِ اتصال برای پنلِ نصب لازم است)
+        if _ACCESS_TOKEN and u.path not in ("/api/health", "/api/install"):
+            if (qs.get("token", [""])[0]) == _ACCESS_TOKEN and u.path == "/":
+                # ورود موفق → کوکی بده و بدونِ token در URL برو (توکن در هیستوری نمی‌ماند)
+                self.send_response(302)
+                self.send_header("Location", "/")
+                _sec = "; Secure" if _TLS_PORT else ""   # فقط روی HTTPS، تا روی HTTP دور ریخته نشود
+                self.send_header("Set-Cookie",
+                                 f"{_ACCESS_COOKIE}={_ACCESS_TOKEN}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax{_sec}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if not _check_auth(self, qs):
+                return _auth_page(self, bool((qs.get("token") or [""])[0]))
+        if u.path in ("/", "/index.html"):
+            tvmap = {
+                "BTCUSDT": "BINANCE:BTCUSDT", "ETHUSDT": "BINANCE:ETHUSDT",
+                "SOLUSDT": "BINANCE:SOLUSDT", "BNBUSDT": "BINANCE:BNBUSDT",
+                "XRPUSDT": "BINANCE:XRPUSDT", "DOGEUSDT": "BINANCE:DOGEUSDT",
+                "XAUUSD": "OANDA:XAUUSD", "XAGUSD": "OANDA:XAGUSD",
+                "XPTUSD": "OANDA:XPTUSD", "XPDUSD": "OANDA:XPDUSD",
+                "GOLD": "OANDA:XAUUSD", "WTI": "TVC:USOIL", "BRENT": "TVC:UKOIL",
+                # ثروتِ بخشِ تازه: اندیکس‌ها و کامودیتی‌های غیرفلزی و استاک‌ها
+                "SPX500": "SP:SPX", "NAS100": "NASDAQ:NDX", "US30": "DJ:DJI",
+                "GER40": "XETR:DAX", "UK100": "TVC:UKX", "JP225": "TVC:NI225",
+                "NATGAS": "NYMEX:NG1!", "COPPER": "COMEX:HG1!",
+                "NVDA": "NASDAQ:NVDA", "AAPL": "NASDAQ:AAPL", "MSFT": "NASDAQ:MSFT",
+                "TSLA": "NASDAQ:TSLA", "AMZN": "NASDAQ:AMZN",
+                "GOOGL": "NASDAQ:GOOGL", "META": "NASDAQ:META",
+            }
+            page = (HTML
+                    .replace("__SUGGESTIONS__", json.dumps(SUGGESTIONS))
+                    .replace("__SYMBOL_GROUPS__", json.dumps(SYMBOL_GROUPS,
+                                                              ensure_ascii=False))
+                    .replace("__TVMAP__", json.dumps(tvmap)))
+            return self._send(200, page, "text/html; charset=utf-8")
+        if u.path == "/api/analyze":
+            q = parse_qs(u.query)
+            sym = (q.get("symbol", [""])[0]).strip()
+            style = (q.get("style", ["day"])[0]).strip()
+            if not sym:
+                return self._send(400, json.dumps({"error": "نماد وارد نشده"}, ensure_ascii=False))
+            try:
+                r = analyze(sym, style)
+                _remember_analysis(sym, style, r)
+                return self._send(200, json.dumps(r, ensure_ascii=False))
+            except Exception as e:
+                traceback.print_exc()
+                return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
+        # پرسشِ «تأییدِ شکافِ ارزش منصفانه»: کاربر کف/سقفِ ناحیه و تایم‌فریم را
+        # می‌دهد و اپ همان گپ را در دادهٔ زنده پیدا می‌کند و می‌گوید چقدر تأیید دارد
+        # و می‌شود به آن اتکا کرد یا نه. بدونِ آدرس (lo/hi) حالتِ فهرست است:
+        # گپ‌های بازِ همان تایم‌فریم از پرتأییدترین به کم‌تأییدترین.
+        if u.path == "/api/gap":
+            q = parse_qs(u.query)
+            sym = (q.get("symbol", [""])[0]).strip()
+            tf = (q.get("tf", [""])[0]).strip()
+            lo_raw = (q.get("lo", [""])[0]).strip()
+            hi_raw = (q.get("hi", [""])[0]).strip()
+            if not sym:
+                return self._send(200, json.dumps(
+                    {"ok": False, "error": "نماد وارد نشده"}, ensure_ascii=False))
+            if G is None:
+                return self._send(200, json.dumps(
+                    {"ok": False, "error": "موتورِ گپ در دسترس نیست"},
+                    ensure_ascii=False))
+            try:
+                lo = float(lo_raw) if lo_raw else None
+                hi = float(hi_raw) if hi_raw else None
+                return self._send(200, json.dumps(
+                    G.query(sym, tf, lo, hi), ensure_ascii=False))
+            except Exception as e:
+                traceback.print_exc()
+                return self._send(200, json.dumps(
+                    {"ok": False, "error": str(e)}, ensure_ascii=False))
+        if u.path == "/api/health":
+            return self._send(200, json.dumps({"ok": True}))
+        # اطلاعاتِ نصب روی دستگاه: آدرسِ LAN و وضعیتِ HTTPS/توکن — ارزان و محلی
+        if u.path == "/api/install":
+            return self._send(200, json.dumps(_install_info(), ensure_ascii=False))
+        # وضعیتِ داده: ساعتِ سرور/نیویورک، کیل‌زونِ فعلی، و سنِ آخرین تحلیل.
+        # عمداً فقط محاسبه‌ی محلی (بدونِ شبکه) تا این اندپوینت هر ۳۰ ثانیه ارزان باشد.
+        if u.path == "/api/data_status":
+            q = parse_qs(u.query)
+            sym = (q.get("symbol", [""])[0]).strip().upper()
+            now = time.time()
+            with _last_seen_lock:
+                seen = dict(_LAST_SEEN)
+            item = None
+            if sym:
+                # نمادِ تحلیل‌نشده نباید «دادهٔ نمادِ دیگر» بگیرد: سنِ یک نماد به
+                # اسمِ نمادِ دیگر، گمراه‌کننده و خطرناک است. صریح خالی برمی‌گردد.
+                item = seen.get(sym)
+            elif seen:
+                item = max(seen.values(), key=lambda x: x.get("at", ""))
+            out = {
+                "ok": True,
+                "requested": sym or None,
+                "found": item is not None,
+                "server_utc": datetime.datetime.fromtimestamp(
+                    now, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                "et_now": E.et_of(now).strftime("%Y-%m-%d %H:%M"),
+                "killzone": E.killzone_now(),
+                "silver_bullet": E.silver_bullet_window(),
+                "analyzed": item,
+            }
+            if item and item.get("last_bar_ts") is not None:
+                # سنِ داده **همین حالا** دوباره حساب می‌شود (نه مقدارِ یخ‌زده‌ی تحلیلِ قبل)
+                out["fresh"] = E.freshness_from(
+                    item["last_bar_ts"], item.get("tf") or "15m",
+                    item.get("symbol") or sym,
+                    src=item.get("source") or "yahoo", now=now)
+            return self._send(200, json.dumps(out, ensure_ascii=False))
+        # وضعیتِ ریسک: تنظیماتِ کاربر + ضررِ محقق‌شده‌ی امروز + ریسکِ بازِ فعلی.
+        # محاسبه‌ی صددرصد محلی (بدونِ شبکه) — مثلِ /api/data_status ارزان است.
+        if u.path == "/api/risk":
+            try:
+                st = _risk_settings()
+                rows = _journal_rows(_JR_FILE) or []
+                day = RK.daily_state(rows, st) if RK is not None else {}
+                return self._send(200, json.dumps({
+                    "ok": RK is not None,
+                    "settings": st,
+                    "daily": day,
+                    "journal_file": _JR_FILE,
+                    "settings_file": (RK.settings_path() if RK is not None else None),
+                }, ensure_ascii=False))
+            except Exception as e:
+                traceback.print_exc()
+                return self._send(200, json.dumps(
+                    {"ok": False, "error": str(e)}, ensure_ascii=False))
+        # نشانگرِ بازنگری: چه کدی بار شده، دیسک چه دارد، و آیا پروسه کهنه است
+        if u.path == "/api/revision":
+            try:
+                return self._send(200, json.dumps(code_rev(), ensure_ascii=False))
+            except Exception as e:
+                traceback.print_exc()
+                return self._send(200, json.dumps(
+                    {"ok": False, "error": str(e)}, ensure_ascii=False))
+        if u.path == "/api/fundamental":
+            if FUND is None:
+                return self._send(200, json.dumps(
+                    {"error": "موتورِ فاندمنتال در دسترس نیست"}, ensure_ascii=False))
+            try:
+                hours = int(parse_qs(u.query).get("hours", ["180"])[0])
+            except Exception:
+                hours = 180
+            # سقف/کفِ سخت: hoursِ بزرگ افقِ بی‌مرز و hoursِ منفی فیدِ خالی می‌ساخت.
+            hours = max(1, min(hours, 720))
+            # پنجرهٔ گذشتهٔ فید (۶/۱۲/۲۴ ساعت) — `FUND.past_window` هر ورودیِ
+            # دیگری را به نزدیک‌ترین مقدارِ مجاز قطعی می‌کند (کوئری در دستِ کاربر).
+            try:
+                past_hours = int(parse_qs(u.query).get("past", ["6"])[0])
+            except Exception:
+                past_hours = 6
+            # `?event=<iso>`: فقط همین یک رویداد (+ نزدیک‌ترین خبرِ پرتأثیر) —
+            # برای سوییچِ لحظه‌ایِ کارتِ پیشِ‌رو، رابط لازم نیست فهرستِ کل را
+            # دوباره بخواند.
+            ev_iso = (parse_qs(u.query).get("event", [""])[0] or "").strip()
+            try:
+                if ev_iso:
+                    return self._send(200, json.dumps(
+                        FUND.one_event(ev_iso, hours=hours, past_hours=past_hours),
+                        ensure_ascii=False))
+                return self._send(200, json.dumps(
+                    FUND.build(hours=hours, past_hours=past_hours), ensure_ascii=False))
+            except Exception as e:
+                traceback.print_exc()
+                return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
+        if u.path == "/fundamental":
+            return self._send(200, FUND_PAGE, "text/html; charset=utf-8")
+        if u.path == "/api/backtest":
+            q = parse_qs(u.query)
+            sym = (q.get("symbol", [""])[0]).strip()
+            style = (q.get("style", ["day"])[0]).strip()
+            grades = (q.get("grades", ["A+,A,B"])[0]).strip()
+            side = (q.get("side", ["both"])[0]).strip() or "both"
+            # tfs دلخواهِ کاربر (فرکتالی): "4h,1h,15m,5m" — بر style اولویت دارد
+            tfs_raw = (q.get("tfs", [""])[0]).strip()
+            user_tfs = [t.strip() for t in tfs_raw.split(",") if t.strip()] or None
+            # بازه‌ی تاریخیِ انتخابیِ کاربر روی چارت (epoch ثانیه یا رشته‌ی تاریخ)
+            df_raw = (q.get("from", [""])[0]).strip()
+            dt_raw = (q.get("to", [""])[0]).strip()
+            try:
+                walk = int(q.get("walk", ["2000"])[0])
+            except Exception:
+                walk = 2000
+            # سقفِ سخت: walkِ بزرگ = پیمایشِ کلِ تاریخ روی یک تردِ سرور (دقیقه‌ها)،
+            # و walkِ منفی = «۰ معامله»ی گمراه‌کننده به‌جای خطا. سقف = پیش‌فرضِ
+            # مستندِ همین اندپوینت (۲۰۰۰) تا درخواستِ بیمارگونه ممکن نباشد.
+            walk = max(100, min(walk, 2000))
+            if not sym:
+                return self._send(400, json.dumps({"error": "نماد وارد نشده"}, ensure_ascii=False))
+            if BT is None:
+                return self._send(200, json.dumps({"error": "موتورِ بک‌تست در دسترس نیست"}, ensure_ascii=False))
+            try:
+                # فقط درجه‌های شناخته‌شده: ورودیِ نامعتبر نباید به «۰ معامله»ی
+                # بی‌صدا تبدیل شود (کاربر فکر می‌کند استراتژی سود ندارد).
+                gr = tuple(g.strip().upper() for g in grades.split(",")
+                           if g.strip().upper() in ("A+", "A", "B", "C"))
+                if not gr:
+                    gr = ("A+", "A", "B")
+                if side not in ("both", "long", "short"):
+                    side = "both"
+                try:
+                    date_from = BT._parse_when(df_raw) if df_raw else None
+                    date_to = BT._parse_when(dt_raw) if dt_raw else None
+                except ValueError as ex:
+                    return self._send(200, json.dumps({"error": str(ex)}, ensure_ascii=False))
+                res = BT.backtest(sym.upper(), style=style, grades=gr,
+                                  walk=walk, fill_window=48, max_hold=400,
+                                  side=side, tfs=user_tfs,
+                                  date_from=date_from, date_to=date_to)
+                # بازتابِ تنظیماتِ به‌کاررفته برای نمایش در UI
+                if isinstance(res, dict) and "error" not in res:
+                    res.setdefault("side_used", side)
+                    res.setdefault("tfs_used", user_tfs or BT.__dict__.get("tf_map", {}))
+                    res["range_from"] = df_raw or None
+                    res["range_to"] = dt_raw or None
+                    # مورد ۴: اگر نمونه کم بود و کاربر تایم‌فریمِ دلخواه نداده،
+                    # سبک‌های دیگر را سریع بسنج و بهترین را پیشنهاد بده.
+                    try:
+                        smp = res.get("sample") or {}
+                        if (not smp.get("ok")) and not user_tfs and not df_raw and not dt_raw:
+                            alts = [s for s in ("scalp", "day", "swing") if s != style]
+                            best = None
+                            for st in alts:
+                                a = BT.backtest(sym.upper(), style=st, grades=gr,
+                                                walk=walk, fill_window=48,
+                                                max_hold=400, side=side)
+                                if isinstance(a, dict) and "error" not in a \
+                                        and a.get("trades", 0) >= 5 \
+                                        and a.get("expectancy_R", -9) > 0:
+                                    # اولویت: بیشترین تعدادِ معامله، سپس اکسپکتنسی
+                                    cand = (a["trades"], a["expectancy_R"], st)
+                                    if best is None or (cand[0], cand[1]) > (best[0], best[1]):
+                                        best = cand
+                            if best:
+                                st_fa = {"scalp": "اسکالپ", "day": "روزانه",
+                                         "swing": "سوینگ", "sb_ny": "سیلوربولت نیویورک"}.get(best[2], best[2])
+                                res["style_advice"] = (
+                                    f"سبکِ «{style}» روی {sym.upper()} کم‌سیگنال است. "
+                                    f"سبکِ «{st_fa}» برای همین نماد نمونه‌ی بهتری می‌دهد "
+                                    f"({best[0]} معامله، اکسپکتنسی {best[1]}R) — امتحانش کن.")
+                    except Exception:
+                        pass
+                return self._send(200, json.dumps(res, ensure_ascii=False))
+            except Exception as e:
+                traceback.print_exc()
+                return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
+
+        if u.path == "/api/suggest-range":
+            # بر اساسِ عمقِ walk و دیتای در دسترس، بازه‌ی پیشنهادیِ معتبر بده
+            q = parse_qs(u.query)
+            sym = (q.get("symbol", [""])[0]).strip()
+            style = (q.get("style", ["day"])[0]).strip()
+            tfs_raw = (q.get("tfs", [""])[0]).strip()
+            user_tfs = [t.strip() for t in tfs_raw.split(",") if t.strip()] or None
+            try:
+                walk = int(q.get("walk", ["600"])[0])
+            except Exception:
+                walk = 600
+            walk = max(100, min(walk, 2000))   # همان سقفِ /api/backtest
+            if not sym:
+                return self._send(400, json.dumps({"error": "نماد وارد نشده"}, ensure_ascii=False))
+            if BT is None or not hasattr(BT, "suggest_range"):
+                return self._send(200, json.dumps({"error": "موتورِ بک‌تست در دسترس نیست"}, ensure_ascii=False))
+            try:
+                res = BT.suggest_range(sym.upper(), style=style, tfs=user_tfs, walk=walk)
+                return self._send(200, json.dumps(res, ensure_ascii=False))
+            except Exception as e:
+                traceback.print_exc()
+                return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
+        if u.path == "/api/alarms":
+            with _alarms_lock:
+                return self._send(200, json.dumps(_load_alarms(), ensure_ascii=False))
+        if u.path == "/api/export":
+            # برون‌بریِ کلِ دادهٔ کاربر در یک فایلِ JSON (ژورنال + آلارم‌ها + تنظیمات)
+            try:
+                return self._send(200, json.dumps(_backup_bundle(), ensure_ascii=False))
+            except Exception as e:
+                traceback.print_exc()
+                return self._send(500, json.dumps({"error": str(e)}, ensure_ascii=False))
+        if u.path == "/api/autobackup":
+            # وضعیتِ پشتیبانِ خودکار، یا محتوای یک نسخهٔ ذخیره‌شده با ?file=نام
+            if AB is None:
+                return self._send(500, json.dumps(
+                    {"error": "ماژولِ پشتیبانِ خودکار بار نشد"}, ensure_ascii=False))
+            name = (parse_qs(u.query).get("file", [""])[0] or "").strip()
+            if name:
+                doc = _backup_by_name(name)
+                if doc is None:
+                    return self._send(400, json.dumps(
+                        {"error": "نامِ پشتیبان نامعتبر است یا فایل وجود ندارد"},
+                        ensure_ascii=False))
+                return self._send(200, json.dumps(doc, ensure_ascii=False))
+            return self._send(200, json.dumps(_autobackup_status(), ensure_ascii=False))
+        if u.path == "/api/screenshots":
+            with _shots_lock:
+                return self._send(200, json.dumps(_load_shots(), ensure_ascii=False))
+        if u.path == "/api/screenshot":
+            sid = (parse_qs(u.query).get("id", [""])[0])
+            with _shots_lock:
+                shot = next((s for s in _load_shots() if str(s.get("id")) == str(sid)), None)
+            if not shot:
+                return self._send(404, json.dumps({"error": "not found"}))
+            fp = os.path.join(SHOTS_DIR, shot["file"])
+            if not os.path.isfile(fp):
+                return self._send(404, json.dumps({"error": "file missing"}))
+            try:
+                with open(fp, "rb") as f:
+                    data = f.read()
+                return self._send(200, data, shot.get("ctype", "image/png"))
+            except Exception as e:
+                return self._send(500, json.dumps({"error": str(e)}))
+        # 🩺 سلامتِ اپ: سینتکس + قراردادِ «هیچ کلیدی گم نشود» + وجودِ اسنپ‌شات
+        if u.path == "/api/selfcheck":
+            _now = time.time()
+            if _SC_CACHE["rep"] is not None and _now - _SC_CACHE["ts"] < 60:
+                return self._send(200, json.dumps(_SC_CACHE["rep"], ensure_ascii=False))
+            try:
+                import selfcheck as SC
+                _root = os.path.dirname(os.path.abspath(__file__))
+                rep = SC.run_checks(_root)
+                rep["snapshot_available"] = os.path.isdir(SC.GOOD)
+                rep["log"] = SC.LOG
+            except Exception as e:
+                rep = {"ok": False, "problems": [f"selfcheck در دسترس نیست: {e}"]}
+            _SC_CACHE["rep"], _SC_CACHE["ts"] = rep, _now
+            return self._send(200, json.dumps(rep, ensure_ascii=False))
+        # PWA: مانیفست، سرویس‌ورکر و آیکون‌ها — از روی دیسک، بدونِ وابستگیِ بیرونی
+        if u.path in ("/manifest.webmanifest", "/sw.js", "/icon-180.png",
+                      "/icon-192.png", "/icon-192-mask.png",
+                      "/icon-512.png", "/icon-512-mask.png"):
+            ext = os.path.splitext(u.path)[1]
+            wctype = {".webmanifest": "application/manifest+json; charset=utf-8",
+                      ".js": "application/javascript; charset=utf-8",
+                      ".png": "image/png"}.get(ext, "application/octet-stream")
+            fp = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              os.path.basename(u.path))
+            if os.path.isfile(fp):
+                try:
+                    if u.path == "/sw.js":
+                        # نامِ کش = بازنگریِ کد؛ پس محتوای سرو‌شده‌ی sw.js با هر
+                        # کامیت عوض می‌شود و مرورگر نسخه‌ی تازه را می‌بیند.
+                        with open(fp, encoding="utf-8") as f:
+                            body = f.read().replace(CACHE_REV_TOKEN,
+                                                    cache_rev()).encode("utf-8")
+                        return self._send(200, body, wctype)
+                    with open(fp, "rb") as f:
+                        return self._send(200, f.read(), wctype)
+                except Exception as e:
+                    return self._send(500, json.dumps({"error": str(e)}))
+            return self._send(404, json.dumps({"error": "not found"}))
+        # آرشیوِ اخبارِ اعلام‌شده‌ی N ساعتِ گذشته (پیش‌فرض ۶ ساعت)
+        if u.path == "/api/fundamental-archive":
+            if FUND is None:
+                return self._send(200, json.dumps(
+                    {"error": "موتورِ فاندمنتال در دسترس نیست"}, ensure_ascii=False))
+            try:
+                hours = abs(int(parse_qs(u.query).get("hours", ["6"])[0]))
+            except Exception:
+                hours = 6
+            hours = max(1, min(hours, 720))   # آرشیو هم سقف دارد (۳۰ روز)
+            try:
+                if hasattr(FUND, "archive"):
+                    res = FUND.archive(hours=hours)
+                else:
+                    res = {"ok": False, "error": "archive در موتورِ فاندمنتال نیست", "events": []}
+                return self._send(200, json.dumps(res, ensure_ascii=False))
+            except Exception as e:
+                traceback.print_exc()
+                return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
+        return self._send(404, json.dumps({"error": "not found"}))
+
+    def do_DELETE(self):
+        u = urlparse(self.path)
+        qs = parse_qs(u.query)
+        if _ACCESS_TOKEN and not _check_auth(self, qs):
+            return self._send(401, json.dumps({"error": "دسترسی لازم است"}, ensure_ascii=False))
+        if u.path == "/api/alarm":
+            aid = (parse_qs(u.query).get("id", [""])[0])
+            with _alarms_lock:
+                alarms = [a for a in _load_alarms() if str(a.get("id")) != str(aid)]
+                _save_alarms(alarms)
+            return self._send(200, json.dumps({"deleted": aid}))
+        if u.path == "/api/screenshot":
+            sid = (parse_qs(u.query).get("id", [""])[0])
+            with _shots_lock:
+                shots = _load_shots()
+                gone = next((s for s in shots if str(s.get("id")) == str(sid)), None)
+                shots = [s for s in shots if str(s.get("id")) != str(sid)]
+                _save_shots(shots)
+            if gone:
+                try:
+                    os.remove(os.path.join(SHOTS_DIR, gone["file"]))
+                except Exception:
+                    pass
+            return self._send(200, json.dumps({"deleted": sid}))
+        return self._send(404, json.dumps({"error": "not found"}))
+
+
+    def _handle_upload(self):
+        """آپلودِ اسکرین‌شات به‌صورتِ JSON: {symbol, note, dataurl}
+        که dataurl یک data:image/...;base64,... است. فقط stdlib."""
+        import base64, re as _re
+        try:
+            ln = int(self.headers.get("Content-Length", 0))
+            if ln <= 0:
+                return self._send(200, json.dumps({"error": "بدنه خالی است"}, ensure_ascii=False))
+            if ln > _MAX_UPLOAD + 200000:
+                return self._send(200, json.dumps({"error": "فایل خیلی بزرگ است (سقف ۱۲ مگابایت)"}, ensure_ascii=False))
+            body = self.rfile.read(ln)
+            d = json.loads(body.decode("utf-8"))
+            dataurl = d.get("dataurl", "")
+            m = _re.match(r"data:image/(png|jpe?g|webp|gif);base64,(.+)$", dataurl, _re.S)
+            if not m:
+                return self._send(200, json.dumps({"error": "فرمتِ تصویر نامعتبر است (فقط png/jpg/webp/gif)"}, ensure_ascii=False))
+            ext = m.group(1).lower()
+            ext = "jpg" if ext in ("jpeg", "jpg") else ext
+            raw = base64.b64decode(m.group(2))
+            if len(raw) > _MAX_UPLOAD:
+                return self._send(200, json.dumps({"error": "فایل خیلی بزرگ است (سقف ۱۲ مگابایت)"}, ensure_ascii=False))
+            os.makedirs(SHOTS_DIR, exist_ok=True)
+            # شناسهٔ یکتا: دو آپلود در یک میلی‌ثانیه نباید فایل/متادیتای هم را
+            # بازنویسی کنند (همان درسی که در آلارم‌ها با پسوندِ یکتا حل شد).
+            base = str(int(time.time() * 1000))
+            with _shots_lock:
+                taken = {str(s.get("id")) for s in _load_shots()}
+            taken |= {os.path.splitext(f)[0] for f in os.listdir(SHOTS_DIR)}
+            sid, n = base, 1
+            while sid in taken:
+                sid = f"{base}-{n}"
+                n += 1
+            fname = f"{sid}.{ext}"
+            with open(os.path.join(SHOTS_DIR, fname), "wb") as f:
+                f.write(raw)
+            shot = {
+                "id": sid,
+                "file": fname,
+                "ctype": _ALLOWED_IMG.get(ext, "image/png"),
+                "symbol": str(d.get("symbol", "")).strip().upper(),
+                "note": str(d.get("note", "")).strip()[:500],
+                "size": len(raw),
+                "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            with _shots_lock:
+                shots = _load_shots()
+                shots.insert(0, shot)
+                _save_shots(shots)
+            return self._send(200, json.dumps({"added": sid, "file": fname}, ensure_ascii=False))
+        except Exception as e:
+            traceback.print_exc()
+            return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
+
+    def _handle_import(self, doc):
+        """درون‌بریِ بستهٔ پشتیبان — اعتبارسنجیِ **کامل پیش از هر نوشتن**.
+
+        ترتیب عمدی است: اول `BK.validate` (خالص، بدونِ I/O) و فقط اگر صفر خطا
+        داد، ادغام و نوشتن‌های اتمیک. پس بدنهٔ خراب هیچ‌وقت دفترِ کاربر را لمس
+        نمی‌کند و اجرای دوبارهٔ همان بسته «۰ افزوده» می‌دهد (تکرارپذیر).
+        """
+        if BK is None:
+            return self._send(500, json.dumps({"error": "ماژولِ پشتیبان بار نشد"},
+                                              ensure_ascii=False))
+        probs = BK.validate(doc, _journal_fields())
+        if probs:
+            return self._send(400, json.dumps({"ok": False, "errors": probs},
+                                              ensure_ascii=False))
+        rows, j_add, j_skip = BK.merge_journal(_journal_rows(_JR_FILE) or [],
+                                               doc.get("journal") or [],
+                                               _journal_fields())
+        if j_add:
+            _journal_write(rows)
+        with _alarms_lock:
+            alarms, a_add, a_skip = BK.merge_alarms(_load_alarms(),
+                                                    doc.get("alarms") or [])
+            if a_add:
+                _save_alarms(alarms)
+        s_applied = False
+        if RK is not None and isinstance(doc.get("settings"), dict) and doc["settings"]:
+            RK.save_settings(BK.merge_settings(RK.load_settings(), doc["settings"]))
+            s_applied = True
+        return self._send(200, json.dumps({
+            "ok": True, "journal_added": j_add, "journal_skipped": j_skip,
+            "alarms_added": a_add, "alarms_skipped": a_skip,
+            "settings_applied": s_applied, "journal_file": _JR_FILE,
+        }, ensure_ascii=False))
+
+    def do_POST(self):
+        u = urlparse(self.path)
+        qs = parse_qs(u.query)
+        if _ACCESS_TOKEN and u.path != "/api/health" and not _check_auth(self, qs):
+            return self._send(401, json.dumps({"error": "برای نوشتن باید وارد شوی: صفحه را با توکن باز کن"},
+                                              ensure_ascii=False))
+        # ذخیره‌ی تنظیماتِ ریسک (سرمایه/درصد/سقف‌ها) — تا در دفترِ ریسک بماند و
+        # بعد از هر ری‌استارتِ خودکارِ اپ دوباره از دست نرود.
+        if u.path == "/api/risk":
+            try:
+                if RK is None:
+                    return self._send(200, json.dumps(
+                        {"error": "ماژولِ ریسک بار نشد"}, ensure_ascii=False))
+                ln = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(ln) if ln else b"{}"
+                d = json.loads(body.decode("utf-8"))
+                cur = RK.load_settings()
+                for k in ("balance", "risk_pct", "daily_loss_limit_pct",
+                          "max_open_risk_pct"):
+                    if d.get(k) is not None and str(d.get(k)).strip() != "":
+                        cur[k] = d[k]
+                if d.get("account_ccy"):
+                    cur["account_ccy"] = str(d["account_ccy"]).upper()[:3]
+                if isinstance(d.get("usd_per_quote"), dict):
+                    cur["usd_per_quote"] = dict(cur.get("usd_per_quote") or {}, **d["usd_per_quote"])
+                RK.save_settings(cur)
+                st = RK.load_settings()
+                rows = _journal_rows(_JR_FILE) or []
+                return self._send(200, json.dumps({
+                    "ok": True, "settings": st,
+                    "daily": RK.daily_state(rows, st),
+                    "settings_file": RK.settings_path(),
+                }, ensure_ascii=False))
+            except Exception as e:
+                traceback.print_exc()
+                return self._send(200, json.dumps(
+                    {"error": str(e)}, ensure_ascii=False))
+        if u.path == "/api/import":
+            # بستهٔ برون‌بریِ خودِ اپ را بده؛ اعتبارسنجی کامل پیش از هر نوشتن
+            ln = int(self.headers.get("Content-Length", 0) or 0)
+            if ln > _MAX_IMPORT:
+                return self._send(413, json.dumps(
+                    {"error": "فایلِ پشتیبان خیلی بزرگ است"}, ensure_ascii=False))
+            try:
+                body = self.rfile.read(ln) if ln else b""
+                doc = json.loads(body.decode("utf-8"))
+            except Exception:
+                return self._send(400, json.dumps(
+                    {"error": "فایلِ JSON خوانده نشد — بستهٔ برون‌بریِ خودِ اپ را بده"},
+                    ensure_ascii=False))
+            return self._handle_import(doc)
+        if u.path == "/api/autobackup":
+            # تنظیماتِ زمان‌بندی (+ اجرای فوری با run_now) — اعتبارسنجی پیش از ذخیره
+            if AB is None:
+                return self._send(500, json.dumps(
+                    {"error": "ماژولِ پشتیبانِ خودکار بار نشد"}, ensure_ascii=False))
+            try:
+                ln = int(self.headers.get("Content-Length", 0) or 0)
+                body = self.rfile.read(ln) if ln else b""
+                d = json.loads(body.decode("utf-8")) if body.strip() else {}
+            except Exception:
+                return self._send(400, json.dumps(
+                    {"error": "تنظیماتِ پشتیبان خوانده نشد (JSON خراب است)"},
+                    ensure_ascii=False))
+            probs = AB.validate_settings(d)
+            if probs:
+                return self._send(400, json.dumps({"ok": False, "errors": probs},
+                                                  ensure_ascii=False))
+            cur = AB.load_settings()
+            for k in ("enabled", "interval_h", "keep"):
+                if k in d:
+                    cur[k] = d[k]
+            AB.save_settings(cur)
+            ran = None
+            if isinstance(d, dict) and d.get("run_now"):
+                res = _autobackup_run_now()
+                ran = {"name": res["name"], "bytes": res["bytes"],
+                       "kept": res["kept"], "deleted": res["deleted"]}
+            out = _autobackup_status()
+            out["ran"] = ran
+            return self._send(200, json.dumps(out, ensure_ascii=False))
+        if u.path == "/api/screenshot":
+            return self._handle_upload()
+        if u.path == "/api/alarm":
+            try:
+                ln = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(ln) if ln else b"{}"
+                d = json.loads(body.decode("utf-8"))
+                sym = str(d.get("symbol", "")).strip().upper()
+                if not sym:
+                    return self._send(200, json.dumps({"error": "نماد خالی است"}, ensure_ascii=False))
+                mode = str(d.get("mode") or "ote").strip().lower()
+                if mode not in ("ote", "price", "gap"):
+                    return self._send(200, json.dumps(
+                        {"error": "نوعِ آلارم نامعتبر است — معتبرها: ote، price، gap"},
+                        ensure_ascii=False))
+                alarm = {
+                    "id": "",   # پایین‌تر، داخلِ قفل و یکتا پر می‌شود
+                    "symbol": sym,
+                    "mode": mode,
+                    "direction": d.get("direction"),
+                    "style": d.get("style", "day"),
+                    "active": True,
+                    "triggered": False,
+                    "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "last_price": None,
+                }
+                if mode == "ote":
+                    # عددی‌سازی سخت‌گیرانه: مرزِ متنی در کارگر با قیمت مقایسه می‌شد
+                    # و TypeError می‌داد (کلِ حلقهٔ آلارم‌ها می‌خوابید).
+                    lo, hi = _alarm_num(d.get("low")), _alarm_num(d.get("high"))
+                    if lo is None or hi is None:
+                        return self._send(200, json.dumps(
+                            {"error": "محدوده‌ی OTE نامعتبر است — کف و سقف باید عدد باشند"},
+                            ensure_ascii=False))
+                    if lo > hi:
+                        lo, hi = hi, lo
+                    if lo == hi:
+                        return self._send(200, json.dumps(
+                            {"error": "کف و سقفِ ناحیه‌ی OTE یکی است — ناحیه‌ی معتبر بده"},
+                            ensure_ascii=False))
+                    alarm["low"], alarm["high"] = lo, hi
+                elif mode == "price":
+                    tgt = _alarm_num(d.get("target"))
+                    if tgt is None:
+                        return self._send(200, json.dumps(
+                            {"error": "قیمتِ هدفِ آلارم نامعتبر است — یک عدد بده"},
+                            ensure_ascii=False))
+                    cross = str(d.get("cross") or "any").strip().lower()
+                    alarm["target"] = tgt
+                    alarm["cross"] = cross if cross in ("any", "above", "below") else "any"
+                elif mode == "gap":
+                    # نظارتِ گپ‌بان: نماد + تایم‌فریم، بدونِ آدرس. هر ۵ دقیقه خودش
+                    # پویش می‌کند و برای «تولدِ گپِ A+/A» هشدار می‌دهد.
+                    if G is None:
+                        return self._send(200, json.dumps(
+                            {"error": "موتورِ گپ بار نشد — نظارتِ گپ ممکن نیست"}, ensure_ascii=False))
+                    tf = str(d.get("tf") or "").strip().lower()
+                    if tf not in G.TF_LADDER:
+                        return self._send(200, json.dumps(
+                            {"error": "تایم‌فریمِ نامعتبر برای گپ‌بان: %s — معتبرها: %s"
+                                       % (tf or "(خالی)", "، ".join(G.TF_LADDER.keys()))},
+                            ensure_ascii=False))
+                    alarm["tf"] = tf
+                    # درجه‌های هشدار همان `RELIABLE_GRADES`ِ موتور است (A+/A).
+                    # عمداً کلیدِ «درجهٔ دلخواه» گذاشته نشد تا تنظیمی نداشته باشیم
+                    # که کاری نکند یا مرزِ «قابلِ اتکا» را از حکمِ اپ جدا کند.
+                    alarm["seeded"] = False   # دورِ اول بی‌صدا پایه‌گذاری می‌کند
+                    alarm["seen"] = []
+                    alarm["hits"] = []
+                    alarm["alerts"] = 0
+                    alarm["triggered"] = False   # گپ‌بان یک‌بارمصرف نیست
+                with _alarms_lock:
+                    alarms = _load_alarms()
+                    if mode == "gap":
+                        # دو نظارتِ یکسان روی یک نماد/تایم‌فریم یعنی دو نوتیفِ
+                        # تکراری برای هر گپِ تازه؛ کاربر هم یک بار این را خواسته.
+                        dup = [x for x in alarms
+                               if x.get("mode") == "gap" and x.get("active", True)
+                               and str(x.get("symbol")) == sym
+                               and str(x.get("tf")) == alarm.get("tf")]
+                        if dup:
+                            return self._send(200, json.dumps(
+                                {"error": "%s %s از قبل زیرِ نظارتِ گپ است"
+                                          % (sym, alarm.get("tf"))}, ensure_ascii=False))
+                    # شناسهٔ یکتا: time.time()×۱۰۰۰ برای دو آلارمِ پشت‌سرهم می‌تواند
+                    # یکی باشد — آن‌وقت حذفِ یکی هر دو را می‌برد و انتقالِ داده هم
+                    # آنها را «تکراری» می‌دید. پس در برخورد، پسوندِ یکتا می‌گیرد.
+                    seen = {str(a.get("id")) for a in alarms}
+                    base = str(int(time.time() * 1000))
+                    aid, n = base, 1
+                    while aid in seen:
+                        aid = base + "-" + str(n)
+                        n += 1
+                    alarm["id"] = aid
+                    alarms.append(alarm)
+                    _save_alarms(alarms)
+                return self._send(200, json.dumps({"added": alarm["id"], "symbol": sym}, ensure_ascii=False))
+            except Exception as e:
+                traceback.print_exc()
+                return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
+        if u.path != "/api/journal":
+            return self._send(404, json.dumps({"error": "not found"}))
+        try:
+            ln = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(ln) if ln else b"{}"
+            d = json.loads(body.decode("utf-8"))
+            p = d.get("plan") or {}
+            if not p:
+                return self._send(200, json.dumps(
+                    {"error": "پلنی برای ثبت نیست"}, ensure_ascii=False))
+            # هشدارِ هم‌بستگی *پیش از* افزودن حساب می‌شود تا پوزیشنِ تازه با خودش
+            # مقایسه نشود (جدولِ ضرایب در risk.py). خرابیِ این مرحله هرگز نباید
+            # ثبتِ معامله را بشکند؛ پس در try/except و بی‌اثر روی مسیرِ اصلی.
+            corr_before = None
+            if RK is not None:
+                try:
+                    _sign = RK.dir_sign(p.get("direction"))
+                    _day = RK.daily_state(_journal_rows(_JR_FILE) or [], _risk_settings())
+                    corr_before = RK.correlation(str(d.get("symbol", "")), _sign,
+                                                _day.get("open_positions"))
+                except Exception:
+                    corr_before = None
+            # ساختِ آرگومان‌ها مثل namespace برای journal.cmd_add
+            bias = d.get("bias_by_tf") or {}
+            bias_txt = " · ".join(f"{k}={v}" for k, v in bias.items())
+            tfs = d.get("timeframes") or []
+            kz = d.get("killzone") or ""
+            ns = argparse.Namespace(
+                file=_JR_FILE,
+                symbol=str(d.get("symbol", "")),
+                direction="long" if "صعود" in str(p.get("direction", "")) else "short",
+                session=kz,
+                tf=str(d.get("entry_tf", "")),
+                htf_bias=bias_txt,
+                entry=str(p.get("entry", "")),
+                sl=str(p.get("sl", "")),
+                tp=str(p.get("tp", "")),
+                rr=str(p.get("rr", "")),
+                risk_pct=str((_risk_settings().get("risk_pct", 1.0))),
+                setup=f"{d.get('style','')} · درجه {d.get('grade','')} · "
+                      f"امتیاز {d.get('score','')}/{d.get('max_score','')}",
+                poi=(p.get("poi") or ""),
+                reason=(d.get("verdict") or "")[:300],
+                status="open",
+                result=None, exit=None, realized_r=None,
+                mistake=None, lesson=None, notes="ثبت‌شده از اپلیکیشن pipfound",
+                datetime=None,
+            )
+            import io
+            buf = io.StringIO()
+            old = sys.stdout
+            sys.stdout = buf
+            try:
+                _JR.cmd_add(ns)
+            finally:
+                sys.stdout = old
+            out = json.loads(buf.getvalue().strip() or "{}")
+            if corr_before is not None and not out.get("error"):
+                # همین حالا که معامله ثبت شد، اگر با پوزیشن‌های بازِ قبلی
+                # هم‌بسته/متضاد باشد گوشزد می‌شود (نشان در رابط).
+                out["correlation"] = corr_before
+            return self._send(200, json.dumps(out, ensure_ascii=False))
+        except Exception as e:
+            traceback.print_exc()
+            return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
+
+
+def main():
+    global _ACCESS_TOKEN, _TLS_CERT, _TLS_KEY, _TLS_PORT, lan_open, CURRENT_PORT
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PIPFOUND_PORT", "8787")))
+    ap.add_argument("--host", default=os.environ.get("PIPFOUND_HOST", "127.0.0.1"),
+                    help="127.0.0.1 = فقط همین دستگاه · 0.0.0.0 = باز برای LAN (برای نصب روی موبایل/دستگاه‌های دیگر)")
+    ap.add_argument("--no-autorestart", action="store_true",
+                    help="ری‌استارتِ خودکارِ «کدِ کهنه» را خاموش کن (پیش‌فرض: روشن)")
+    ap.add_argument("--lan", action="store_true",
+                    help="میان‌برِ میزبانیِ شبکه‌ی خانگی: host=0.0.0.0 + HTTPSِ خودگواهی‌شده + توکنِ دسترسی (اگر PIPFOUND_TOKEN ست نباشد یکی می‌سازد)")
+    ap.add_argument("--token", default=os.environ.get("PIPFOUND_TOKEN", ""),
+                    help="توکنِ دسترسی برای میزبانیِ LAN (بدونِ توکن، هر دستگاهِ داخلِ شبکه می‌تواند همه‌چیز را ببیند و ژورنال را بنویسد)")
+    a = ap.parse_args()
+    if a.lan:
+        a.host = "0.0.0.0"
+        if not a.token:
+            import secrets
+            a.token = secrets.token_urlsafe(12)
+    _ACCESS_TOKEN = a.token
+    CURRENT_PORT = a.port
+    lan_open = (a.host == "0.0.0.0")
+    if a.no_autorestart:
+        _REV_WATCH["enabled"] = False
+    # بدونِ -u خروجیِ ریدایرکتشده به فایل بافر می‌شود و لاگ‌ها (از جمله خطِ
+    # ری‌استارت) دیر یا هرگز نمی‌رسند. پس خودِ اپ خط‌بافر می‌کند.
+    try:
+        if not sys.stdout.isatty():
+            sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
+    # 🩺 نگهبانِ سلامتِ کد — پیش از سرو کردنِ صفحه
+    _root = os.path.dirname(os.path.abspath(__file__))
+    try:
+        import selfcheck as SC
+        _rep = SC.run_checks(_root)
+        if _rep.get("ok"):
+            SC.save_snapshot(_root, _rep)
+            print("🩺 سلامتِ کد: ✅ تأیید شد (سینتکس + کلیدها)")
+        else:
+            print("🩺 سلامتِ کد: ❌ " + " | ".join(_rep.get("problems") or [])[:300])
+            _healed = SC.guard(_root)
+            if _healed.get("ok"):
+                print("♻️ نسخه‌ی سالمِ قبلی برگردانده شد — سرور را دوباره اجرا کن (pipfound.app).")
+            else:
+                print("   ترمیمِ خودکار نتیجه نداد. بررسی: python3 selfcheck.py")
+            return 2
+    except Exception as _e:
+        print(f"🩺 سلامتِ کد: بررسی نشد ({_e})")
+
+    _moved = f" (+{_JR_MOVED} ردیفِ قدیمی)" if _JR_MOVED else ""
+    print(f"   📓 دفترِ معاملات: {_JR_FILE}{_moved}  [{_JR_IMPL}]")
+    if _REV_WATCH["enabled"]:
+        threading.Thread(target=_rev_watch_worker, daemon=True).start()
+        print("   ♻️ ری‌استارتِ خودکارِ کهنه: روشن (بررسیِ هر %.0f ثانیه، بدونِ قطعِ درخواستِ در جریان)"
+              % _REV_WATCH["interval"])
+    else:
+        print("   ♻️ ری‌استارتِ خودکارِ کهنه: خاموش")
+    srv = ThreadingHTTPServer((a.host, a.port), Handler)
+    url = f"http://{a.host}:{a.port}"
+    # حالتِ LAN: HTTPSِ خودگواهی‌شده برای نصبِ PWA (سافاریِ iOS فقط روی https نصب می‌کند)
+    if a.lan:
+        try:
+            import ssl as _ssl
+            _TLS_CERT, _TLS_KEY = _make_self_signed_cert()
+            _TLS_PORT = a.port
+            ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(_TLS_CERT, _TLS_KEY)
+            srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+            url = f"https://{a.host}:{a.port}  (گواهیِ خودگواهی‌شده — اولین باز، هشدارِ مرورگر را بپذیر)"
+            # بوت‌استرپ: یک پورتِ HTTPِ محلی برای «راه‌اندازیِ اولیه» — توکن را بدونِ
+            # قبولِ گواهی می‌شود وارد کرد، بعد بقیه از HTTPS می‌رود.
+            try:
+                bs = ThreadingHTTPServer(("127.0.0.1", a.port + 1), Handler)
+                threading.Thread(target=bs.serve_forever, daemon=True).start()
+                print(f"   🚪 ورودِ آسان: http://127.0.0.1:{a.port + 1}  (فقط همین دستگاه — بعد از ورود، آدرسِ https را به دستگاه‌های دیگر بده)")
+            except OSError:
+                pass
+        except FileNotFoundError:
+            print("⚠️ openssl پیدا نشد — بدونِ HTTPS ادامه می‌دهم (نصب روی سافاریِ iOS کار نمی‌کند)")
+            _TLS_PORT = None
+        except Exception as e:
+            print(f"⚠️ HTTPS برپا نشد ({e}) — بدونِ TLS ادامه می‌دهم")
+            _TLS_PORT = None
+    start_alarm_worker()
+    start_fund_alarm_worker()
+    start_gap_watch_worker()
+    start_autobackup_worker()
+    # 🔥 پیش‌گرمِ بوت: تقویمِ اقتصادی و ستونِ Actual در پس‌زمینه — تا اولین کلیکِ
+    # «فاندمنتال»/«تحلیل کن» بعد از هر بالا‌آوردن (یا ری‌استارتِ خودکارِ کد)
+    # هزینهٔ شبکه را ندهد. خطا/نبودِ شبکه بی‌صدا نادیده گرفته می‌شود.
+    _bg(_feed_warm)
+    print(f"✅ pipfound روی {url} بالا آمد.")
+    if a.lan:
+        info = _install_info()
+        print("   📲 نصب روی دستگاه‌های دیگر (همان Wi-Fi):")
+        for ip in (info["lan"]["addresses"] or ["<ip-of-this-mac>"]):
+            print(f"        {info['lan']['scheme']}://{ip}:{_TLS_PORT or a.port}")
+        print(f"   🔑 توکنِ دسترسی: {a.token}")
+        print("      (در هر دستگاه یک بار با ?token=… باز کن؛ بعد از آن کوکی به یاد می‌سپارد)")
+    print("   نمادها: XAUUSD, XAGUSD, EURUSD, BTCUSDT, ... — Ctrl+C برای توقف.")
+    print("   🔔 موتورِ آلارم فعال شد (بررسیِ هر ۹۰ ثانیه).")
+    print("   📰 آلارمِ فاندمنتال فعال شد (هشدارِ ~۲۴ ساعت پیش از هر خبرِ پرتأثیر).")
+    if _notify_muted():
+        print("   🔕 نوتیفیکیشنِ دسکتاپ خفه است (PIPFOUND_NOTIFY=0) — حالتِ تست/هارنس.")
+    if AB is not None:
+        _abc = AB.load_settings()
+        if _abc.get("enabled"):
+            print(f"   📦 پشتیبانِ خودکار فعال شد (هر {_abc.get('interval_h')} ساعت · "
+                  f"نگه‌داشتِ {_abc.get('keep')} نسخه در {AB.backup_dir()}).")
+        else:
+            print("   📦 پشتیبانِ خودکار خاموش است (از پنلِ «پشتیبان و انتقالِ داده» روشنش کن).")
+    else:
+        print("   📦 پشتیبانِ خودکار: ماژولِ autobackup بار نشد.")
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        print("\n👋 خاموش شد.")
+        srv.shutdown()
+
+
+if __name__ == "__main__":
+    sys.exit(main() or 0)

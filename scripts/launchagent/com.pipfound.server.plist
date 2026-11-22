@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.pipfound.server</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/valiazadi/.hermes/hermes-agent/venv/bin/python3</string>
+    <string>-u</string>
+    <string>app.py</string>
+    <string>--port</string>
+    <string>8787</string>
+    <string>--no-autorestart</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/valiazadi/.hermes/skills/trading/smc-ict-analysis/scripts</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <!-- اگر پروسه بمیرد (کرش/کشتن/خواب) دوباره بالا می‌آید -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- بعد از کرش پشتِ‌سرهم، ۱۰ ثانیه صبر می‌کند تا لوپِ سریع نسازد -->
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/pipfound.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/pipfound.log</string>
+
+  <key>ProcessType</key>
+  <string>Interactive</string>
+</dict>
+</plist>

@@ -1,0 +1,76 @@
+#!/bin/bash
+# pipfound · pre-push
+# ── کدِ خراب از این ماشین به main پوش نشود ────────────────────────────────
+# چرا این‌جاست: روی پلنِ رایگان و ریپوی خصوصی، حفاظتِ شاخه‌ی گیت‌هاب
+# (branch protection / ruleset) در دسترس نیست؛ این نزدیک‌ترین معادلِ محلی است.
+# پوش به شاخه‌های دیگر بلاک نمی‌شود (CI روی همان‌ها هم اجرا می‌شود).
+#
+# عبورِ اضطراری:  PIPFOUND_SKIP_SELFCHECK=1 git push ...
+set -u
+
+REPO="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+cd "$REPO" || exit 1
+
+# شاخه‌ی مقصد را از ورودیِ هوک بخوان: «local_ref local_sha remote_ref remote_sha»
+main_push=0
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  case "$remote_ref" in
+    refs/heads/main|refs/heads/master) main_push=1 ;;
+  esac
+done
+
+if [ "${PIPFOUND_SKIP_SELFCHECK:-0}" = "1" ]; then
+  echo "🩺 نگهبانِ سلامت: با PIPFOUND_SKIP_SELFCHECK=1 رد شد — پوش ادامه می‌دهد"
+  exit 0
+fi
+
+PY="python3"
+if [ -x "$HOME/.hermes/hermes-agent/venv/bin/python3" ]; then
+  PY="$HOME/.hermes/hermes-agent/venv/bin/python3"
+fi
+CHECKER="$REPO/selfcheck.py"
+if [ ! -f "$CHECKER" ]; then
+  echo "🩺 نگهبانِ سلامت: selfcheck.py نیست — پوش بدونِ چک ادامه می‌دهد"
+  exit 0
+fi
+
+# اگر سرور بالا بود، چکِ اندپوینت‌ها هم انجام می‌شود؛ وگرنه فقط چکِ کد
+ARGS=""
+if curl -sf --max-time 3 http://127.0.0.1:8787/api/health >/dev/null 2>&1; then
+  ARGS="--live"
+fi
+
+OUT="$("$PY" "$CHECKER" $ARGS 2>&1)"
+RC=$?
+
+if [ "$RC" -eq 0 ]; then
+  printf '%s\n' "$OUT" | sed -n '1p'
+  echo "🩺 نگهبانِ سلامت: ✅ تأیید شد — پوش ادامه می‌دهد"
+  exit 0
+fi
+
+if [ "$main_push" -eq 0 ]; then
+  # شاخه‌ی غیرِ main: سخت‌گیری نمی‌کنیم، فقط هشدار می‌دهیم
+  echo "⚠️  نگهبانِ سلامت در این نسخه مشکل دید (پوش به شاخه‌ی غیرِ main ادامه می‌دهد):"
+  printf '%s\n' "$OUT" | grep '✗' | sed -n '1,4p'
+  echo "   CI روی گیت‌هاب همین را خواهد گرفت: python3 selfcheck.py"
+  exit 0
+fi
+
+echo "──────────────────────────────────────────────────────────────"
+printf '%s\n' "$OUT" | sed -n '1,14p'
+echo "──────────────────────────────────────────────────────────────"
+cat <<'MSG'
+✋ پوش به main متوقف شد: نگهبانِ سلامت در این نسخه مشکل دید.
+
+   دیدنِ جزئیات:                 python3 selfcheck.py
+   ترمیمِ خودکار از نسخه‌ی سالم:  python3 selfcheck.py --guard
+   اگر عمداً دکمه‌ای حذف/تغییر دادی و مطمئنی:
+                                 python3 selfcheck.py --snapshot --accept-removals
+   عبورِ اضطراری:                PIPFOUND_SKIP_SELFCHECK=1 git push ...
+
+   یادآوری: روی ریپوی خصوصیِ پلنِ رایگان، حفاظتِ سروریِ شاخه‌ی گیت‌هاب
+   فعال نمی‌شود (نیاز به GitHub Pro یا ریپوی عمومی دارد)؛ این هوک
+   نزدیک‌ترین معادلِ محلی است و پلن‌های گران‌تر آن را قطعی می‌کنند.
+MSG
+exit 1

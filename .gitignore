@@ -1,0 +1,11 @@
+# دادهٔ شخصیِ معاملات — هرگز در مخزنِ عمومی نرود
+data/
+# کش‌ها و خروجی‌های زمانِ اجرا
+__pycache__/
+*.pyc
+*.log
+.ff_cache.json
+.te_actuals.json
+# اسکرین‌شات‌ها و آرشیوها
+*.png
+!scripts/icon-*.png

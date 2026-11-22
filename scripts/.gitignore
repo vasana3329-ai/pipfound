@@ -1,0 +1,32 @@
+# --- pipfound .gitignore ---
+
+# کش و بایت‌کدِ پایتون
+__pycache__/
+*.py[cod]
+*.pyo
+
+# کشِ داده‌ی زنده (ForexFactory و ...) — نباید کامیت شود
+.ff_cache.json
+*.cache
+*_cache.json
+
+# محیطِ مجازی
+venv/
+.venv/
+env/
+
+# فایل‌های راز — هرگز کامیت نشوند
+.env
+*.key
+*.pem
+secrets.*
+credentials.*
+
+# فایل‌های موقتِ سیستم
+.DS_Store
+Thumbs.db
+
+# خروجی‌های موقتِ بک‌تست
+/tmp/
+*.tmp
+*.log
