@@ -1,0 +1,19 @@
+{
+  "name": "pipfound-harness",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Development-only browser harness; pipfound runtime is Python stdlib-only.",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "test:syntax": "node --check sw.js && node --check ui_visual_check.cjs && node --check sw_upgrade_check.cjs",
+    "test:pwa": "python3 packaging_pwa_test.py",
+    "test:ui": "node ui_visual_check.cjs",
+    "test:sw-upgrade": "node sw_upgrade_check.cjs"
+  },
+  "devDependencies": {
+    "@puppeteer/browsers": "2.13.2",
+    "puppeteer-core": "24.43.1"
+  }
+}

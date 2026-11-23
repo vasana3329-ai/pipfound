@@ -452,8 +452,8 @@ red("نوشتن پیش از اعتبارسنجی", "اول می‌نویسد",
     app_src=SOURCE.replace("probs = BK.validate(doc, _journal_fields())",
                            "_save_alarms(_load_alarms())\n        probs = BK.validate(doc, _journal_fields())", 1))
 red("غیرِاتمیک‌کردنِ بازنویسیِ دفتر", "اتمیک نیست",
-    app_src=SOURCE.replace("    os.replace(tmp, path)\n    return path",
-                           "    os.rename(tmp, path)\n    return path", 1))
+    app_src=SOURCE.replace("        os.replace(tmp, path)",
+                           "        os.rename(tmp, path)", 1))
 red("برداشتنِ هندلرِ درون‌بری", "هندلرِ _handle_import",
     app_src=SOURCE.replace("def _handle_import(self, doc):",
                            "def _handle_import_disabled(self, doc):", 1))

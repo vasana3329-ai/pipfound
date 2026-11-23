@@ -29,6 +29,7 @@
 import time
 
 import smc_engine as E
+import confluence as CF
 
 # نردبانِ تایم‌فریم: برای هر تایم‌فریم، تایم‌فریمِ بالاتر (کانفلوئنسِ HTF).
 TF_LADDER = {"1m": "5m", "5m": "15m", "15m": "1h", "30m": "4h",
@@ -122,6 +123,8 @@ def gap_scan(bars, lookback=LOOKBACK):
     فهرستِ POI. گپِ بی‌کیفیت هم باید پیدا شود تا حکم بگوید «هست ولی ضعیف»؛
     فیلترکردن این‌جا یعنی کاربر برای آدرسِ درستِ خودش «پیدا نشد» بشنود.
     """
+    _validate_bars(bars)
+    lookback = _positive_int(lookback, "پنجرهٔ جست‌وجو")
     n = len(bars)
     out = []
     start = max(2, n - max(lookback, 3))
@@ -203,17 +206,32 @@ def _bias(d):
     if not d:
         return 0
     tr = (d.get("trend") or "").lower()
-    if "bull" in tr or "صعود" in tr:
-        return 1
-    if "bear" in tr or "نزول" in tr:
-        return -1
-    for key in ("CHoCH", "BOS"):
-        ev = d.get(key)
-        if ev and "bullish" in str(ev[0]):
-            return 1
-        if ev and "bearish" in str(ev[0]):
-            return -1
-    return 0
+    # The engine returns up/down, not bullish/bearish. Keep legacy fixture
+    # aliases, but use the live scorer's exact directional rule.
+    tr = "up" if "bull" in tr or "صعود" in tr else "down" if "bear" in tr or "نزول" in tr else tr
+    return CF._bias(tr, d.get("CHoCH"), d.get("BOS"))
+
+
+def _positive_int(value, name):
+    try:
+        n = int(value)
+        if isinstance(value, bool) or float(value) != n or n <= 0:
+            raise ValueError
+        return n
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(name + " باید عددِ صحیحِ مثبت و متناهی باشد")
+
+
+def _validate_bars(bars):
+    previous = None
+    for bar in bars:
+        if any(not CF._finite(bar.get(key)) for key in ("t", "o", "h", "l", "c")):
+            raise ValueError("قیمت یا زمانِ کندل نامعتبر/نامتناهی است")
+        if previous is not None and bar["t"] <= previous:
+            raise ValueError("زمانِ کندل‌ها مرتب یا یکتا نیست")
+        if not bar["l"] <= min(bar["o"], bar["c"]) <= max(bar["o"], bar["c"]) <= bar["h"]:
+            raise ValueError("بدنهٔ کندل بیرونِ سقف و کف است")
+        previous = bar["t"]
 
 
 def _data_gate(d):
@@ -221,13 +239,15 @@ def _data_gate(d):
     بازارِ بسته/داده‌ی کهنه هرگز نباید درجه‌ی بالا بگیرد."""
     data = (d or {}).get("data") or {}
     state = data.get("state")
-    if state == "closed":
+    if state == "closed" or data.get("forming"):
         return "C", ("بازار بسته/بی‌فید است (%s) — تأییدِ قطعی ممکن نیست؛ درجه سقف C خورد."
                      % data.get("reason", "دلیل نامعلوم"))
     if state in ("delayed", "thin"):
         return "B", ("داده‌ی %s (%s) — تأیید با احتیاط؛ درجه سقف B خورد."
                      % ("عقب‌افتاده" if state == "delayed" else "نازک",
                         data.get("reason", "دلیل نامعلوم")))
+    if state not in ("open", "live"):
+        return "B", "تازگیِ داده نامعلوم است؛ تأییدِ فعلی ممکن نیست، سقفِ درجه B است"
     return None, None
 
 
@@ -245,7 +265,7 @@ def _cap(grade, cap):
 
 
 def gap_verdict(bars, tf, lo, hi, d=None, d_htf=None, htf=None, now=None, lookback=LOOKBACK,
-                sym=None):
+                sym=None, calendar=None, calendar_coverage=None):
     """حکمِ تأییدِ گپ در آدرسِ [lo, hi] روی تایم‌فریم `tf`.
 
     `d`/`d_htf`: خروجیِ analyze_bars برای همین تایم‌فریم و تایم‌فریمِ بالاتر (اختیاری —
@@ -253,16 +273,28 @@ def gap_verdict(bars, tf, lo, hi, d=None, d_htf=None, htf=None, now=None, lookba
     باز/بسته‌بودنِ بازار لازم است تا گیتِ داده درست بزند). `bars` باید **فقط کندلِ
     بسته** باشد.
     """
+    supplied_now = now
     now = now if now is not None else time.time()
     tf = (tf or "").strip().lower()
     if tf not in E.TF_SECONDS:
         return {"ok": False, "error": "تایم‌فریمِ نامعتبر: %s — معتبرها: %s"
                 % (tf or "(خالی)", "، ".join(E.TF_SECONDS.keys()))}
+    if not all(CF._finite(value) for value in (lo, hi, now)):
+        return {"ok": False, "error": "آدرس یا زمان باید عددِ متناهی باشد"}
+    try:
+        lookback = _positive_int(lookback, "پنجرهٔ جست‌وجو")
+        _validate_bars(bars or [])
+        CF._validate_finite(d)
+        CF._validate_finite(d_htf)
+    except ValueError as ex:
+        return {"ok": False, "error": str(ex)}
     lo, hi = (lo, hi) if lo <= hi else (hi, lo)
     if not (hi > lo):
         return {"ok": False, "error": "آدرسِ شکاف نامعتبر است (کف و سقف یکی/خالی‌اند)"}
     if not bars or len(bars) < 30:
         return {"ok": False, "error": "کندلِ کافی برای بازپرسی نیست (دست‌کم ۳۰ کندلِ بسته لازم است)"}
+    if bars[-1]["t"] + E.tf_seconds(tf) > now:
+        return {"ok": False, "error": "کندلِ ناقص یا آینده در ورودیِ بازپرسی است؛ کندلِ بسته لازم است"}
 
     if d is None:
         d = E.analyze_bars(bars, tf, disp=sym or tf, src="gap-query", sym=sym, now=now)
@@ -376,6 +408,20 @@ def gap_verdict(bars, tf, lo, hi, d=None, d_htf=None, htf=None, now=None, lookba
 
     # ۵) توالیِ مقدسِ ICT: سوئیپِ لیکوئیدیتی → شکستِ ساختار (MSS).
     seq = d.get("sequence_ok")
+    birth_d = d
+    # Real engine output carries mss_meta. A current sequence can be unrelated
+    # (or opposite) to an older gap: evaluate its birth with the exact core and
+    # only candles known at birth. Preserve small legacy hand-written fixtures.
+    if "mss_meta" in d:
+        birth_bars = bars[:gap["idx"] + 1]
+        birth_d = (E.analyze_bars(birth_bars, tf, disp=sym or tf, src="gap-birth", sym=sym,
+                                 now=birth_bars[-1]["t"] + E.tf_seconds(tf))
+                   if len(birth_bars) >= 30 else {})
+        seq = birth_d.get("sequence_ok")
+        event = birth_d.get("CHoCH") or birth_d.get("BOS")
+        if event and want not in str(event[0]):
+            seq = False
+    base["birth_sequence_ok"] = seq
     row("توالیِ سوئیپ→MSS روی %s" % tf, seq, 1.0,
         {True: "ترتیب درست: سوئیپِ لیکوئیدیتی پیش از شکستِ ساختار رخ داده",
          False: "توالیِ نقض‌شده: شکستِ ساختار پیش از سوئیپ — ورود پرریسک",
@@ -384,7 +430,7 @@ def gap_verdict(bars, tf, lo, hi, d=None, d_htf=None, htf=None, now=None, lookba
     # ۶) سوئیپِ لیکوئیدیتیِ پیش از تولدِ گپ — رایدی که ایمبالانس را ساخت.
     want_sweep = "bullish_sweep" if direction == 1 else "bearish_sweep"
     swp = None
-    for s in (d.get("liquidity_sweeps") or []):
+    for s in (birth_d.get("liquidity_sweeps") or []):
         if s.get("type") != want_sweep or s.get("idx") is None:
             continue
         back = gap["idx"] - s["idx"]
@@ -471,6 +517,27 @@ def gap_verdict(bars, tf, lo, hi, d=None, d_htf=None, htf=None, now=None, lookba
     base["levels"] = _levels(gap, d, want, direction, price)
     base["verdict"] = _verdict_text(gap, grade, percent, want, htf, tf, checks,
                                     cap=cap, capped=base["capped"], raw=raw_grade)
+    news = CF._news_context(sym or d.get("symbol"), now=supplied_now, calendar=calendar,
+                            calendar_coverage=calendar_coverage)
+    base["news_gate"] = news["status"]
+    base["news_coverage"] = news["coverage"]
+    data = d.get("data") or {}
+    permission = (data.get("state") in ("open", "live") and not data.get("forming")
+                  and news["status"] in ("GREEN", "AMBER"))
+    base["execution_gate"] = {"allowed": bool(permission), "status": news["status"],
+                              "reason": news["reason"]}
+    if data.get("forming") or data.get("state") not in ("open", "live"):
+        base["execution_gate"].update(allowed=False, status="DATA_UNKNOWN_OR_STALE",
+                                      reason=gate_note or "دادهٔ تازه و بسته برای ورود تأیید نشده")
+    if news["status"] == "RED":
+        base["execution_gate"].update(allowed=False, status="RED", reason=news["reason"])
+    # A structurally reliable address is not a fresh entry confirmation.
+    base["executable_now"] = False
+    base["levels"]["executable_now"] = False
+    base["levels"]["blocked_reason"] = (news["reason"] if not permission else
+                                         "این فقط ناحیهٔ ساختاری است؛ تأییدِ تازهٔ ورود لازم است")
+    if not permission:
+        base["verdict"] += " ⚠ " + base["execution_gate"]["reason"] + "؛ کیفیتِ گپ با اجازهٔ ورود متفاوت است."
     return base
 
 
@@ -498,6 +565,13 @@ def query(symbol, tf, lo=None, hi=None, limit=300, lookback=LOOKBACK):
                          % (tf or "(خالی)", "، ".join(E.TF_SECONDS.keys()))}
     if not sym:
         return {"ok": False, "mode": "query", "error": "نماد وارد نشده"}
+    if (lo is None) != (hi is None) or (lo is not None and not all(CF._finite(v) for v in (lo, hi))):
+        return {"ok": False, "mode": "query", "error": "کف و سقفِ متناهیِ آدرس باید هر دو داده شوند"}
+    try:
+        limit = _positive_int(limit, "تعدادِ کندل")
+        lookback = _positive_int(lookback, "پنجرهٔ جست‌وجو")
+    except ValueError as ex:
+        return {"ok": False, "mode": "query", "error": str(ex)}
     try:
         bars, d = load(sym, tf, limit)
     except Exception as e:
@@ -554,12 +628,12 @@ def _levels(gap, d, want, direction, price):
     """سطوحِ عملی: ناحیهٔ ورود (نیمهٔ نزدیکِ گپ)، ابطال و اولین هدفِ لیکوئیدیتی + R:R."""
     lo, hi, mid = gap["bottom"], gap["top"], gap["mid"]
     if direction == 1:
-        entry = (lo, mid)
+        entry = (mid, hi)
         stop = lo
         pool = [v for v in ((d.get("liquidity") or {}).get("buyside_eqh") or []) if v > entry[1]]
         target = min(pool) if pool else None
     else:
-        entry = (mid, hi)
+        entry = (lo, mid)
         stop = hi
         pool = [v for v in ((d.get("liquidity") or {}).get("sellside_eql") or []) if v < entry[0]]
         target = max(pool) if pool else None

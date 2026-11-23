@@ -20,6 +20,25 @@ permissions:
   contents: read
 
 jobs:
+  compatibility:
+    name: python-${{ matrix.python }}-complete-suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - name: همهٔ تست‌ها با خانه و گزارشِ جدا
+        run: python3 test_all.py --output "$RUNNER_TEMP/pipfound-tests"
+
   selfcheck:
     name: pipfound-selfcheck
     runs-on: ubuntu-latest
@@ -173,19 +192,37 @@ jobs:
       # مسیرِ **خرابی** (نصبِ نیمه‌کاره → ترمیم یا برگردان) در گامِ بعدی است،
       # `sw_upgrade_check.cjs`.
       - name: تستِ بصری و سیم‌کشیِ کلیدها (headless)
+        id: browser-ui
         run: |
           set -e
           MODDIR="$RUNNER_TEMP/pf-visual"
           mkdir -p "$MODDIR"
-          ( cd "$MODDIR" && npm init -y >/dev/null 2>&1 && npm i puppeteer-core@24 --no-audit --no-fund --silent )
+          cp package.json package-lock.json "$MODDIR/"
+          ( cd "$MODDIR" && npm ci --ignore-scripts --no-audit --no-fund --silent )
           BROWSER="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)"
           if [ -z "$BROWSER" ]; then
             echo "مرورگری روی رانر نبود — کرومِ headless نصب می‌شود"
-            BROWSER="$(npx --yes @puppeteer/browsers install chrome@stable --path "$MODDIR/browsers" | tail -1 | awk '{print $NF}')"
+            BROWSER="$(cd "$MODDIR" && node -e 'const b=require("@puppeteer/browsers");const p=require("puppeteer-core");b.install({browser:b.Browser.CHROME,buildId:p.PUPPETEER_REVISIONS.chrome,cacheDir:"browsers"}).then(x=>console.log(x.executablePath)).catch(e=>{console.error(e);process.exit(1)})')"
           fi
           echo "مرورگر: $BROWSER"
+          printf 'path=%s\n' "$BROWSER" >> "$GITHUB_OUTPUT"
           PF_BROWSER="$BROWSER" PF_PUPPETEER_DIR="$MODDIR/node_modules" \
             node ui_visual_check.cjs --url http://127.0.0.1:8787/ --shot "$RUNNER_TEMP/pf-ui.png"
+
+      - name: رگرسیون‌های امنیت و اجرای رابط
+        env:
+          PF_BROWSER: ${{ steps.browser-ui.outputs.path }}
+          PF_PUPPETEER_DIR: ${{ runner.temp }}/pf-visual/node_modules
+        run: node ui_security_check.cjs http://127.0.0.1:8787/ "$RUNNER_TEMP/pf-security.png"
+
+      - name: تست‌های کش، منطق، ریسک و بسته‌بندی
+        run: |
+          python3 app_stability_test.py
+          python3 engine_cache_test.py
+          python3 macro_cache_test.py
+          python3 trading_logic_test.py
+          python3 storage_risk_test.py
+          python3 packaging_pwa_test.py
 
       # ── لایه‌ی ۳.۵: ارتقای ایمنِ نسخه (ترمیم و برگردان) ──
       # چرا لازم است: لایه‌ی ۱ قراردادِ ارتقا را استاتیک می‌سنجد و خودِ اپ هم سرِ بوت

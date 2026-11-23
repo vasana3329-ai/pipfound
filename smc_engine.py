@@ -16,19 +16,28 @@ Symbol resolution:
   - XAUUSD / GOLD                             -> Yahoo (GC=F)
 """
 import sys, json, urllib.request, urllib.parse, argparse, datetime, math, ssl, time
+import threading, contextlib, copy
+from typing import Any
 
 UA = {"User-Agent": "Mozilla/5.0"}
 
 def _ssl_ctx():
     try:
         import certifi
-        return ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        try:
-            return ssl.create_default_context()
-        except Exception:
-            c=ssl.create_default_context(); c.check_hostname=False; c.verify_mode=ssl.CERT_NONE
-            return c
+        context = ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        context = ssl.create_default_context()
+    if sys.platform == "darwin" and not context.cert_store_stats().get("x509_ca"):
+        # python.org builds may have no OpenSSL CA file. Read only macOS's
+        # PUBLIC system roots, not the user's login keychain; never disable TLS.
+        import subprocess
+        roots = subprocess.run(["security", "find-certificate", "-a", "-p",
+            "/System/Library/Keychains/SystemRootCertificates.keychain"],
+            capture_output=True, text=True, timeout=10, check=True)
+        context.load_verify_locations(cadata=roots.stdout)
+    if not context.cert_store_stats().get("x509_ca"):
+        raise RuntimeError("ریشه‌های معتبرِ گواهیِ سیستم موجود نیست؛ اعتبارسنجیِ امن خاموش نمی‌شود")
+    return context
 _CTX=_ssl_ctx()
 
 # ---- timeframe maps ----
@@ -97,30 +106,164 @@ def is_stock(s):
     """
     return 1 <= len(s) <= 5 and s.isalpha()
 
-def http_get(url):
-    req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=20, context=_CTX) as r:
-        return json.loads(r.read().decode())
+_FETCH_TIMEOUT = 60.0
+_HTTP_TIMEOUT = 20.0
+_REQUEST_CONTEXT = threading.local()
+
+
+@contextlib.contextmanager
+def _request_budget(timeout=_FETCH_TIMEOUT, deadline=None):
+    """Share one finite monotonic deadline across waits, hosts and pages."""
+    timeout = _FETCH_TIMEOUT if timeout is None else float(timeout)
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("مهلتِ واکشی باید عددِ مثبت و متناهی باشد")
+    end = time.monotonic() + timeout
+    if deadline is not None:
+        deadline = float(deadline)
+        if not math.isfinite(deadline):
+            raise ValueError("مهلتِ نهایی باید عددِ متناهی باشد")
+        end = min(end, deadline)
+    previous = getattr(_REQUEST_CONTEXT, "deadline", None)
+    if previous is not None:
+        end = min(end, previous)
+    _REQUEST_CONTEXT.deadline = end
+    try:
+        _remaining(end)
+        yield end
+    finally:
+        _REQUEST_CONTEXT.deadline = previous
+
+
+def _remaining(deadline=None):
+    end = deadline if deadline is not None else getattr(_REQUEST_CONTEXT, "deadline", None)
+    remaining = _FETCH_TIMEOUT if end is None else end - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("مهلتِ واکشیِ داده تمام شد")
+    return remaining
+
+
+def http_get(url, timeout=_HTTP_TIMEOUT, deadline=None):
+    with _request_budget(timeout, deadline):
+        req = urllib.request.Request(url, headers=UA)
+        with urllib.request.urlopen(req, timeout=min(_HTTP_TIMEOUT, _remaining()), context=_CTX) as r:
+            chunks = []
+            # read1 checks the budget between socket reads, even on a trickling body.
+            read = getattr(r, "read1", r.read)
+            while True:
+                remaining = _remaining()
+                sock = getattr(getattr(getattr(r, "fp", None), "raw", None), "_sock", None)
+                if sock is not None:
+                    sock.settimeout(min(_HTTP_TIMEOUT, remaining))
+                chunk = read(65536)
+                _remaining()
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        _remaining()
+        return json.loads(b"".join(chunks).decode())
 
 # نگاشتِ نمادِ اسپاتِ فلزات → gold-api.com (رایگان، بدون کلید)
 _SPOT_MAP = {"XAUUSD":"XAU","GOLD":"XAU","XAU":"XAU",
              "XAGUSD":"XAG","SILVER":"XAG","XAG":"XAG"}
 _SPOT_CACHE = {}
+_SPOT_LOCK = threading.Lock()
+_SPOT_FLIGHTS = {}
+_SPOT_GENERATION = 0
+_SPOT_TTL = 60.0
+_SPOT_MAX_AGE = 120.0   # outage fallback is at most two minutes old; never renewed
 
-def _spot_price(disp):
-    """قیمتِ اسپاتِ زنده‌ی فلز (فقط طلا/نقره). کش ۶۰ ثانیه‌ای؛ خطا→None."""
-    key=_SPOT_MAP.get((disp or "").upper())
-    if not key: return None
-    now=datetime.datetime.now().timestamp()
-    c=_SPOT_CACHE.get(key)
-    if c and now-c[0]<60: return c[1]
+
+class _FetchFlight:
+    def __init__(self, generation):
+        self.event: Any = threading.Event()
+        self.generation = generation
+        self.result: Any = None
+        self.coverage = 0
+        self.observed_at = 0.0
+        self.expires_at = 0.0
+        self.expires_mono = 0.0
+        self.error: Any = None
+        self.retry = False
+
+
+def clear_spot_prices():
+    """Clear spot quotes and invalidate publication by outstanding fetches."""
+    global _SPOT_GENERATION
+    with _SPOT_LOCK:
+        _SPOT_CACHE.clear()
+        _SPOT_GENERATION += 1
+
+
+def _spot_valid(entry, max_age):
+    if not entry or len(entry) != 3:
+        return False
+    wall_age, mono_age = time.time() - entry[0], time.monotonic() - entry[2]
+    return (0 <= wall_age < max_age and 0 <= mono_age < max_age
+            and math.isfinite(entry[1]) and entry[1] > 0)
+
+
+def _spot_cached(key, max_age):
+    """Called under _SPOT_LOCK; discard quotes outside the hard age bound."""
+    entry = _SPOT_CACHE.get(key)
+    if entry and not _spot_valid(entry, _SPOT_MAX_AGE):
+        _SPOT_CACHE.pop(key, None)
+        entry = None
+    return entry if _spot_valid(entry, max_age) else None
+
+
+def _spot_price(disp, timeout=_HTTP_TIMEOUT, deadline=None):
+    """۶۰ ثانیه کش؛ واکشیِ یکتا؛ فالبکِ خطا حداکثر ۱۲۰ ثانیه، سپس None."""
+    key = _SPOT_MAP.get((disp or "").upper())
+    if not key:
+        return None
     try:
-        d=http_get(f"https://api.gold-api.com/price/{key}")
-        p=float(d["price"])
-        _SPOT_CACHE[key]=(now,p)
-        return p
+        with _request_budget(timeout, deadline) as end:
+            while True:
+                _remaining(end)
+                with _SPOT_LOCK:
+                    entry = _spot_cached(key, _SPOT_TTL)
+                    if entry:
+                        return entry[1]
+                    flight = _SPOT_FLIGHTS.get(key)
+                    leader = flight is None
+                    if flight is None:
+                        flight = _FetchFlight(_SPOT_GENERATION)
+                        _SPOT_FLIGHTS[key] = flight
+                if not leader:
+                    if not flight.event.wait(_remaining(end)):
+                        break   # never become a second fetcher after a timed wait
+                    with _SPOT_LOCK:
+                        if flight.generation != _SPOT_GENERATION or flight.retry:
+                            continue
+                        return flight.result[1] if _spot_valid(flight.result, _SPOT_MAX_AGE) else None
+                observed, observed_mono = time.time(), time.monotonic()
+                try:
+                    price = float(http_get(f"https://api.gold-api.com/price/{key}")["price"])
+                    if not math.isfinite(price) or price <= 0:
+                        raise ValueError("قیمتِ اسپات نامعتبر است")
+                    _remaining(end)
+                    entry = (observed, price, observed_mono)
+                    with _SPOT_LOCK:
+                        _remaining(end)
+                        if flight.generation != _SPOT_GENERATION:
+                            flight.retry = True
+                        elif _spot_valid(entry, _SPOT_TTL):
+                            _SPOT_CACHE[key] = entry
+                            flight.result = entry
+                except Exception:
+                    with _SPOT_LOCK:
+                        flight.result = _spot_cached(key, _SPOT_MAX_AGE)
+                finally:
+                    with _SPOT_LOCK:
+                        _SPOT_FLIGHTS.pop(key, None)
+                        flight.event.set()   # publish the result before waking followers
+                if not flight.retry:
+                    return flight.result[1] if _spot_valid(flight.result, _SPOT_MAX_AGE) else None
     except Exception:
-        return c[1] if c else None
+        pass
+    with _SPOT_LOCK:
+        entry = _spot_cached(key, _SPOT_MAX_AGE)
+        return entry[1] if entry else None
 
 def resolve(symbol):
     s = symbol.upper().replace("/","").replace("-","")
@@ -141,7 +284,32 @@ def resolve(symbol):
     # default: try binance
     return ("binance", s, s)
 
-def fetch_binance(sym, tf, limit):
+def _validate_bars(bars):
+    """Fail closed on duplicate/unordered times or nonfinite source OHLC."""
+    previous = None
+    for b in bars:
+        try:
+            stamp = b["t"]
+            finite = math.isfinite(stamp) and all(math.isfinite(b[k]) for k in ("o", "h", "l", "c"))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError("دادهٔ کندل نامعتبر است — زمان یا قیمت نامتناهی/ناموجود") from exc
+        if not finite:
+            raise RuntimeError("دادهٔ کندل نامعتبر است — زمان یا قیمت نامتناهی/ناموجود")
+        if previous is not None and stamp <= previous:
+            raise RuntimeError("دادهٔ کندل نامعتبر است — زمانِ تکراری یا نامرتب")
+        previous = stamp
+
+
+def fetch_binance(sym, tf, limit, timeout=_FETCH_TIMEOUT, deadline=None):
+    with _request_budget(timeout, deadline):
+        bars = _fetch_binance(sym, tf, limit)
+        _remaining()
+        _validate_bars(bars)
+        _remaining()
+        return bars
+
+
+def _fetch_binance(sym, tf, limit):
     itv = BINANCE_TF.get(tf, "1h")
     hosts = ["https://api.binance.com","https://api.binance.us","https://data-api.binance.vision"]
     # صفحه‌بندیِ تاریخی: Binance حداکثر ۱۰۰۰ کندل در هر درخواست می‌دهد.
@@ -149,12 +317,14 @@ def fetch_binance(sym, tf, limit):
     _MS = {"1m":60,"5m":300,"15m":900,"30m":1800,"1h":3600,"4h":14400,"1d":86400,"1w":604800}
     step_s = _MS.get(tf, 3600)
     last_err=None
-    for h in hosts:
+    for h in _ordered_hosts(hosts):
+        _remaining()
         try:
             collected = {}   # t -> bar  (کلید = زمان، جلوی تکرار را می‌گیرد)
             end_ms = None
             # سقفِ درخواست‌ها تا از حلقه‌ی بی‌پایان جلوگیری شود
             for _ in range(60):
+                _remaining()
                 need = min(1000, max(1, limit - len(collected)))
                 url=f"{h}/api/v3/klines?symbol={sym}&interval={itv}&limit={need}"
                 if end_ms is not None:
@@ -178,10 +348,18 @@ def fetch_binance(sym, tf, limit):
             bars = sorted(collected.values(), key=lambda b:b["t"])
             return bars[-limit:]
         except Exception as e:
-            last_err=e; continue
+            _remaining()   # a spent total budget must not start another host
+            last_err=e; _host_penalize(h, e); continue
     raise RuntimeError(f"binance fetch failed: {last_err}")
 
-def fetch_yahoo(sym, tf, limit):
+def fetch_yahoo(sym, tf, limit, timeout=_FETCH_TIMEOUT, deadline=None):
+    with _request_budget(timeout, deadline):
+        bars = _fetch_yahoo(sym, tf, limit)
+        _remaining()
+        return bars
+
+
+def _fetch_yahoo(sym, tf, limit):
     itv=YF_TF.get(tf,"1h"); rng=YF_RANGE.get(tf,"3mo")
     url=(f"https://query1.finance.yahoo.com/v8/finance/chart/"
          f"{urllib.parse.quote(sym)}?interval={itv}&range={rng}")
@@ -194,6 +372,7 @@ def fetch_yahoo(sym, tf, limit):
         if None in (o,h,l,c): continue
         out.append({"t":int(t),"o":float(o),"h":float(h),"l":float(l),
                     "c":float(c),"v":float(q.get("volume",[0]*len(ts))[i] or 0)})
+    _validate_bars(out)
     # resample to 4h if requested (yahoo gives 1h) — با طولِ واقعیِ ۴ساعته تا سبد
     # روی مرزِ UTC بنشیند (فیکس D3/P0-3)، نه روی «شروعِ آرایه».
     if tf=="4h": out=resample(out,4,tf_sec=TF_SECONDS["4h"])
@@ -233,6 +412,7 @@ def resample(bars,n,tf_sec=None):
     """
     if not bars:
         return []
+    _validate_bars(bars)
     if tf_sec is None:
         gaps=sorted(bars[i+1]["t"]-bars[i]["t"] for i in range(len(bars)-1))
         src=gaps[len(gaps)//2] if gaps else 3600
@@ -249,27 +429,228 @@ def resample(bars,n,tf_sec=None):
     if key is not None and len(grp)==n: out.append(_fold_group(grp,key))
     return out
 
-def fetch(symbol, tf, limit, unclosed=False):
+# ══════════════════════════════════════════════════════════════════════════
+#  کشِ کندل — فقط اسنپ‌شاتِ معتبر، پیش از شیفتِ بِیسیسِ فلزات
+# ══════════════════════════════════════════════════════════════════════════
+# Raw source bars are isolated copies, trimmed against their observation time.
+# TTL starts before I/O and never crosses a candle boundary (weeks: Monday UTC).
+# A smaller refresh cannot renew an older, larger snapshot. Same-key misses share
+# a flight; a timed-out follower never takes ownership from a running fetcher.
+# No cache/network locks are held during I/O. Expiry pruning is lazy on access,
+# with both an entry cap and a total-bar cap, including still-forming raw bars.
+_CANDLES = {}          # key -> [wall expiry, raw, coverage, observed, mono expiry, mono observed]
+_CANDLES_LOCK = threading.RLock()
+_CANDLES_MAX = 200
+_CANDLES_MAX_BARS = 50000
+_CANDLE_FLIGHTS = {}
+_CANDLES_GENERATION = 0
+
+
+def candle_ttl(tf):
+    """مدتِ اعتبارِ کشِ کندل برای یک تایم‌فریم (ثانیه)."""
+    return max(5, min(90, tf_seconds(tf) // 8))
+
+
+def _next_candle_boundary(tf, now):
+    secs = tf_seconds(tf)
+    anchor = 4 * 86400 if tf == "1w" else 0   # Monday 1970-01-05, not epoch Thursday
+    return anchor + (math.floor((now - anchor) / secs) + 1) * secs
+
+
+def _snapshot_boundary(raw, tf, observed):
+    boundary = _next_candle_boundary(tf, observed)
+    secs = tf_seconds(tf)
+    # Off-grid provider opens may close before the canonical UTC boundary.
+    for b in raw:
+        close = b["t"] + secs
+        if close > observed:
+            boundary = min(boundary, close)
+    return boundary
+
+
+def _candles_prune(now, mono):
+    """Called under _CANDLES_LOCK; also invalidate on a backward clock jump."""
+    for key, entry in list(_CANDLES.items()):
+        if now >= entry[0] or now < entry[3] or mono >= entry[4] or mono < entry[5]:
+            _CANDLES.pop(key, None)
+
+
+def clear_candles():
+    """Clear cached bars and invalidate outstanding publication, not ownership."""
+    global _CANDLES_GENERATION
+    with _CANDLES_LOCK:
+        _CANDLES.clear()
+        _CANDLES_GENERATION += 1
+        # Retain running flights until I/O exits, so clear cannot duplicate I/O.
+
+
+def _candles_get(src, sym, tf, limit):
+    """Return an isolated raw snapshot, or None; expired payloads are removed."""
+    key = (src, sym, tf, False)
+    with _CANDLES_LOCK:
+        _candles_prune(time.time(), time.monotonic())
+        entry = _CANDLES.get(key)
+        if entry is None or entry[2] < limit:
+            return None
+        return copy.deepcopy(entry[1][-limit:])
+
+
+def _candles_put(src, sym, tf, limit, raw, observed_at=None, observed_mono=None, generation=None):
+    """Store only within the original observation's TTL/boundary/generation."""
+    if not raw:
+        return False
+    _validate_bars(raw)
+    observed_at = time.time() if observed_at is None else observed_at
+    observed_mono = time.monotonic() if observed_mono is None else observed_mono
+    expires = min(observed_at + candle_ttl(tf), _snapshot_boundary(raw, tf, observed_at))
+    expires_mono = observed_mono + expires - observed_at
+    key = (src, sym, tf, False)
+    with _CANDLES_LOCK:
+        now, mono = time.time(), time.monotonic()
+        _candles_prune(now, mono)
+        if (generation is not None and generation != _CANDLES_GENERATION
+                or now >= expires or now < observed_at or mono >= expires_mono or mono < observed_mono
+                or len(raw) > _CANDLES_MAX_BARS):
+            return False
+        entry = _CANDLES.get(key)
+        if entry and (entry[5] > observed_mono or len(entry[1]) > len(raw)):
+            return False   # never renew the retained snapshot's timestamp
+        entry = [expires, copy.deepcopy(raw), max(limit, len(raw)), observed_at, expires_mono, observed_mono]
+        _remaining()
+        now, mono = time.time(), time.monotonic()
+        if now >= expires or now < observed_at or mono >= expires_mono or mono < observed_mono:
+            return False
+        _CANDLES[key] = entry
+        total = sum(len(e[1]) for e in _CANDLES.values())
+        while len(_CANDLES) > _CANDLES_MAX or total > _CANDLES_MAX_BARS:
+            victim = min(_CANDLES, key=lambda k: (_CANDLES[k][0], _CANDLES[k][5]))
+            total -= len(_CANDLES.pop(victim)[1])
+        return _CANDLES.get(key) is entry
+
+
+def _closed_candles(src, sym, tf, limit, deadline):
+    key = (src, sym, tf, False)
+    while True:
+        _remaining(deadline)
+        with _CANDLES_LOCK:
+            _candles_prune(time.time(), time.monotonic())
+            entry = _CANDLES.get(key)
+            if entry is not None and entry[2] >= limit:
+                raw, observed = copy.deepcopy(entry[1][-limit:]), entry[3]
+                return drop_unclosed(raw, tf, now=observed)[0]
+            flight = _CANDLE_FLIGHTS.get(key)
+            leader = flight is None
+            if flight is None:
+                flight = _FetchFlight(_CANDLES_GENERATION)
+                _CANDLE_FLIGHTS[key] = flight
+        if not leader:
+            if not flight.event.wait(_remaining(deadline)):
+                raise TimeoutError("مهلتِ انتظار برای واکشیِ کندل تمام شد")
+            _remaining(deadline)
+            if flight.error is not None:
+                raise flight.error
+            with _CANDLES_LOCK:
+                if (flight.retry or flight.generation != _CANDLES_GENERATION
+                        or time.time() >= flight.expires_at or time.time() < flight.observed_at
+                        or time.monotonic() >= flight.expires_mono or flight.coverage < limit):
+                    continue
+                raw = copy.deepcopy(flight.result[-limit:])
+            return drop_unclosed(raw, tf, now=flight.observed_at)[0]
+        observed, observed_mono = time.time(), time.monotonic()
+        try:
+            raw = fetch_binance(sym, tf, limit) if src == "binance" else fetch_yahoo(sym, tf, limit)
+            _remaining(deadline)
+            _validate_bars(raw)
+            _remaining(deadline)
+            boundary = _snapshot_boundary(raw, tf, observed)
+            with _CANDLES_LOCK:
+                if (flight.generation != _CANDLES_GENERATION
+                        or time.time() >= boundary or time.time() < observed):
+                    flight.retry = True  # crossing the close cannot finalize a pre-close snapshot
+                else:
+                    flight.result = copy.deepcopy(raw)
+                    _remaining(deadline)
+                    flight.coverage = max(limit, len(raw))
+                    flight.observed_at = observed
+                    flight.expires_at = boundary
+                    flight.expires_mono = observed_mono + boundary - observed
+                    _candles_put(src, sym, tf, limit, raw, observed, observed_mono, flight.generation)
+        except BaseException as exc:
+            flight.error = exc
+        finally:
+            with _CANDLES_LOCK:
+                _CANDLE_FLIGHTS.pop(key, None)
+                flight.event.set()   # publication/error precedes ownership release to followers
+        if flight.error is not None:
+            raise flight.error
+        if not flight.retry:
+            return drop_unclosed(copy.deepcopy(flight.result[-limit:]), tf, now=observed)[0]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  تنزلِ میزبانِ خرابِ Binance
+# ══════════════════════════════════════════════════════════════════════════
+# `api.binance.com` برای کاربرانِ آمریکا با ۴۵۱ (Unavailable For Legal Reasons)
+# رد می‌شود، ولی فهرستِ میزبان‌ها همیشه از همان‌جا شروع می‌کرد: هر واکشیِ کریپتو
+# اول ~۱٫۵ تا ۹ ثانیه هدر می‌رفت و بعد به میزبانِ سالم می‌رسید. حالا میزبانی که
+# در همین پروسه شکست خورده تا `_HOST_PENALTY` ثانیه **آخرِ صف** می‌رود؛ حذف نمی‌شود
+# (شاید موقت باشد) و اگر همه‌ی میزبان‌ها جریمه‌شده باشند، ترتیبِ اصلی برمی‌گردد.
+_HOST_PENALTY = 600
+_HOST_DOWN = {}        # host -> [expires_at, last_error]
+_HOST_DOWN_LOCK = threading.Lock()
+
+def _host_penalize(host, err):
+    with _HOST_DOWN_LOCK:
+        _HOST_DOWN[host] = [time.time() + _HOST_PENALTY, f"{type(err).__name__}: {err}"]
+
+def _host_alive(host):
+    with _HOST_DOWN_LOCK:
+        e = _HOST_DOWN.get(host)
+        return not (e and time.time() < e[0])
+
+def _ordered_hosts(hosts):
+    """میزبان‌های سالم اول، جریمه‌شده‌ها آخر (ترتیبِ درونِ هر گروه حفظ می‌شود)."""
+    ok = [h for h in hosts if _host_alive(h)]
+    bad = [h for h in hosts if not _host_alive(h)]
+    return (ok + bad) if ok else list(hosts)
+
+def clear_host_penalties():
+    """پاک‌کردنِ جریمه‌ی میزبان‌ها (تست‌ها)."""
+    with _HOST_DOWN_LOCK:
+        _HOST_DOWN.clear()
+
+
+def fetch(symbol, tf, limit, unclosed=False, timeout=_FETCH_TIMEOUT, deadline=None):
     """کندلِ نماد را از منبعِ درست می‌گیرد و در حالتِ پیش‌فرض فقط کندلِ بسته می‌دهد.
 
     `unclosed=False` (پیش‌فرض، برای تحلیل): کندلِ در حالِ تشکیل حذف می‌شود تا تحلیل
     فقط روی کندلِ بسته انجام شود (ضدِ repaint؛ همان چیزی که بک‌تست همیشه می‌دید).
     `unclosed=True` فقط برای قیمتِ زندهٔ آلارم است — آن‌جا همان کندلِ ناقص `last` است.
+
+    کش و واکشیِ یکتا فقط برای تحلیل است. مسیرِ `unclosed=True` هرگز کش نمی‌شود.
+    `timeout` ثانیه و `deadline` ساعتِ monotonic هستند؛ میزبان‌ها، صفحه‌بندی و
+    انتظار برای واکشی یک مهلتِ مشترک دارند. اسنپ‌شاتِ پیش از بسته‌شدن بازخوانی می‌شود.
     """
-    src,sym,disp=resolve(symbol)
-    bars = fetch_binance(sym,tf,limit) if src=="binance" else fetch_yahoo(sym,tf,limit)
-    if not unclosed:
-        bars, _unclosed_n = drop_unclosed(bars, tf)
-    # فلزات: Yahoo آتیِ COMEX (GC=F/SI=F) می‌دهد که نسبت به اسپات «بِیسیس» دارد.
-    # کلِ سری را به‌اندازه‌ی (اسپات − آخرین‌کلوزِ آتی) شیفت می‌دهیم تا سطوح روی
-    # چارتِ اسپاتِ XAU/XAG بنشیند. ساختار/سوینگ‌ها دست‌نخورده می‌ماند.
-    spot = _spot_price(disp)
-    if spot and bars:
-        basis = spot - bars[-1]["c"]
-        if abs(basis) > 1e-9:
-            for b in bars:
-                b["o"]+=basis; b["h"]+=basis; b["l"]+=basis; b["c"]+=basis
-    return src,sym,disp,bars
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+        raise ValueError("تعدادِ کندل باید عددِ صحیحِ مثبت باشد")
+    with _request_budget(timeout, deadline) as end:
+        src,sym,disp=resolve(symbol)
+        if unclosed:
+            raw = fetch_binance(sym,tf,limit) if src=="binance" else fetch_yahoo(sym,tf,limit)
+            _validate_bars(raw)
+            bars = copy.deepcopy(raw)
+        else:
+            bars = _closed_candles(src, sym, tf, limit, end)
+        _remaining(end)
+        # فلزات: شیفتِ بِیسیس فقط روی کپیِ خروجی است؛ کش هرگز شیفت نمی‌خورد.
+        spot = _spot_price(disp)
+        _remaining(end)
+        if spot and bars:
+            basis = spot - bars[-1]["c"]
+            if abs(basis) > 1e-9:
+                for b in bars:
+                    b["o"]+=basis; b["h"]+=basis; b["l"]+=basis; b["c"]+=basis
+        return src,sym,disp,bars
 
 # ---------- structure detection ----------
 def swings(bars, n=2):
@@ -913,10 +1294,11 @@ def killzone_at(ts=None):
     et = dt_utc - datetime.timedelta(hours=offset)
     h = et.hour + et.minute/60
     if 2<=h<5:   return "London Open KZ (02:00-05:00 ET)"
+    if 10<=h<11: return "New York AM KZ (08:30-11:00 ET) · London Close KZ (10:00-12:00 ET)"
     if 8.5<=h<11:return "New York AM KZ (08:30-11:00 ET)"
     if 10<=h<12: return "London Close KZ (10:00-12:00 ET)"
     if 13<=h<16: return "New York PM KZ (13:00-16:00 ET)"
-    if 19<=h<24 or 0<=h<2: return "Asian Range (19:00-24:00 ET)"
+    if 19<=h<24 or 0<=h<2: return "Asian Range (19:00-02:00 ET)"
     return f"Outside primary killzone (NY time ~{int(h):02d}:00)"
 
 
@@ -1036,9 +1418,10 @@ def analyze_bars(bars, tf, disp=None, src="backtest", sym=None, now=None):
         "data": data_status(bars, tf, src=src, sym=(sym or disp), now=now),
     }
 
-def analyze(symbol, tf, limit=300):
-    src,sym,disp,bars=fetch(symbol,tf,limit)
-    return analyze_bars(bars, tf, disp=disp, src=src, sym=sym)
+def analyze(symbol, tf, limit=300, timeout=_FETCH_TIMEOUT, deadline=None):
+    with _request_budget(timeout, deadline):
+        src,sym,disp,bars=fetch(symbol,tf,limit)
+        return analyze_bars(bars, tf, disp=disp, src=src, sym=sym)
 
 def main():
     ap=argparse.ArgumentParser()

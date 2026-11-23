@@ -28,10 +28,15 @@
 """
 import argparse
 import datetime
+from decimal import Decimal, DecimalException, localcontext, ROUND_FLOOR
 import json
 import math
 import os
+import re
 import sys
+from typing import Any
+
+from autobackup import _write_json
 
 HOME = os.path.expanduser("~")
 
@@ -46,7 +51,7 @@ def settings_path():
 # ═══════════════════════════════════════════════════════════════════
 #  تنظیمات (قابلِ ذخیره در دیسک)
 # ═══════════════════════════════════════════════════════════════════
-DEFAULTS = {
+DEFAULTS: dict[str, Any] = {
     "balance": 10000.0,          # سرمایه‌ی حساب به ارزِ account_ccy
     "account_ccy": "USD",
     "risk_pct": 1.0,             # درصدِ ریسک در هر معامله
@@ -69,59 +74,96 @@ CCY_FA = {
 }
 
 
+MAX_SETTINGS_ERRORS = 12
+MAX_RATES = 256
+_NUM_SETTINGS = ("balance", "risk_pct", "daily_loss_limit_pct", "max_open_risk_pct")
+# Three finite-float factors can span roughly 1900 decimal places. This also
+# prevents a large profit/loss cancellation from erasing a small booked loss.
+_DECIMAL_PRECISION = 2048
+
+
+def _currency(value):
+    if not isinstance(value, str) or re.fullmatch(r"[A-Za-z]{3}", value) is None:
+        return None
+    return value.upper()
+
+
+def _normalized_settings(d) -> tuple[dict[str, Any], list[str]]:
+    """Defaults for missing fields; diagnostics, not silent permission, for bad ones."""
+    out: dict[str, Any] = dict(DEFAULTS, usd_per_quote={})
+    errors = []
+    if d is None:
+        return out, errors
+    if not isinstance(d, dict):
+        return out, ["تنظیماتِ ریسک باید شیء باشد"]
+    inherited = d.get("validation_errors")
+    if inherited:
+        if (isinstance(inherited, list) and len(inherited) <= MAX_SETTINGS_ERRORS + 1
+                and all(isinstance(e, str) and len(e) <= 1024 for e in inherited)):
+            errors.extend(inherited)
+        else:
+            errors.append("وضعیتِ اعتبارِ تنظیماتِ ریسک خراب است")
+    for k in _NUM_SETTINGS:
+        if k in d:
+            v = _num(d[k])
+            if v is None or v < 0:
+                errors.append(f"مقدارِ {k} باید عددِ متناهیِ نامنفی باشد")
+            else:
+                out[k] = v
+    if "account_ccy" in d:
+        c = _currency(d["account_ccy"])
+        if c is None:
+            errors.append("ارزِ حساب (account_ccy) باید کدِ سه‌حرفیِ معتبر باشد")
+        else:
+            out["account_ccy"] = c
+    if "usd_per_quote" in d:
+        rates = d["usd_per_quote"]
+        if not isinstance(rates, dict) or len(rates) > MAX_RATES:
+            errors.append("نرخ‌های usd_per_quote باید نگاشتِ محدودِ ارز به عددِ مثبت باشند")
+        else:
+            for raw, value in rates.items():
+                c, rate = _currency(raw), _num(value)
+                if c is None or rate is None or rate <= 0 or (c == "USD" and rate != 1):
+                    errors.append("کد/نرخِ usd_per_quote نامعتبر است؛ نرخِ دلار باید ۱ باشد")
+                elif c in out["usd_per_quote"]:
+                    errors.append("نرخِ ارزِ تکراری در usd_per_quote")
+                else:
+                    out["usd_per_quote"][c] = rate
+    c = out["account_ccy"]
+    if c not in USD_PER_QUOTE and c not in out["usd_per_quote"]:
+        errors.append(f"نرخِ تبدیلِ ارزِ حساب (account_ccy={c}) موجود نیست؛ usd_per_quote لازم است")
+    if len(errors) > MAX_SETTINGS_ERRORS:
+        errors = errors[:MAX_SETTINGS_ERRORS] + ["خطاهای بیشتری در تنظیماتِ ریسک وجود دارد"]
+    if errors:
+        out["validation_errors"] = list(errors)
+    return out, errors
+
+
+def validate_settings(d):
+    """Partial updates are allowed; present invalid values must be rejected by API/import."""
+    if not isinstance(d, dict):
+        return ["تنظیماتِ ریسک باید شیء باشد"]
+    return _normalized_settings(d)[1]
+
+
 def load_settings(path=None):
-    """تنظیماتِ ذخیره‌شده را با پیش‌فرض‌ها ادغام می‌کند (کلیدِ گم‌شده = پیش‌فرض)."""
+    """Safe display defaults on corrupt files, with persistent fail-closed diagnostics."""
     p = path or settings_path()
-    out = dict(DEFAULTS)
-    out["usd_per_quote"] = {}
     try:
         with open(p, encoding="utf-8") as f:
-            d = json.load(f)
-        if isinstance(d, dict):
-            for k in ("balance", "risk_pct", "daily_loss_limit_pct", "max_open_risk_pct"):
-                if d.get(k) is not None:
-                    v = _num(d.get(k))
-                    if v is not None and v >= 0:
-                        out[k] = v
-            if d.get("account_ccy"):
-                out["account_ccy"] = str(d["account_ccy"]).upper()[:3]
-            if isinstance(d.get("usd_per_quote"), dict):
-                ov = {}
-                for k, v in d["usd_per_quote"].items():
-                    f_ = _num(v)
-                    if f_ and f_ > 0:
-                        ov[str(k).upper()[:3]] = f_
-                out["usd_per_quote"] = ov
-    except Exception:
-        pass
-    return out
+            data = json.load(f)
+    except FileNotFoundError:
+        return _normalized_settings(None)[0]
+    except (OSError, ValueError, RecursionError):
+        data = {"validation_errors": ["فایلِ تنظیماتِ ریسک خوانده نشد یا خراب است"]}
+    return _normalized_settings(data)[0]
 
 
 def save_settings(d, path=None):
-    """ذخیره‌ی اتمیک — همان الگوی `os.replace` که بقیه‌ی فایل‌های وضعیتِ اپ دارند."""
-    p = path or settings_path()
-    dd = os.path.dirname(p)
-    if dd and not os.path.exists(dd):
-        os.makedirs(dd, exist_ok=True)
-    data = {
-        "balance": _num(d.get("balance")) if _num(d.get("balance")) is not None
-                   else DEFAULTS["balance"],
-        "account_ccy": str(d.get("account_ccy") or "USD").upper()[:3],
-        "risk_pct": _num(d.get("risk_pct")) if _num(d.get("risk_pct")) is not None
-                    else DEFAULTS["risk_pct"],
-        "daily_loss_limit_pct": _num(d.get("daily_loss_limit_pct"))
-            if _num(d.get("daily_loss_limit_pct")) is not None else DEFAULTS["daily_loss_limit_pct"],
-        "max_open_risk_pct": _num(d.get("max_open_risk_pct"))
-            if _num(d.get("max_open_risk_pct")) is not None else DEFAULTS["max_open_risk_pct"],
-        "usd_per_quote": {str(k).upper()[:3]: float(v)
-                          for k, v in (d.get("usd_per_quote") or {}).items()
-                          if _num(v) and _num(v) > 0},
-        "updated_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    tmp = p + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, p)
+    """Atomic unique-temp write. Legacy normalization retains a blocking diagnostic."""
+    data, _ = _normalized_settings(d)
+    data["updated_utc"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    _write_json(path or settings_path(), data)
     return data
 
 
@@ -188,7 +230,11 @@ def instrument(symbol):
     ترتیب: نامِ جایگزین → جدولِ صریح → کریپتو (پسوندِ استیبل) → جفت‌ارزِ ۶ حرفی →
     سهامِ ۱–۵ حرفی. همان قاعده‌ی موتور، پس دو جای مختلف دو جوابِ متفاوت نمی‌دهد.
     """
-    s = (symbol or "").upper().replace("/", "").replace("-", "").strip()
+    if not isinstance(symbol, str):
+        return None
+    s = symbol.upper().replace("/", "").replace("-", "").strip()
+    if not s.isascii():
+        return None
     if not s:
         return None
     s = _ALIAS.get(s, s)
@@ -209,7 +255,8 @@ def instrument(symbol):
                 "point": 0.01, "unit": "unit", "unit_fa": "واحد",
                 "approx": False, "note": "قرارداد = ۱ واحد از دارایی"}
     # جفت‌ارزِ ۶ حرفی با هر دو طرفِ شناخته‌شده — قاعده‌ی عمومی (EURJPY، AUDJPY، …)
-    if len(s) == 6 and s.isalpha() and s[:3] in _FX_CCY and s[3:] in _FX_CCY:
+    if (len(s) == 6 and s.isalpha() and s[:3] in _FX_CCY and s[3:] in _FX_CCY
+            and s[:3] != s[3:]):
         quote = s[3:]
         point = 0.01 if quote == "JPY" else 0.0001
         return {"symbol": s, "kind": "fx", "contract": 100000.0, "quote": quote,
@@ -227,29 +274,50 @@ def instrument(symbol):
 #  سایزِ پوزیشن
 # ═══════════════════════════════════════════════════════════════════
 def _num(x):
-    """عدد از هر چیزی که در JSON/CSV ممکن است بیاید؛ ناکارآمد → None (نه صفرِ خاموش)."""
-    if x is None or x == "":
+    """Finite JSON/CSV scalar only; bool, nonfinite and underflow are not zero."""
+    if isinstance(x, bool) or not isinstance(x, (int, float, str)):
         return None
-    if isinstance(x, bool):
-        return None
-    if isinstance(x, (int, float)):
-        try:
-            f = float(x)
-        except Exception:
+    if isinstance(x, str):
+        if len(x) > 1024:
             return None
-        return None if f != f else f          # NaN را رد کن
-    s = str(x).strip().replace(",", "").replace("٬", "")
-    if not s:
-        return None
+        x = x.strip().replace(",", "").replace("٬", "")
+        if not x:
+            return None
     try:
-        return float(s)
-    except Exception:
+        f = float(x)
+        if not math.isfinite(f):
+            return None
+        if f == 0 and isinstance(x, str) and Decimal(x) != 0:
+            return None
+        return f
+    except (TypeError, ValueError, OverflowError, DecimalException):
         return None
+
+
+def _missing(value):
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _dec(value):
+    if isinstance(value, str):
+        value = value.strip().replace(",", "").replace("٬", "")
+    return Decimal(str(value))
+
+
+def _finite_float(value):
+    f = float(value)
+    if not math.isfinite(f) or (f == 0 and value != 0):
+        raise ArithmeticError("نتیجهٔ محاسبه در محدودهٔ عددِ متناهی نیست")
+    return f
 
 
 def dir_sign(direction):
     """جهت → +۱ خرید / -۱ فروش / ۰ نامشخص (هم فارسیِ گریدر، هم long/short)."""
-    t = str(direction or "").strip().lower()
+    if type(direction) is int and direction in (-1, 1):
+        return direction
+    if not isinstance(direction, str):
+        return 0
+    t = direction.strip().lower()
     if "صعود" in t or "خرید" in t or t in ("long", "buy", "up", "bull"):
         return 1
     if "نزول" in t or "فروش" in t or t in ("short", "sell", "down", "bear"):
@@ -263,127 +331,110 @@ def _usd_per_quote(ccy, settings):
     USD هیچ‌وقت «حدسی» نیست (نرخش دقیقاً ۱ است) — وگرنه هر نمادِ دلاری هم برچسبِ
     تقریبی می‌خورد و برچسب بی‌معنا می‌شد.
     """
-    c = str(ccy or "USD").upper()
+    c = _currency(ccy)
+    if c is None:
+        return None, False
     if c == "USD":
         return 1.0, False
     ov = (settings or {}).get("usd_per_quote") or {}
+    if not isinstance(ov, dict):
+        return None, False
     if c in ov:
-        return float(ov[c]), False
-    return float(USD_PER_QUOTE.get(c, 1.0)), True
+        rate = _num(ov[c])
+        return (rate if rate is not None and rate > 0 else None), False
+    return USD_PER_QUOTE.get(c), True
 
 
 def size_for(symbol, plan, settings):
-    """سایزِ پوزیشنِ لازم برای اینکه فاصله‌ی استاپ = درصدِ ریسکِ تعیین‌شده باشد.
-
-    فرمول (بدونِ ابداع): ریسکِ هر لات = فاصله‌ی استاپ × اندازه‌ی قرارداد × نرخِ مظنه
-    (تبدیل به ارزِ حساب). سایز = (سرمایه × درصدِ ریسک) ÷ ریسکِ هر لات.
-    """
+    """Finite position sizing; floor to the lot step without exceeding its budget."""
     out = {"ok": False, "reason": "", "approx": False, "notes": []}
     spec = instrument(symbol)
+    st, errors = _normalized_settings(settings)
     if spec is None:
-        out["reason"] = f"مشخصاتِ قراردادِ «{symbol}» را نمی‌شناسم — سایز محاسبه نشد"
+        out["reason"] = "مشخصاتِ قراردادِ نماد را نمی‌شناسم"
         return out
-    if not plan:
-        out["reason"] = "پلنی برای سایزکردن نیست"
+    if errors:
+        out["reason"] = " · ".join(errors)
         return out
-    entry = _num(plan.get("entry"))
-    sl = _num(plan.get("sl"))
+    if not isinstance(plan, dict) or not plan:
+        out["reason"] = "پلنِ معتبر برای سایزکردن نیست"
+        return out
+    entry, sl = _num(plan.get("entry")), _num(plan.get("sl"))
     if entry is None or sl is None:
-        out["reason"] = "ورود یا استاپ در پلن نیست"
+        out["reason"] = "ورود یا استاپ باید عددِ متناهی باشد"
         return out
-    stop = abs(entry - sl)
-    if stop <= 0:
-        out["reason"] = "فاصله‌ی استاپ صفر است (ورود = استاپ)"
+    rr_value = plan.get("rr")
+    rr = 0.0 if _missing(rr_value) else _num(rr_value)
+    if rr is None or rr < 0:
+        out["reason"] = "نسبتِ ریسک به ریوارد معتبر نیست"
         return out
-
-    st = settings or DEFAULTS
-    balance = _num(st.get("balance")) or 0.0
-    risk_pct = _num(st.get("risk_pct"))
-    risk_pct = DEFAULTS["risk_pct"] if risk_pct is None else risk_pct
-    if balance <= 0:
-        out["reason"] = "سرمایه تنظیم نشده — سرمایه را در پنلِ ریسک وارد کن"
+    if st["balance"] <= 0 or st["risk_pct"] <= 0:
+        out["reason"] = "سرمایه و درصدِ ریسک باید مثبت باشند"
         return out
-    if risk_pct <= 0:
-        out["reason"] = "درصدِ ریسک صفر است — معامله‌ای مجاز نیست"
-        return out
-
-    acc = str(st.get("account_ccy") or "USD").upper()
+    acc = st["account_ccy"]
     q_rate, q_assumed = _usd_per_quote(spec["quote"], st)
     a_rate, a_assumed = _usd_per_quote(acc, st)
-
-    risk_amount = balance * risk_pct / 100.0
-    # ارزشِ حرکتِ یک واحدِ قیمت برای یک قرارداد، به ارزِ حساب
-    value_per_unit = spec["contract"] * q_rate / a_rate
-    risk_per_lot = stop * value_per_unit
-    lots_raw = risk_amount / risk_per_lot
-
-    # کوچک‌ترین پله‌ی قابلِ معامله به تفکیک نوع (لات/کانترکت ۰.۰۱ · سهم ۱ · کریپتو ۰.۰۰۰۰۰۱)
-    step = 1.0 if spec["kind"] == "stock" else (1e-6 if spec["kind"] == "crypto" else 0.01)
-    over_risk = False
-    # **به کفِ پله** گرد می‌شود، نه به نزدیک‌ترین: قاعده‌ی مدیریتِ ریسک این است که
-    # هرگز از ریسکِ برنامه‌ریزی‌شده بیشتر نشود. گردکردن به نزدیک‌ترین می‌تواند
-    # مثلاً ۱۰۹ دلار ریسک روی یک سقفِ ۱۰۰ دلاری بگذارد.
-    steps = math.floor(lots_raw / step + 1e-9)
-    if steps >= 1:
-        size_lots = round(steps * step, 8)
-    elif lots_raw > 0:
-        # ریسکِ هدف از کوچک‌ترین پله هم کمتر است: یا معامله‌ی حداقلی (با ریسکِ
-        # بیشتر از هدف، اعلام‌شده) یا هیچ. صفر دادن اشتباه است چون اپ فقط حدس
-        # می‌زند — عدد را می‌دهد و هشدار می‌دهد.
-        size_lots = step
-        over_risk = True
-    else:
-        size_lots = 0.0
-    if size_lots <= 0:
-        out["reason"] = "سایزِ مجاز صفر می‌شود — سرمایه/درصدِ ریسک را بررسی کن"
+    if q_rate is None or a_rate is None:
+        out["reason"] = "نرخِ تبدیلِ ارزِ حساب یا مظنه معلوم نیست"
         return out
-
-    size_disp = (int(size_lots) if spec["kind"] == "stock"
-                 else (round(size_lots, 6) if spec["kind"] == "crypto"
-                       else round(size_lots, 2)))
-    actual_risk = size_lots * risk_per_lot
-    rr = _num(plan.get("rr")) or 0.0
-    out.update({
-        "ok": True,
-        "symbol": spec["symbol"],
-        "kind": spec["kind"],
-        "unit_fa": spec["unit_fa"],
-        "size": size_disp,
-        "size_lots": size_lots,
-        "size_units": size_lots * spec["contract"],
-        "balance": balance,
-        "account_ccy": acc,
-        "risk_pct": risk_pct,
-        "risk_amount": round(risk_amount, 2),
-        "actual_risk_amount": round(actual_risk, 2),
-        "reward_amount": round(actual_risk * rr, 2) if rr else None,
-        "stop_distance": round(stop, 6),
-        "stop_pips": round(stop / spec["point"], 1) if spec["point"] else None,
-        "point": spec["point"],
-        "value_per_point": round(spec["point"] * value_per_unit, 4),
-        "risk_per_lot": round(risk_per_lot, 2),
-        "contract": spec["contract"],
-        "quote": spec["quote"],
-        "approx": bool(spec["approx"] or q_assumed or a_assumed),
-        "over_risk": over_risk,
-        "notes": list(out["notes"]),
-    })
+    try:
+        with localcontext() as ctx:
+            ctx.prec = _DECIMAL_PRECISION
+            stop_d = abs(_dec(entry) - _dec(sl))
+            if stop_d <= 0:
+                raise ValueError("فاصلهٔ استاپ صفر است")
+            risk_d = _dec(st["balance"]) * _dec(st["risk_pct"]) / Decimal(100)
+            def ratio(currency, rate):
+                # Preserve explicit user rates. Default reciprocal quotes retain
+                # their original ratio so binary 1/150 cannot shave a lot step.
+                inverse = {"JPY": "150", "CHF": "0.88", "CAD": "1.36"}
+                if currency not in st["usd_per_quote"] and currency in inverse:
+                    return Decimal(1), Decimal(inverse[currency])
+                return _dec(rate), Decimal(1)
+            q_num, q_den = ratio(spec["quote"], q_rate)
+            a_num, a_den = ratio(acc, a_rate)
+            num, den = (Decimal(1), Decimal(1)) if acc == spec["quote"] else (q_num * a_den, q_den * a_num)
+            value_d = _dec(spec["contract"]) * num / den
+            per_lot_d = stop_d * value_d
+            step_d = Decimal(1) if spec["kind"] == "stock" else (Decimal("0.000001") if spec["kind"] == "crypto" else Decimal("0.01"))
+            count = (risk_d * den / (stop_d * _dec(spec["contract"]) * num * step_d)).to_integral_value(rounding=ROUND_FLOOR)
+            over_risk = count < 1
+            lots_d = max(Decimal(1), count) * step_d
+            actual_d = lots_d * per_lot_d
+            # Every public numeric quantity must fit a finite JSON float.
+            stop = _finite_float(stop_d)
+            risk_amount = _finite_float(risk_d)
+            value_per_unit = _finite_float(value_d)
+            risk_per_lot = _finite_float(per_lot_d)
+            size_lots = _finite_float(lots_d)
+            actual_risk = _finite_float(actual_d)
+            size_units = _finite_float(lots_d * _dec(spec["contract"]))
+            stop_pips = _finite_float(stop_d / _dec(spec["point"])) if spec["point"] else None
+            point_value = _finite_float(_dec(spec["point"]) * value_d)
+            reward = _finite_float(actual_d * _dec(rr)) if rr else None
+    except (ArithmeticError, ValueError, OverflowError, DecimalException) as exc:
+        out["reason"] = "محاسبهٔ ریسک معتبر یا متناهی نیست: " + str(exc)
+        return out
+    size_disp = int(size_lots) if spec["kind"] == "stock" else round(size_lots, 6 if spec["kind"] == "crypto" else 2)
+    out.update({"ok": True, "symbol": spec["symbol"], "kind": spec["kind"],
+                "unit_fa": spec["unit_fa"], "size": size_disp, "size_lots": size_lots,
+                "size_units": size_units, "balance": st["balance"], "account_ccy": acc,
+                "risk_pct": st["risk_pct"], "risk_amount": round(risk_amount, 2),
+                "actual_risk_amount": round(actual_risk, 2),
+                "reward_amount": round(reward, 2) if reward is not None else None,
+                "stop_distance": round(stop, 6), "stop_pips": round(stop_pips, 1) if stop_pips is not None else None,
+                "point": spec["point"], "value_per_point": round(point_value, 4),
+                "risk_per_lot": round(risk_per_lot, 2), "contract": spec["contract"],
+                "quote": spec["quote"], "approx": bool(spec["approx"] or q_assumed or a_assumed),
+                "over_risk": over_risk})
     if over_risk:
-        out["notes"].append(
-            f"کوچک‌ترین سایزِ قابلِ معامله ({size_disp} {spec['unit_fa']}) از ریسکِ هدفِ "
-            f"تو بزرگ‌تر است ({round(actual_risk, 2)} به‌جای {round(risk_amount, 2)}) — "
-            f"یا سرمایه/درصد را کم کن یا از این ستاپ بگذر")
-    elif size_lots * risk_per_lot < risk_amount - 1e-6:
-        out["notes"].append(
-            f"به کفِ پله گرد شد تا از ریسکِ هدف بیشتر نشود "
-            f"({round(actual_risk, 2)} از {round(risk_amount, 2)})")
+        out["notes"].append("کوچک‌ترین پلهٔ قابلِ معامله از سقفِ ریسکِ هدف بزرگ‌تر است؛ از این ستاپ بگذر یا مشخصاتِ قرارداد را بررسی کن")
+    elif actual_d < risk_d:
+        out["notes"].append("به کفِ پله گرد شد تا از ریسکِ هدف بیشتر نشود")
     if spec["note"]:
         out["notes"].append(spec["note"])
     if q_assumed and spec["quote"] != "USD":
-        out["notes"].append(
-            f"نرخِ تبدیلِ {spec['quote']}→USD تقریبی است "
-            f"({CCY_FA.get(spec['quote'], spec['quote'])} مظنه‌ی این نماد است) — "
-            f"برای سایزِ دقیق در تنظیماتِ ریسک نرخش را وارد کن")
+        out["notes"].append("نرخِ تبدیلِ ارزِ مظنه تقریبی است؛ برای سایزِ دقیق نرخِ کارگزار را وارد کن")
     return out
 
 
@@ -391,102 +442,109 @@ def size_for(symbol, plan, settings):
 #  سقفِ ضررِ روزانه + ریسکِ باز
 # ═══════════════════════════════════════════════════════════════════
 def _row_realized_r(r):
-    """R محقق‌شدهٔ یک ردیفِ بسته — اگر ستونش خالی بود، از نتیجه‌اش استنتاج می‌شود.
-
-    قرارداد: win → +rr ، loss → -۱ ، be → ۰. اگر `rr` هم نبود، +۱ فرض می‌شود
-    (کوچک‌ترین بردِ معنادار). هیچ‌وقت ۰ برنمی‌گرداند تا معامله‌ی بسته بی‌اثر نشود.
-    """
-    v = _num(r.get("realized_r"))
-    if v is not None:
-        return v
-    res = str(r.get("result") or "").strip().lower()
-    rr = _num(r.get("rr"))
-    if res in ("win", "برد", "سود"):
-        return rr if rr and rr > 0 else 1.0
-    if res in ("loss", "باخت", "ضرر"):
+    """Blank legacy results have documented fallbacks; bad present values do not."""
+    value = r.get("realized_r")
+    if not _missing(value):
+        number = _num(value)
+        if number is None:
+            raise ValueError("آرِ محقق‌شدهٔ دفتر عددِ معتبر نیست")
+        return number
+    result = str(r.get("result") or "").strip().lower()
+    if result in ("win", "برد", "سود"):
+        raw = r.get("rr")
+        number = 1.0 if _missing(raw) else _num(raw)
+        if number is None or number <= 0:
+            raise ValueError("نسبتِ ریسک به ریواردِ بردِ دفتر معتبر نیست")
+        return number
+    if result in ("loss", "باخت", "ضرر"):
         return -1.0
-    if res in ("be", "breakeven", "سربه‌سر"):
+    if result in ("be", "breakeven", "سربه‌سر"):
         return 0.0
-    return 0.0
+    raise ValueError("نتیجهٔ معاملهٔ بسته معلوم نیست")
 
 
 def daily_state(rows, settings, now=None):
-    """وضعیتِ ضررِ **امروز** + ریسکِ بازِ فعلی، از ردیف‌های ژورنال.
-
-    یک فرضِ صریح: ردیف‌هایی که ستونِ `risk_pct`شان خالی است با **درصدِ ریسکِ
-    فعلیِ تنظیمات** حساب می‌شوند (نه با صفر و نه با یکِ ثابت). نتیجه‌اش این است
-    که تغییرِ درصدِ ریسک، عددِ «ریسکِ باز» را هم بازمحاسبه می‌کند — چون بهترین
-    حدسِ موجود از قصدِ کاربر همان عدد است. برای معامله‌ای که درصدش را صریح
-    ثبت کرده باشی، همان مقدارِ ثبت‌شده ملاک است.
-    """
-    st = settings or DEFAULTS
-    now = now or datetime.datetime.now()
-    today = now.strftime("%Y-%m-%d")
-    balance = _num(st.get("balance")) or 0.0
-    base_risk = _num(st.get("risk_pct"))
-    base_risk = DEFAULTS["risk_pct"] if base_risk is None else base_risk
-    limit_pct = _num(st.get("daily_loss_limit_pct"))
-    limit_pct = DEFAULTS["daily_loss_limit_pct"] if limit_pct is None else limit_pct
-    open_limit = _num(st.get("max_open_risk_pct"))
-    open_limit = DEFAULTS["max_open_risk_pct"] if open_limit is None else open_limit
-
-    realized_r = 0.0
-    pnl = 0.0
-    closed_n = 0
-    for r in (rows or []):
-        if str(r.get("status") or "").strip().lower() != "closed":
-            continue
-        if str(r.get("datetime") or "")[:10] != today:
-            continue
-        rp = _num(r.get("risk_pct"))
-        rp = base_risk if rp is None else rp
-        r_ = _row_realized_r(r)
-        realized_r += r_
-        pnl += r_ * balance * rp / 100.0
-        closed_n += 1
-
-    open_n = 0
-    open_risk_pct = 0.0
-    open_symbols = []
-    for r in (rows or []):
-        if str(r.get("status") or "").strip().lower() != "open":
-            continue
-        rp = _num(r.get("risk_pct"))
-        rp = base_risk if rp is None else rp
-        open_risk_pct += rp
-        open_n += 1
-        if r.get("symbol"):
-            open_symbols.append({
-                "symbol": str(r["symbol"]).upper(),
-                "direction": r.get("direction") or "",
-                "sign": dir_sign(r.get("direction")),
-                "risk_pct": rp,
-            })
-
-    realized_pct = (pnl / balance * 100.0) if balance > 0 else 0.0
-    limit_amount = balance * limit_pct / 100.0
-    remaining = max(0.0, (-realized_pct) - limit_pct) if limit_pct > 0 else None
-    remaining_pct = max(0.0, limit_pct + realized_pct) if limit_pct > 0 else None
-    return {
-        "date": today,
-        "balance": balance,
-        "limit_pct": limit_pct,
-        "limit_amount": round(limit_amount, 2),
-        "realized_r": round(realized_r, 2),
-        "realized_pct": round(realized_pct, 2),
-        "realized_amount": round(pnl, 2),
-        "closed_today": closed_n,
-        "remaining_pct": round(remaining_pct, 2) if remaining_pct is not None else None,
-        "remaining_amount": (round(max(0.0, limit_amount + pnl), 2)
-                             if limit_pct > 0 else None),
-        "breached": bool(limit_pct > 0 and (-realized_pct) >= limit_pct),
-        "open_count": open_n,
-        "open_risk_pct": round(open_risk_pct, 2),
-        "open_risk_limit_pct": open_limit,
-        "open_breached": bool(open_limit > 0 and open_risk_pct >= open_limit),
-        "open_risk_amount": round(balance * open_risk_pct / 100.0, 2),
-        "open_positions": open_symbols,
-    }
+    """Account-money, realized R and raw risk-percent stay distinct and finite."""
+    st, errors = _normalized_settings(settings)
+    clock = datetime.datetime.now() if now is None else now
+    if not isinstance(clock, (datetime.datetime, datetime.date)):
+        errors.append("زمانِ محاسبهٔ ریسک معتبر نیست")
+        clock = datetime.datetime.now()
+    today = clock.strftime("%Y-%m-%d")
+    balance, limit_pct, open_limit = st["balance"], st["daily_loss_limit_pct"], st["max_open_risk_pct"]
+    out = {"date": today, "balance": balance, "limit_pct": limit_pct, "limit_amount": 0.0,
+           "realized_r": 0.0, "realized_pct": 0.0, "realized_amount": 0.0,
+           "closed_today": 0, "remaining_pct": None, "remaining_amount": None,
+           "breached": False, "open_count": 0, "open_risk_pct": 0.0,
+           "open_risk_limit_pct": open_limit, "open_breached": False,
+           "open_risk_amount": 0.0, "open_positions": [], "open_risk_pct_raw": 0.0}
+    if rows is None:
+        rows = []
+    if not isinstance(rows, (list, tuple)):
+        errors.append("شکلِ ردیف‌های دفتر معتبر نیست")
+        rows = []
+    try:
+        with localcontext() as ctx:
+            ctx.prec = _DECIMAL_PRECISION
+            realized, percent, open_percent = Decimal(0), Decimal(0), Decimal(0)
+            for row in rows:
+                if not isinstance(row, dict):
+                    errors.append("ردیفِ دفتر باید شیء باشد")
+                    continue
+                status = str(row.get("status") or "").strip().lower()
+                if status not in ("closed", "open"):
+                    errors.append("وضعیتِ معاملهٔ دفتر معلوم نیست")
+                    continue
+                raw_risk = row.get("risk_pct")
+                risk = st["risk_pct"] if _missing(raw_risk) else _num(raw_risk)
+                if risk is None or risk < 0:
+                    errors.append("درصدِ ریسکِ ردیفِ دفتر معتبر نیست")
+                    continue
+                if status == "open":
+                    open_percent += _dec(risk)
+                    out["open_count"] += 1
+                    if row.get("symbol"):
+                        out["open_positions"].append({"symbol": str(row["symbol"]).upper(),
+                            "direction": row.get("direction") if isinstance(row.get("direction"), (str, int)) else "",
+                            "sign": dir_sign(row.get("direction")), "risk_pct": risk})
+                    continue
+                stamp = row.get("datetime")
+                try:
+                    if not isinstance(stamp, str):
+                        raise ValueError
+                    date = datetime.datetime.fromisoformat(stamp).date().isoformat()
+                except (ValueError, TypeError):
+                    errors.append("تاریخِ معاملهٔ بسته معتبر نیست")
+                    continue
+                if date != today:
+                    continue
+                try:
+                    r_value = _row_realized_r(row)
+                except ValueError as exc:
+                    errors.append(str(exc))
+                    continue
+                realized += _dec(r_value)
+                percent += _dec(r_value) * _dec(risk)
+                out["closed_today"] += 1
+            pnl_d = _dec(balance) * percent / Decimal(100)
+            limit_d = _dec(balance) * _dec(limit_pct) / Decimal(100)
+            open_amount_d = _dec(balance) * open_percent / Decimal(100)
+            raw_open = _finite_float(open_percent)
+            raw_percent = _finite_float(percent)
+            out.update(realized_r=round(_finite_float(realized), 2), realized_pct=round(raw_percent, 2),
+                       realized_amount=round(_finite_float(pnl_d), 2), limit_amount=round(_finite_float(limit_d), 2),
+                       open_risk_pct=round(raw_open, 2), open_risk_pct_raw=raw_open,
+                       open_risk_amount=round(_finite_float(open_amount_d), 2),
+                       breached=bool(limit_pct > 0 and -percent >= _dec(limit_pct)),
+                       open_breached=bool(open_limit > 0 and open_percent >= _dec(open_limit)))
+            if limit_pct > 0:
+                out["remaining_pct"] = round(_finite_float(max(Decimal(0), _dec(limit_pct) + percent)), 2)
+                out["remaining_amount"] = round(_finite_float(max(Decimal(0), limit_d + pnl_d)), 2)
+    except (ArithmeticError, ValueError, OverflowError, DecimalException) as exc:
+        errors.append("حاصلِ محاسبهٔ دفتر معتبر یا متناهی نیست: " + str(exc))
+    out["validation_errors"] = list(dict.fromkeys(errors))[:MAX_SETTINGS_ERRORS]
+    out["valid"] = not bool(out["validation_errors"])
+    return out
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -870,54 +928,36 @@ def correlation(symbol, sign, open_positions):
 #  بلوکِ نهایی برای API/رابط
 # ═══════════════════════════════════════════════════════════════════
 def evaluate(symbol, plan, settings, rows, now=None):
-    """همه‌ی ریسک در یک دیکشنری — همان چیزی که `/api/analyze` و رابط می‌خوانند.
-
-    `blocked` یعنی معامله‌ی **امروز** دیگر مجاز نیست (سقفِ ضرر پر شده) یا مجموعِ
-    ریسکِ باز از سقف گذشته. در آن حالت لایه‌ی بالاتر (`app.analyze`) درجه را سقف
-    می‌زند و مهرِ ورود صادر نمی‌شود — همان الگوی «گیتِ صداقت» که برای بازارِ بسته
-    به کار رفت، نه یک قضاوتِ جدید.
-    """
-    st = settings or DEFAULTS
+    """All invalid evidence blocks permission; rounded display cannot bypass caps."""
+    st, errors = _normalized_settings(settings)
     day = daily_state(rows, st, now=now)
-    sign = dir_sign((plan or {}).get("direction"))
-    size = size_for(symbol, plan, st) if plan else {
-        "ok": False, "reason": "پلنی برای سایزکردن نیست", "approx": False, "notes": []}
+    errors += day.get("validation_errors") or []
+    present = plan is not None
+    sign = dir_sign(plan.get("direction")) if isinstance(plan, dict) else 0
+    size = size_for(symbol, plan, st) if present else {"ok": False, "reason": "پلنی برای سایزکردن نیست", "approx": False, "notes": []}
     corr = correlation(symbol, sign, day.get("open_positions")) if sign else {
-        "warnings": [], "open_concentration": [], "stacked": {}, "net": {},
-        "candidate_exposures": {}, "open_count": 0}
-
-    blocked = False
-    reasons = []
+        "warnings": [], "trade_warnings": [], "open_concentration": [], "stacked": {}, "net": {}, "candidate_exposures": {}, "open_count": 0}
+    reasons = list(dict.fromkeys(errors))
+    if present and not size.get("ok"):
+        reasons.append(size.get("reason") or "سایزِ معتبر تأیید نشده")
+    if present and size.get("over_risk"):
+        reasons.append("کوچک‌ترین سایز از سقفِ ریسکِ این معامله بزرگ‌تر است")
     if day["breached"]:
-        blocked = True
-        reasons.append(
-            f"سقفِ ضررِ روزانه پر شده است: امروز {day['realized_pct']}٪ "
-            f"(سقف {day['limit_pct']}٪ ≈ {day['limit_amount']}) — امروز معامله‌ی جدید نکن")
+        reasons.append("سقفِ ضررِ روزانه پر شده است؛ امروز معاملهٔ جدید نکن")
     if day["open_breached"]:
-        blocked = True
-        reasons.append(
-            f"مجموعِ ریسکِ معاملاتِ باز ({day['open_risk_pct']}٪) از سقفِ "
-            f"{day['open_risk_limit_pct']}٪ گذشته — اول یکی از پوزیشن‌های باز را ببند")
-
-    return {
-        "settings": {
-            "balance": st.get("balance"),
-            "account_ccy": st.get("account_ccy"),
-            "risk_pct": st.get("risk_pct"),
-            "daily_loss_limit_pct": st.get("daily_loss_limit_pct"),
-            "max_open_risk_pct": st.get("max_open_risk_pct"),
-        },
-        "size": size,
-        "daily": day,
-        "correlation": corr,
-        "blocked": blocked,
-        "block_reason": " · ".join(reasons) if reasons else None,
-        # ترتیبِ نمایش: اول هشدارِ هم‌بستگیِ همین معامله، بعد تمرکزِ موجود در
-        # پوزیشن‌های باز (همین حالا داخلِ `corr["warnings"]` چیده شده‌اند)، و
-        # آخر محدودیتِ سخت (سقفِ روزانه) — بدونِ تکرار.
-        "warnings": list(corr["warnings"]) + reasons,
-        "trade_warnings": list(corr.get("trade_warnings") or []),
-    }
+        reasons.append("مجموعِ ریسکِ معاملاتِ باز به سقف رسیده است؛ ورودِ جدید مجاز نیست")
+    if present and not errors and st["max_open_risk_pct"] > 0:
+        with localcontext() as ctx:
+            ctx.prec = _DECIMAL_PRECISION
+            projected = _dec(day["open_risk_pct_raw"]) + _dec(st["risk_pct"])
+            if projected > _dec(st["max_open_risk_pct"]):
+                reasons.append("ریسکِ باز به‌اضافهٔ ورودِ پیشنهادی از سقفِ ریسکِ باز بیشتر می‌شود")
+    reasons = list(dict.fromkeys(reasons))
+    return {"settings": {k: st[k] for k in ("balance", "account_ccy", "risk_pct", "daily_loss_limit_pct", "max_open_risk_pct")},
+            "size": size, "daily": day, "correlation": corr, "blocked": bool(reasons),
+            "block_reason": " · ".join(reasons) if reasons else None,
+            "warnings": list(corr.get("warnings") or []) + reasons,
+            "trade_warnings": list(corr.get("trade_warnings") or [])}
 
 
 # ═══════════════════════════════════════════════════════════════════

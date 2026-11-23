@@ -172,8 +172,8 @@ check("سبز: diverged+sweep", out[3]["state"] == "green")
 fake_y = {"checklist": [], "smt": {"available": True,
           "checked": {"diverged": True, "sweep": False, "reason": "SMT", "symbol": "A", "partner": "B"}}}
 out = APP._setup_statuses(fake_y)
-check("زرد: diverged بدونِ سوئیپ + راهنمای نمادِ سوئیپ‌کننده", out[3]["state"] == "yellow" and
-      "سوئیپ‌کننده" in out[3]["why"])
+check("زرد: بدونِ سوئیپ، هیچ‌کدام اجازهٔ ورود نمی‌گیرد", out[3]["state"] == "yellow" and
+      "تأییدِ مستقل" in out[3]["why"] and "وارد هیچ‌کدام نشو" in out[3]["why"])
 
 # حالتِ قرمز: همبستگیِ سالم
 fake_r = {"checklist": [], "smt": {"available": True,

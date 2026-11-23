@@ -15,6 +15,9 @@ Usage:
   python3 confluence.py BTCUSDT --json
 """
 import sys, os, json, argparse
+import math, inspect, datetime
+from typing import TypeGuard, Any
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import smc_engine as E
@@ -54,14 +57,29 @@ def _bias(trend, choch, bos):
     return 0
 
 
+def _scan_one(symbol, tf):
+    """تحلیلِ یک تایم‌فریم؛ خطای هر تایم‌فریم فقط همان را خراب می‌کند (نه کلِ اسکن)."""
+    try:
+        return E.analyze(symbol, tf)
+    except Exception as ex:
+        return {"error": str(ex)}
+
+
 def scan(symbol, tfs):
-    data = {}
-    for tf in tfs:
-        try:
-            data[tf] = E.analyze(symbol, tf)
-        except Exception as ex:
-            data[tf] = {"error": str(ex)}
-    return data
+    """تحلیلِ همهٔ تایم‌فریم‌ها.
+
+    ریشهٔ «تحلیلِ کند»: این حلقه **سری** بود؛ هر تایم‌فریم یک دانلودِ مستقل است
+    (~۴ تا ۲۰ ثانیه در این شبکه) و چهار تایم‌فریم پشتِ‌سرِهم یعنی ~۳۰ ثانیه انتظار
+    پیش از دیدنِ هر خروجی. تایم‌فریم‌ها به هم وابسته نیستند، پس موازی دانلود
+    می‌شوند؛ ترتیبِ کلیدها همان ترتیبِ `tfs` می‌مانَد (دیکشنری صریح در همان
+    ترتیب ساخته می‌شود) تا خروجیِ `score` بیت‌به‌بیت مثلِ قبل باشد.
+    """
+    tfs = list(tfs)
+    if len(tfs) <= 1:
+        return {tf: _scan_one(symbol, tf) for tf in tfs}
+    with ThreadPoolExecutor(max_workers=min(len(tfs), 4)) as ex:
+        futs = {tf: ex.submit(_scan_one, symbol, tf) for tf in tfs}
+        return {tf: futs[tf].result() for tf in tfs}
 
 
 def ote_zone(pd, direction, price):
@@ -70,11 +88,11 @@ def ote_zone(pd, direction, price):
     برای فروش (نزولی): OTE در پریمیوم (بالای رِنج) — گران.
     برمی‌گرداند: dict با low/high ناحیه، آیا قیمت داخلِ آن است، و درصدِ فیب.
     """
-    if not pd or direction == 0 or price is None:
+    if not pd or direction not in (1, -1) or not _finite(price):
         return None
     top = pd.get("range_top")
     bot = pd.get("range_bottom")
-    if top is None or bot is None or top <= bot:
+    if not _finite(top) or not _finite(bot) or top <= bot:
         return None
     rng = top - bot
     # اصلاحِ مفهومیِ ICT: OTE = ۰.۶۲–۰.۷۹ رتریسمنتِ حرکت. برای خرید، رتریسِ ۶۲–۷۹٪
@@ -93,8 +111,122 @@ def ote_zone(pd, direction, price):
             "range_top": round(top, 5), "range_bottom": round(bot, 5)}
 
 
-def score(symbol, tfs, d=None):
+def _finite(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _validate_tfs(tfs):
+    """Validate the supplied stack; never silently repair a timeframe token."""
+    tfs = list(tfs)
+    if not tfs or any(tf not in E.TF_SECONDS for tf in tfs):
+        raise ValueError("تایم‌فریمِ خالی یا نامعتبر در استک")
+    if len(set(tfs)) != len(tfs):
+        raise ValueError("تایم‌فریمِ تکراری در استک")
+    if any(E.tf_seconds(a) <= E.tf_seconds(b) for a, b in zip(tfs, tfs[1:])):
+        raise ValueError("استک باید از تایم‌فریمِ بالا به پایین مرتب باشد")
+    return tfs
+
+
+def _validate_finite(value, path="داده"):
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("عددِ نامتناهی یا نامعتبر در " + path)
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _validate_finite(item, path + "." + str(key))
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _validate_finite(item, path)
+
+
+def _accepts_now(fn):
+    try:
+        sig = inspect.signature(fn)
+        return "now" in sig.parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+    except (TypeError, ValueError):
+        return False
+
+
+def _news_context(symbol, now=None, calendar=None, calendar_coverage=None):
+    """One news permission path for live scores and archived decisions.
+
+    Supplying ``now`` means replay: NEVER fetch today's calendar. A caller may
+    supply archived events with explicit coverage {historical: True, source,
+    from, to} (UTC epoch seconds). Coverage must contain the whole gate window,
+    not just the decision instant. No historical events are inferred or made up.
+    Legacy live fixture providers need not implement calendar_quality/now.
+    """
+    historical = now is not None
+    coverage = {"available": False, "historical": historical, "source": None}
+
+    def unknown(reason):
+        return {"status": "UNKNOWN", "reason": reason,
+                "coverage": dict(coverage, reason=reason)}
+
+    if historical and not _finite(now):
+        raise ValueError("زمانِ تصمیم باید عددِ متناهیِ یونیکس باشد")
+    if M is None or not symbol:
+        return unknown("تقویمِ معتبر در دسترس نیست؛ اجازهٔ خبریِ ورود تأیید نشده")
+    if historical:
+        if calendar is None:
+            return unknown("تقویمِ تاریخیِ این دوره در دسترس نیست؛ بک‌تست فقط ساختاری است")
+        meta = calendar_coverage or {}
+        start, end = meta.get("from"), meta.get("to")
+        if (meta.get("historical") is not True or not meta.get("source") or
+                not _finite(start) or not _finite(end) or
+                start > now - 1800 or end < now + 3600):
+            return unknown("پوششِ معتبرِ تقویمِ تاریخی برای تمامِ پنجرهٔ تصمیم اثبات نشده")
+        # Current-week rows cannot masquerade as evidence for an older period.
+        try:
+            for event in calendar:
+                stamp = datetime.datetime.fromisoformat(event["date"].replace("Z", "+00:00"))
+                if stamp.tzinfo is None or not start <= stamp.timestamp() <= end:
+                    return unknown("خبرها با دورهٔ پوششِ تقویمِ تاریخی منطبق نیستند")
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return unknown("زمان یا هویتِ دورهٔ خبرِ تاریخی معتبر نیست")
+        if not _accepts_now(M.news_gate):
+            return unknown("گیتِ خبرِ این منبع زمانِ تاریخی را پشتیبانی نمی‌کند")
+        coverage.update(available=True, source=meta["source"], **{"from": start, "to": end})
+    try:
+        cal = calendar if calendar is not None else M.get_calendar()
+        if not historical:
+            quality_fn = getattr(M, "calendar_quality", None)
+            if callable(quality_fn):
+                quality = quality_fn(cal, now=now) if _accepts_now(quality_fn) else quality_fn(cal)
+                if isinstance(quality, dict):
+                    coverage["quality"] = quality
+                    if (quality.get("status") in ("UNKNOWN", "unavailable", "stale") or
+                            any(quality.get(k) is False for k in ("available", "source_ok", "fresh", "known", "ok"))):
+                        return unknown("تقویم ناموجود یا کهنه است؛ اجازهٔ خبریِ ورود تأیید نشده")
+            elif not cal and getattr(M, "__name__", "") == "macro_context":
+                return unknown("تقویم خالی است؛ نبودِ خبر اثبات نشده")
+        gate_fn = M.news_gate
+        args = (cal, M.symbol_ccys(symbol))
+        status, _advice, _events = (gate_fn(*args, now=now) if _accepts_now(gate_fn)
+                                   else gate_fn(*args))
+        if status not in ("GREEN", "AMBER", "RED"):
+            return unknown("وضعیتِ خبر نامعلوم است؛ تأییدِ ورود صادر نمی‌شود")
+        coverage["available"] = True
+        if not historical:
+            coverage["source"] = coverage.get("quality", {}).get("source", "live_calendar")
+        reason = {"GREEN": "خبرِ مهمِ نزدیک در تقویمِ معتبر نیست",
+                  "AMBER": "خبرِ مدیوم نزدیک است؛ احتیاط و مدیریتِ ریسک لازم است",
+                  "RED": "خبرِ های‌ایمپکت نزدیک است — ورودِ جدید ممنوع؛ صبر کن"}[status]
+        return {"status": status, "reason": reason, "coverage": coverage}
+    except Exception:
+        return unknown("تقویم یا گیتِ خبر خوانده نشد؛ اجازهٔ ورود تأیید نشده")
+
+
+def score(symbol, tfs, d=None, now=None, calendar=None, calendar_coverage=None):
+    tfs = _validate_tfs(tfs)
+    if now is not None and not _finite(now):
+        raise ValueError("زمانِ تصمیم باید عددِ متناهیِ یونیکس باشد")
     d = scan(symbol, tfs) if d is None else d
+    _validate_finite(d)
+    entry_record = d.get(tfs[-1], {})
+    if entry_record.get("error") or not _finite(entry_record.get("last_price")):
+        reason = entry_record.get("error") or "قیمتِ معتبرِ تایم‌فریمِ ورود موجود نیست"
+        raise RuntimeError("دادهٔ تحلیل دریافت نشد — این وضعیت «بدونِ معامله» نیست: " + str(reason))
     htf, mtf = tfs[0], tfs[1] if len(tfs) > 1 else tfs[0]
     ltf = tfs[-1]
 
@@ -182,13 +314,17 @@ def score(symbol, tfs, d=None):
         f"{htf} = {bias_word[htf_bias]}" if htf_bias else f"{htf} خنثی/رِنج — لبه‌ی جهت‌دار ضعیف")
 
     # --- 2. Multi-TF alignment ---
-    aligned = [b for b in (htf_bias, mtf_bias, ltf_bias) if b == direction and b != 0]
-    if direction != 0 and len(aligned) >= 3:
-        row("هم‌راستاییِ چند تایم‌فریم", True, 2.0, "هر سه تایم‌فریم هم‌جهت (تاپ‌داون کامل)")
-    elif direction != 0 and len(aligned) == 2:
+    aligned = [tf for tf in tfs if direction != 0 and biases.get(tf, 0) == direction]
+    opposed = [tf for tf in tfs if direction != 0 and biases.get(tf, 0) == -direction]
+    if direction != 0 and len(aligned) == len(tfs):
+        row("هم‌راستاییِ چند تایم‌فریم", True, 2.0, "همهٔ تایم‌فریم‌های استک هم‌جهت (تاپ‌داون کامل)")
+    elif opposed:
+        row("هم‌راستاییِ چند تایم‌فریم", False, 2.0, "تضادِ جهت در " + "، ".join(opposed))
+    elif direction != 0 and len(aligned) >= 2:
         # partial credit: register weight 2 but got 1
         checklist.append({"name": "هم‌راستاییِ چند تایم‌فریم", "status": "◐",
-                          "weight": 2.0, "got": 1.0, "detail": "دو تایم‌فریم از سه هم‌جهت"})
+                          "weight": 2.0, "got": 1.0,
+                          "detail": f"{len(aligned)} از {len(tfs)} تایم‌فریم هم‌جهت؛ بقیه خنثی یا ناموجود"})
         pts += 1.0
     elif direction != 0 and mtf_bias == -direction:
         row("هم‌راستاییِ چند تایم‌فریم", False, 2.0, f"تضاد: {mtf} خلافِ جهتِ تایم‌فریم بالا")
@@ -333,14 +469,8 @@ def score(symbol, tfs, d=None):
         (f"داخلِ کیل‌زون: {kz}" if in_kz else f"خارج از کیل‌زونِ اصلی ({kz}) — احتمالِ پایین‌تر"))
 
     # --- 10. Macro news gate (don't enter into high-impact news) ---
-    gate_status = None
-    if M is not None:
-        try:
-            cal = M.get_calendar()
-            ccys = M.symbol_ccys(symbol)
-            gate_status, gate_advice, _ = M.news_gate(cal, ccys)
-        except Exception:
-            gate_status = None
+    news = _news_context(symbol, now=now, calendar=calendar, calendar_coverage=calendar_coverage)
+    gate_status = news["status"]
     if gate_status == "GREEN":
         row("گیتِ اخبارِ کلان", True, 0.5, "پنجره‌ی عادی — خبرِ های‌ایمپکتِ نزدیک نیست")
     elif gate_status == "AMBER":
@@ -351,7 +481,7 @@ def score(symbol, tfs, d=None):
         row("گیتِ اخبارِ کلان", False, 0.5,
             "خبرِ های‌ایمپکت در پنجره‌ی ۱ساعته — ورودِ جدید ممنوع، صبر کن")
     else:
-        row("گیتِ اخبارِ کلان", None, 0.5, "تقویم در دسترس نیست")
+        row("گیتِ اخبارِ کلان", None, 0.5, news["reason"])
 
     # --- 11. RR feasibility (from a VALID location to the next liquidity target) ---
     # اصلاح: ورود دیگر کورکورانه از میدِ POIِ تایمِ ورود گرفته نمی‌شود. اگر قیمت
@@ -472,7 +602,8 @@ def score(symbol, tfs, d=None):
     max_score = sum(c["weight"] for c in checklist)
     ratio = (pts / max_score) if max_score else 0
     # hard gate: a HTF-vs-MTF conflict caps the grade regardless of score
-    conflict = direction != 0 and mtf_bias == -direction
+    context_tfs = tfs[1:-1] if len(tfs) > 2 else tfs[1:]
+    conflict = direction != 0 and any(biases.get(tf, 0) == -direction for tf in context_tfs)
     # location gate: خرید در پریمیوم یا فروش در دیسکانت = بدترین اشتباهِ آماتوری.
     # اگر هم زونِ PD غلط باشد و هم قیمت بیرونِ OTE، سقفِ درجه = C (فقط واچ).
     wrong_zone = False
@@ -532,11 +663,34 @@ def score(symbol, tfs, d=None):
 
     # پلن فقط وقتی «الان قابلِ اجرا» است که بازار باز و داده تازه باشد؛ وگرنه صریح
     # علامت می‌خورد تا در رابط/ژورنال/آلارم اشتباه گرفته نشود.
+    data_reason = ((forming_reason if forming_now else ltf_data.get("reason"))
+                   or "بازار بسته یا داده کهنه/نامعلوم است")
+    news_allowed = gate_status in ("GREEN", "AMBER")
+    execution_gate = {"allowed": bool(dstate == "open" and news_allowed),
+                      "status": gate_status, "reason": news["reason"]}
+    if dstate != "open":
+        execution_gate.update(allowed=False, status="DATA_" + str(dstate or "UNKNOWN").upper(),
+                              reason=data_reason)
+    if gate_status == "RED":
+        execution_gate.update(allowed=False, status="RED", reason=news["reason"])
     if plan:
-        plan["executable_now"] = bool(dstate == "open")
-        if dstate != "open":
-            plan["blocked_reason"] = ((forming_reason if forming_now
-                                       else ltf_data.get("reason")) or "بازار بسته یا داده کهنه")
+        plan["executable_now"] = execution_gate["allowed"]
+        if not execution_gate["allowed"]:
+            plan["blocked_reason"] = execution_gate["reason"]
+    if not execution_gate["allowed"] and not market_closed:
+        verdict = execution_gate["reason"] + ". درجه فقط کیفیتِ ساختاری است؛ پلن اجازهٔ ورودِ فعلی نیست."
+    technical_pts = sum(c["got"] for c in checklist if c["name"] != "گیتِ اخبارِ کلان")
+    technical_max = sum(c["weight"] for c in checklist if c["name"] != "گیتِ اخبارِ کلان")
+    technical_ratio = technical_pts / technical_max if technical_max else 0
+    technical_grade = ("A+" if technical_ratio >= 0.85 else "A" if technical_ratio >= 0.70
+                       else "B" if technical_ratio >= 0.50 else "C" if technical_ratio >= 0.30
+                       else "بدونِ معامله")
+    if not direction:
+        technical_grade = "بدونِ معامله"
+    elif market_closed or location_bad or rr_gate_failed:
+        technical_grade = "C"
+    elif (conflict or market_thin) and technical_grade in ("A+", "A"):
+        technical_grade = "B"
 
     return {
         "symbol": symbol,
@@ -545,6 +699,9 @@ def score(symbol, tfs, d=None):
         "score": round(pts, 1),
         "max_score": round(max_score, 1),
         "grade": grade,
+        "technical_grade": technical_grade,
+        "technical_score": round(technical_pts, 2),
+        "technical_max_score": round(technical_max, 2),
         "verdict": verdict,
         "bias_by_tf": {tf: bias_word[b] for tf, b in biases.items()},
         "checklist": checklist,
@@ -553,6 +710,9 @@ def score(symbol, tfs, d=None):
         "ote": ote,
         "killzone": d.get(ltf, {}).get("killzone"),
         "news_gate": gate_status,
+        "news_coverage": news["coverage"],
+        "decision_time": now,
+        "execution_gate": execution_gate,
         # وضعیتِ داده در تایم‌فریمِ ورود + همان بلوک برای همه‌ی تایم‌فریم‌ها
         # (API و رابط هر دو از همین می‌خوانند؛ هیچ‌جای دیگری محاسبه‌ی موازی نیست).
         "data": ltf_data,
@@ -562,15 +722,14 @@ def score(symbol, tfs, d=None):
         "entry_stamp": _entry_stamp(direction, plan, price, ratio, seq_ok,
                                     ltf_disp, ltf_choch, fresh_sweep, conflict,
                                     wrong_zone,
-                                    market_ok=not market_closed,
-                                    market_reason=((forming_reason if forming_now
-                                                    else ltf_data.get("reason"))
-                                                   if market_closed else None)),
+                                    market_ok=dstate == "open", market_reason=data_reason,
+                                    news_ok=news_allowed, news_reason=news["reason"]),
     }
 
 
 def _entry_stamp(direction, plan, price, ratio, seq_ok, ltf_disp, ltf_choch,
-                 fresh_sweep, conflict, wrong_zone, market_ok=True, market_reason=None):
+                 fresh_sweep, conflict, wrong_zone, market_ok=True, market_reason=None,
+                 news_ok=True, news_reason=None):
     """مهرِ تاییدِ ورودِ اختیاری (خواسته‌ی کاربر: نمره > ۷۰٪).
 
     مدلِ عرضه/تقاضای ویدیوی Smart Risk (استخراج‌شده و بک‌تست‌شده، نه کپیِ ادعای
@@ -593,6 +752,12 @@ def _entry_stamp(direction, plan, price, ratio, seq_ok, ltf_disp, ltf_choch,
         return {"stamped": False, "threshold_pct": thr,
                 "reasons": ["پلنِ معتبرِ RR ≥ ۱:۲ ساخته نشد یا جهت نامشخص است"]}
     ok = True
+    if not news_ok:
+        ok = False
+        reasons.append(news_reason or "اجازهٔ خبریِ ورود تأیید نشده")
+    if not _finite(price) or not _finite(ratio) or not _finite(plan.get("rr")) or plan["rr"] < 2:
+        return {"stamped": False, "threshold_pct": thr,
+                "reasons": reasons + ["قیمت، نمره یا ریسک‌به‌ریواردِ معتبر نیست"]}
     # ۰) بازار باید باز و داده تازه باشد؛ مهرِ «ورود» روی بازارِ بسته/دادهٔ کهنه
     #    تناقض است (پلن آن‌وقت «آماده‌سازی» است، نه اجازه‌ی ورود).
     if not market_ok:
@@ -612,7 +777,7 @@ def _entry_stamp(direction, plan, price, ratio, seq_ok, ltf_disp, ltf_choch,
     # ۳) قانونِ ۳۰٪: عمقِ نفوذ به زونِ POI
     penetration = None
     pt = plan.get("poi_top"); pb = plan.get("poi_bottom")
-    if pt is not None and pb is not None and pt > pb and price is not None:
+    if _finite(pt) and _finite(pb) and pt > pb:
         zsize = pt - pb
         if direction == 1:   # تقاضا: قیمت از بالا وارد می‌شود؛ نفوذ = چقدر پایین آمده
             penetration = round(max(0.0, (pt - price)) / zsize * 100, 1)
@@ -621,6 +786,12 @@ def _entry_stamp(direction, plan, price, ratio, seq_ok, ltf_disp, ltf_choch,
         if penetration < 30.0:
             ok = False
             reasons.append(f"نفوذ به زون فقط {penetration}٪ < ۳۰٪ — اولین لمسِ سطحی، صبر کن")
+        if not pb <= price <= pt:
+            ok = False
+            reasons.append("قیمت بیرونِ زونِ نقطهٔ ورود است؛ نفوذِ بیش از زون تأییدِ ورود نیست")
+    else:
+        ok = False
+        reasons.append("مرزهای معتبرِ نقطهٔ ورود برای سنجشِ نفوذ موجود نیست")
     # ۴) تاییدِ چرخشِ LTF
     disp_ok = bool((ltf_disp or {}).get("present")) and (
         (direction == 1 and (ltf_disp or {}).get("direction") == "bullish") or
@@ -669,11 +840,11 @@ def _kz_fa(kz):
         "New York AM": "کیل‌زونِ نیویورک صبح (۰۸:۳۰–۱۱:۰۰ ET)",
         "London Close": "کیل‌زونِ کلوزِ لندن (۱۰:۰۰–۱۲:۰۰ ET)",
         "New York PM": "کیل‌زونِ نیویورک بعدازظهر (۱۳:۰۰–۱۶:۰۰ ET)",
-        "Asian Range": "رِنجِ آسیایی (۱۹:۰۰–۲۴:۰۰ ET)",
+        "Asian Range": "رِنجِ آسیایی (۱۹:۰۰–۰۲:۰۰ ET)",
     }
-    for k, v in m.items():
-        if k in kz:
-            return v
+    labels = [v for k, v in m.items() if k in kz]
+    if labels:
+        return " · ".join(labels)
     return "خارج از کیل‌زونِ اصلی"
 
 

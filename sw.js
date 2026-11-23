@@ -12,6 +12,28 @@
 // (برگردانِ نسخه). صفحه با پیامِ PF_WHO وضعیت را می‌پرسد و اگر نسخه برنگشته
 // باشد به کاربر می‌گوید.
 const CACHE = "pipfound-__CACHE_REV__";
+// نمای محدودِ CacheStorage: هیچ خواندن/بازکردن/حذفی به کشِ اپِ دیگر نمی‌رسد.
+// نام‌های کش در کلِ origin مشترک‌اند؛ caches.matchِ سراسری هم می‌توانست صفحهٔ
+// اپِ دیگری را در فالبکِ آفلاین برگرداند. این نما native storage را تغییر نمی‌دهد.
+const originCaches = self.caches;
+const appCacheName = (name) => typeof name === "string" && name.startsWith("pipfound-");
+const caches = {
+  open(name) {
+    if (!appCacheName(name)) throw new Error("[pipfound-sw] unrelated cache name");
+    return originCaches.open(name);
+  },
+  async keys() { return (await originCaches.keys()).filter(appCacheName); },
+  delete(name) { return appCacheName(name) ? originCaches.delete(name) : Promise.resolve(false); },
+  async match(req) {
+    const names = await this.keys();
+    const ordered = [CACHE, ...names.filter((k) => k !== CACHE).reverse()];
+    for (const name of ordered) {
+      const hit = await originCaches.match(req, { cacheName: name });
+      if (hit) return hit;
+    }
+    return undefined;
+  }
+};
 const SHELL = [
   "/", "/manifest.webmanifest",
   "/icon-180.png", "/icon-192.png", "/icon-512.png",
@@ -35,7 +57,7 @@ async function shellHealthy(name) {
 // کش‌های دیگرِ همین اپ (به ترتیبِ ساخت — تازه‌ترین آخر است).
 async function otherCaches() {
   const keys = await caches.keys();
-  return keys.filter((k) => k !== CACHE);
+  return keys.filter((k) => k.startsWith("pipfound-") && k !== CACHE);
 }
 
 // ترمیمِ نصبِ نیمه‌کاره: مسیرهای جامانده از تازه‌ترین کشِ سالمِ قبلی کپی می‌شوند.

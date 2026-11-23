@@ -27,7 +27,9 @@
 DXY هم به‌عنوانِ مرجعِ بایاسِ دلار برای همهٔ جفت‌های اصلیِ دلاری سرو می‌شود
 (فقط به‌عنوانِ زمینه، نه نیمِ یک جفتِ SMT).
 """
-import datetime
+import math
+import inspect
+import statistics
 
 # جفت‌های همبستهٔ معتبر — ترتیبِ مهم نیست؛ سفارشِ خروجیِ map با آرایهٔ زیر حفظ می‌شود.
 SMT_PAIRS = [
@@ -81,6 +83,24 @@ def smt_divergence(symbol, symbol_bars, partner, partner_bars, direction):
     if not symbol_bars or not partner_bars:
         return {"diverged": False, "reason": "دادهٔ یکی از دو نماد خالی است"}
 
+    def valid(bars):
+        previous = None
+        for row in bars:
+            if any(not isinstance(row.get(k), (int, float)) or isinstance(row.get(k), bool)
+                   or not math.isfinite(row[k]) for k in ("t", "h", "l", "c")):
+                return False
+            if not row["l"] <= row["c"] <= row["h"]:
+                return False
+            if previous is not None and row["t"] <= previous:
+                return False
+            previous = row["t"]
+        return True
+
+    if not valid(symbol_bars) or not valid(partner_bars):
+        return {"diverged": False, "reason": "زمان یا قیمتِ کندل‌ها نامعتبر/نامتناهی است"}
+    if max(symbol_bars[0]["t"], partner_bars[0]["t"]) > min(symbol_bars[-1]["t"], partner_bars[-1]["t"]):
+        return {"diverged": False, "reason": "دورهٔ دو فید هم‌پوشانی ندارد؛ مقایسهٔ زمانی معتبر نیست"}
+
     def sw_of(bars):
         # واردکردنِ دیرهنگام برای شکستنِ چرخهٔ import با smc_engine در تست‌ها
         from smc_engine import swings
@@ -119,6 +139,18 @@ def smt_divergence(symbol, symbol_bars, partner, partner_bars, direction):
         return {**base, "diverged": False,
                 "reason": "آخرین سوئینگ‌های دو نماد هم‌فاز نیستند — مقایسه معتبر نیست"}
 
+    # Relative recency alone accepts an entirely stale/shifted partner feed.
+    # Retain the established bar tolerance, but require the compared swing
+    # periods to overlap in actual time too. Missing individual bars are fine.
+    step_a = statistics.median(y["t"] - x["t"] for x, y in zip(symbol_bars, symbol_bars[1:]))
+    step_b = statistics.median(y["t"] - x["t"] for x, y in zip(partner_bars, partner_bars[1:]))
+    if step_a != step_b:
+        return {**base, "diverged": False, "reason": "تایم‌فریمِ دو فید یکسان نیست"}
+    ta = [symbol_bars[index]["t"] for index, _price in a]
+    tb = [partner_bars[index]["t"] for index, _price in b]
+    if max(ta[0], tb[0]) > min(ta[1], tb[1]) + tol_bars * step_a:
+        return {**base, "diverged": False, "reason": "سوئینگ‌های مقایسه‌شده متعلق به دوره‌های جدا هستند"}
+
     a_prev, a_last = a[0][1], a[1][1]
     b_prev, b_last = b[0][1], b[1][1]
 
@@ -146,10 +178,12 @@ def smt_divergence(symbol, symbol_bars, partner, partner_bars, direction):
     # جهتِ حرکتِ هر سوئینگ باید در *هر دو* نمادِ هم‌نوع بررسی شود؛ شرطِ SMT:
     # یکی اکسترممِ جدید می‌زند و دیگری رهایش می‌کند.
     diverged = a_extreme and b_hold
-    a_txt = ("HH" if a_last > a_prev else "LL") if kind == "H" else \
-            ("HL" if a_last > a_prev else "LL")
-    b_txt = ("HH" if b_last > b_prev else "LH") if kind == "H" else \
-            ("HL" if b_last > b_prev else "LL")
+    def label(previous, last):
+        if last == previous:
+            return "EQH" if kind == "H" else "EQL"
+        return ("HH" if last > previous else "LH") if kind == "H" else ("HL" if last > previous else "LL")
+    a_txt = label(a_prev, a_last)
+    b_txt = label(b_prev, b_last)
     why = (
         f"SMTِ {'صعودی' if direction == 1 else 'خرسی'} بین {sym} و {prt}: "
         f"{sym} {'سقفِ بالاتر' if a_last>a_prev and kind=='H' else 'کفِ پایین‌تر' if a_last<a_prev and kind=='L' else 'هم‌سطحِ سوئینگِ قبل'} "
@@ -166,10 +200,11 @@ def smt_divergence(symbol, symbol_bars, partner, partner_bars, direction):
             "last_two": {
                 sym: {"prev": round(a_prev, 5), "last": round(a_last, 5), "label": a_txt},
                 prt: {"prev": round(b_prev, 5), "last": round(b_last, 5), "label": b_txt},
-            }}
+            }, "swing_times": {sym: ta, prt: tb},
+            "observation_end": {sym: symbol_bars[-1]["t"], prt: partner_bars[-1]["t"]}}
 
 
-def check_for(symbol, direction, fetch_fn=None):
+def check_for(symbol, direction, fetch_fn=None, tf="1h", limit=120):
     """جفتِ همبستهٔ نماد را پیدا و SMT را روی دادهٔ زنده می‌سنجد.
 
     fetch_fn(symbol, tf, limit) باید آرایهٔ کندلِ بسته بدهد؛ پیش‌فرض همان
@@ -187,10 +222,21 @@ def check_for(symbol, direction, fetch_fn=None):
     p = partners(sym)[0]
     if fetch_fn is None:
         import smc_engine as E
-        fetch_fn = E.fetch
+        fetch_fn = lambda name: E.fetch(name, tf, limit)[3]
+    else:
+        supplied = fetch_fn
+        try:
+            inspect.signature(supplied).bind(sym, tf, limit)
+            fetch_fn = lambda name: supplied(name, tf, limit)
+        except (TypeError, ValueError):
+            fetch_fn = supplied  # backwards-compatible one-argument app wrapper
     try:
         sb = fetch_fn(sym)
         pb = fetch_fn(p)
+        if isinstance(sb, tuple) and len(sb) == 4:
+            sb = sb[3]
+        if isinstance(pb, tuple) and len(pb) == 4:
+            pb = pb[3]
         out["checked"] = smt_divergence(sym, sb, p, pb, direction)
     except Exception as e:
         out["checked"] = {"diverged": False, "reason": f"دادهٔ {p} نیامد: {e}",

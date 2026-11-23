@@ -5,8 +5,8 @@
 
 اصلِ کار: **صفر تکرارِ منطق**. همان `score()`ِ تصحیح‌شده‌ی confluence.py و همان
 `analyze_bars()`ِ smc_engine.py که در تحلیلِ زنده استفاده می‌شوند، اینجا هم روی
-هر برشِ تاریخی صدا زده می‌شوند. پس وین‌ریتی که بیرون می‌آید، دقیقاً بازتابِ رفتارِ
-همان چرخه‌ی ورودی است که اپ الان به کاربر پیشنهاد می‌دهد — نه یک منطقِ موازیِ جعلی.
+هر برشِ تاریخی صدا زده می‌شوند. نمره و ساختار مشترک‌اند؛ مدلِ پرشدن و خروجِ
+کندلی، هزینهٔ صفر و نبودِ تقویمِ تاریخی محدودیتِ اجرا هستند، نه اثباتِ وین‌ریتِ زنده.
 
 مکانیزم:
   ۱) یک‌بار برای هر تایم‌فریم، بیشترین تعدادِ کندلِ تاریخی گرفته می‌شود (بدون API key).
@@ -26,6 +26,28 @@ import sys, json, argparse, datetime
 
 import smc_engine as EG
 import confluence as CF
+
+
+def _positive_int(value, name):
+    try:
+        number = int(value)
+        if isinstance(value, bool) or float(value) != number or number <= 0:
+            raise ValueError
+        return number
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(name + " باید عددِ صحیحِ مثبت و متناهی باشد")
+
+
+def _validate_bars(bars):
+    previous = None
+    for bar in bars:
+        if any(not CF._finite(bar.get(key)) for key in ("t", "o", "h", "l", "c")):
+            raise ValueError("کندل باید زمان و قیمت‌های متناهی داشته باشد")
+        if previous is not None and bar["t"] <= previous:
+            raise ValueError("زمانِ کندل‌ها باید صعودی و بدونِ تکرار باشد")
+        if not bar["l"] <= min(bar["o"], bar["c"]) <= max(bar["o"], bar["c"]) <= bar["h"]:
+            raise ValueError("قیمت‌های کندل با سقف و کف منطبق نیستند")
+        previous = bar["t"]
 
 
 def _slice_upto(bars, t_now):
@@ -61,6 +83,7 @@ def _build_d(series, tfs, t_now, warm=40):
             return None  # هنوز گرم نشده
         try:
             d[tf] = EG.analyze_bars(sl, tf, disp=series["_disp"], src="backtest",
+                                    sym=series.get("_symbols", {}).get(tf, series["_disp"]),
                                     now=t_decision)
         except Exception as ex:
             d[tf] = {"error": str(ex)}
@@ -68,11 +91,13 @@ def _build_d(series, tfs, t_now, warm=40):
 
 
 def _simulate(entry_bars, start_idx, direction, entry, sl, tp,
-              entry_type, fill_window=24, max_hold=400, confirm_window=3):
+              entry_type, fill_window=24, max_hold=400, confirm_window=3,
+              state=None, fill_gate=None, min_rr=0.0):
     """
     شبیه‌سازیِ نتیجه‌ی معامله روی کندل‌های تایم‌فریمِ ورود از start_idx به بعد.
     برمی‌گرداند: (result, exit_price, r, bars_held, filled_idx, fill_price, sl_used)  یا None اگر پر نشد.
-    result ∈ {"win","loss"}.
+    result ∈ {"win","loss","be","open"}. معاملهٔ باز حذف یا بستهٔ فرضی نمی‌شود.
+    state (اختیاری) زمانِ رزروِ سفارشِ منتظر/لغوشده را برای منعِ هم‌پوشانی می‌دهد.
 
     فیکس C8: ورودِ «market» روی **کلوزِ کندلِ سیگنال** پر می‌شود — همان قیمتی که در
     زمانِ واقعی در دسترس است. ریسک/هدف نسبت به همین قیمتِ واقعی سنجیده می‌شود.
@@ -85,7 +110,26 @@ def _simulate(entry_bars, start_idx, direction, entry, sl, tp,
     ثبت‌شده در فازِ پولبک) + بافر می‌نشیند — نه پشتِ سوینگِ ازپیش‌محاسبه‌شده که مدام
     خورده می‌شد (ریشه‌ی C17). اگر تأیید نیاید، معامله‌ای رخ نمی‌دهد.
     """
+    _validate_bars(entry_bars)
+    fill_window = _positive_int(fill_window, "پنجرهٔ پرشدن")
+    max_hold = _positive_int(max_hold, "پنجرهٔ نگه‌داری")
+    confirm_window = _positive_int(confirm_window, "پنجرهٔ تأیید")
+    if (isinstance(direction, bool) or direction not in (1, -1) or
+            entry_type not in ("market", "limit_ote") or
+            not all(CF._finite(x) for x in (entry, sl, tp, min_rr)) or min_rr < 0):
+        raise ValueError("جهت، نوعِ ورود یا قیمت‌های شبیه‌سازی معتبر نیستند")
     n = len(entry_bars)
+    if isinstance(start_idx, bool) or not isinstance(start_idx, int) or not 0 <= start_idx < n:
+        raise ValueError("ایندکسِ شروعِ شبیه‌سازی معتبر نیست")
+    state = {} if state is None else state
+    state.update(status="pending", filled=False,
+                 reserved_until_idx=min(start_idx + fill_window, n - 1))
+
+    def cancel(reason, until):
+        state.update(status="cancelled", reason=reason, filled=False,
+                     reserved_until_idx=min(until, n - 1))
+        return None
+
     filled_idx = None
     fill_price = entry
     sl_used = sl
@@ -101,7 +145,7 @@ def _simulate(entry_bars, start_idx, direction, entry, sl, tp,
                 touch_idx = k
                 break
         if touch_idx is None:
-            return None  # لیمیت اصلاً لمس نشد → معامله‌ای رخ نداد
+            return cancel("سفارش تا پایانِ پنجره لمس نشد", start_idx + fill_window)
 
         # آستانه‌ی دیسپلیسمنت = میانگینِ بدنه‌ی ۲۰ کندلِ اخیر (فیکس C17)
         lo = max(0, touch_idx - 20)
@@ -133,7 +177,7 @@ def _simulate(entry_bars, start_idx, direction, entry, sl, tp,
                 confirm_idx = k
                 break
         if confirm_idx is None:
-            return None  # تأییدِ LTF نیامد → صبر، نه ورود
+            return cancel("تأییدِ پولبک تا پایانِ پنجره نیامد", touch_idx + confirm_window)
 
         filled_idx = confirm_idx
         fill_price = entry_bars[confirm_idx]["c"]   # ورود روی کلوزِ کندلِ تأیید
@@ -152,9 +196,18 @@ def _simulate(entry_bars, start_idx, direction, entry, sl, tp,
                 (direction == -1 and dyn_sl > fill_price + min_gap)):
             sl_used = round(dyn_sl, 5)
 
-    risk = abs(fill_price - sl_used)
-    if risk <= 0:
-        return None
+    if fill_gate is not None:
+        gate = fill_gate(filled_idx)
+        state["fill_gate"] = gate
+        if not gate.get("allowed", False):
+            return cancel(gate.get("reason") or "اجازهٔ ورود در زمانِ پرشدن وجود ندارد", filled_idx)
+    risk = direction * (fill_price - sl_used)
+    reward = direction * (tp - fill_price)
+    if (not all(CF._finite(x) for x in (fill_price, sl_used, risk, reward)) or
+            risk <= 0 or reward <= 0 or reward / risk < min_rr):
+        return cancel("استاپ، هدف یا حداقلِ ریسک‌به‌ریوارد در قیمتِ واقعیِ ورود معتبر نیست", filled_idx)
+    state.update(status="open", filled=True, filled_idx=filled_idx,
+                 reserved_until_idx=n - 1)
 
     # ── فیکس C18: مدیریتِ پله‌ایِ پوزیشن (اسکیل‌اوت + برگشت‌به‌سربه‌سر) ──────────
     # مشکلِ افشاشده (کلاهِ ترِیدر): استاپِ تنگِ فتیله‌ی سوئیپ + هدفِ لیکوئیدیتیِ دور
@@ -179,10 +232,12 @@ def _simulate(entry_bars, start_idx, direction, entry, sl, tp,
     # با این می‌فهمیم هدفِ دومِ واقع‌گرایانه کجاست و آیا رانر اصلاً شانسِ رسیدن دارد.
     mfe_R = 0.0
     mae_R = 0.0
-    def _diag():
+    last_observed = filled_idx
+    def _diag() -> dict:
         return {"mfe_R": round(mfe_R, 2), "mae_R": round(mae_R, 2)}
 
     for k in range(filled_idx + 1, min(filled_idx + 1 + max_hold, n)):
+        last_observed = k
         b = entry_bars[k]
         # به‌روزرسانیِ MFE/MAE پیش از هر تصمیمِ خروج
         fav = (b["h"] - fill_price) if direction == 1 else (fill_price - b["l"])
@@ -210,6 +265,12 @@ def _simulate(entry_bars, start_idx, direction, entry, sl, tp,
                 remaining -= tp1_frac
                 stop_now = fill_price             # مابقی → سربه‌سر (BE)
                 tp1_done = True
+                # ترتیبِ درونِ کندل معلوم نیست؛ TP1 و استاپِ جدید در همان کندل
+                # را مثلِ قراردادِ SL-first محافظه‌کارانه حساب کن، نه نگه‌داشتِ رایگان.
+                hit_new_be = b["l"] <= stop_now if direction == 1 else b["h"] >= stop_now
+                if hit_new_be:
+                    return ("win", stop_now, round(booked_R, 2), k - filled_idx,
+                            filled_idx, fill_price, sl_used, _diag())
                 # ممکن است هدفِ اصلی هم در همین کندل خورده باشد
                 if hit_final:
                     r_final = abs(tp - fill_price) / risk
@@ -232,7 +293,14 @@ def _simulate(entry_bars, start_idx, direction, entry, sl, tp,
             r_final = abs(tp - fill_price) / risk
             total = round(booked_R + remaining * r_final, 2)
             return ("win", tp, total, k - filled_idx, filled_idx, fill_price, sl_used, _diag())
-    return None  # تا انتهای داده نه هدف نه استاپ — معامله‌ی ناتمام، حساب نمی‌شود
+    diag = _diag()
+    mark = entry_bars[last_observed]["c"]
+    diag.update(booked_R=round(booked_R, 4), remaining=remaining,
+                mark_price=mark, unrealized_R=round(remaining * direction * (mark - fill_price) / risk, 4),
+                observed_until_idx=last_observed,
+                censor_reason="end_of_data" if last_observed == n - 1 else "max_hold")
+    # Do not invent an exit or permit overlap after censored observation.
+    return ("open", None, None, last_observed - filled_idx, filled_idx, fill_price, sl_used, diag)
 
 
 _FA_DIGITS = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
@@ -315,7 +383,7 @@ def suggest_range(symbol, style="day", tfs=None, walk=600):
 def backtest(symbol, style="day", grades=("A+", "A", "B"),
              walk=350, fill_window=24, max_hold=400, side="both",
              tfs=None, date_from=None, date_to=None, verbose=False,
-             require_stamp=False):
+             require_stamp=False, calendar=None, calendar_coverage=None):
     """
     بک‌تستِ کاملِ walk-forward.
     style تعیینِ تایم‌فریم‌ها (همان نگاشتِ اپ): scalp/day/swing.
@@ -331,22 +399,39 @@ def backtest(symbol, style="day", grades=("A+", "A", "B"),
            بازه است شبیه‌سازی می‌شوند — یعنی کاربر همان پنجره‌ای را که روی چارت
            انتخاب کرده بک‌تست می‌گیرد.
     """
+    # سقفِ walk هم در این‌جا (نه فقط در اندپوینت): مقدارِ بزرگ یعنی پیمایشِ کلِ
+    # تاریخ روی یک ترد (ده‌ها ثانیه)، مقدارِ منفی/صفر یعنی «۰ معامله»ی گمراه‌کننده.
+    try:
+        walk = _positive_int(walk, "عمقِ پیمایش")
+        fill_window = _positive_int(fill_window, "پنجرهٔ پرشدن")
+        max_hold = _positive_int(max_hold, "پنجرهٔ نگه‌داری")
+        if side not in ("both", "long", "short"):
+            raise ValueError("جهتِ فیلترِ معامله معتبر نیست")
+        if style not in ("scalp", "day", "swing", "sb_ny"):
+            raise ValueError("سبکِ معامله معتبر نیست")
+        for stamp in (date_from, date_to):
+            if stamp is not None and not CF._finite(stamp):
+                raise ValueError("تاریخِ محدوده باید زمانِ متناهیِ یونیکس باشد")
+        if date_from is not None and date_to is not None and date_from > date_to:
+            raise ValueError("شروعِ محدوده پس از پایان است")
+    except ValueError as ex:
+        return {"error": str(ex)}
+    walk = max(100, min(walk, 2000))   # سقف = پیش‌فرضِ مستندِ اندپوینت
+
     tf_map = {
         # فیکس S1: استکِ اسکالپ با اپِ زنده (app.STYLES) یکسان شد تا وین‌ریتِ بک‌تست
         # دقیقاً همان استکی را بازتاب دهد که اپ به کاربر پیشنهاد می‌دهد.
         "scalp": ["1h", "30m", "15m", "5m"],
         "day":   ["1d", "4h", "1h", "15m"],
         "swing": ["1w", "1d", "4h", "1h"],
-        # سیلوربولت NY — هم‌راستا با app.STYLES["sb_ny"]. توجه: گیتِ زمانیِ پنجره‌ی
-        # ۰۹–۱۱ ET در بک‌تست اعمال نمی‌شود (محدودیتِ شناخته‌شده؛ سیگنال‌های خارج از
-        # پنجره هم شمرده می‌شوند → نتیجه محافظه‌کارانه است نه خوش‌بینانه).
+        # سیلوربولت NY — گیتِ پنجره روی ساعتِ تصمیم و ساعتِ ورود اعمال می‌شود.
         "sb_ny": ["15m", "5m", "1m"],
     }
     # tfs دلخواهِ کاربر بر نگاشتِ style اولویت دارد (تاییدِ فرکتال‌بودن).
-    if tfs:
-        tfs = [t.strip() for t in tfs if str(t).strip()]
-    else:
-        tfs = tf_map.get(style, tf_map["day"])
+    try:
+        tfs = CF._validate_tfs(tfs if tfs is not None else tf_map[style])
+    except (TypeError, ValueError) as ex:
+        return {"error": str(ex)}
     ltf = tfs[-1]
 
     # حداکثر کندلِ ممکن برای هر تایم‌فریم.
@@ -355,15 +440,22 @@ def backtest(symbol, style="day", grades=("A+", "A", "B"),
                  "4h": 3000, "1d": 1500, "1w": 400}
 
     series = {}
+    symbols = {}
     disp = symbol
     for tf in tfs:
         lim = limit_map.get(tf, 500)
         src, sym, dsp, bars = EG.fetch(symbol, tf, lim)
         disp = dsp
         series[tf] = bars
+        try:
+            _validate_bars(bars)
+        except ValueError as ex:
+            return {"error": tf + ": " + str(ex)}
+        symbols[tf] = sym
         if verbose:
             print(f"[data] {tf}: {len(bars)} کندل  (منبع {src}, {dsp})", file=sys.stderr)
     series["_disp"] = disp
+    series["_symbols"] = symbols
 
     entry_bars = series[ltf]
     if len(entry_bars) < 80:
@@ -376,20 +468,20 @@ def backtest(symbol, style="day", grades=("A+", "A", "B"),
     # پیدا کن؛ وگرنه به رفتارِ walk (N کندلِ آخر) برگرد.
     if date_from is not None or date_to is not None:
         data_lo = entry_bars[0]["t"]
-        data_hi = entry_bars[-1]["t"]
+        data_hi = entry_bars[-1]["t"] + EG.tf_seconds(ltf)
         lo_i, hi_i = 0, n
         if date_from is not None:
             lo_i = 0
-            while lo_i < n and entry_bars[lo_i]["t"] < date_from:
+            while lo_i < n and entry_bars[lo_i]["t"] + EG.tf_seconds(ltf) < date_from:
                 lo_i += 1
         if date_to is not None:
             hi_i = 0
             for j in range(n - 1, -1, -1):
-                if entry_bars[j]["t"] <= date_to:
+                if entry_bars[j]["t"] + EG.tf_seconds(ltf) <= date_to:
                     hi_i = j + 1
                     break
         start = max(60, lo_i)
-        end = min(n - 2, hi_i)
+        end = min(n, hi_i)
         if start >= end:
             def _fa(ts):
                 return datetime.datetime.fromtimestamp(
@@ -401,25 +493,58 @@ def backtest(symbol, style="day", grades=("A+", "A", "B"),
                 f"(مثلاً tfs بدونِ 1m/5m/15m).")}
     else:
         start = max(60, n - walk)  # از این ایندکسِ LTF شروع به پیمایش کن
-        end = n - 2
+        end = n
 
     trades = []
+    orders = []
+    news_counts = {"GREEN": 0, "AMBER": 0, "RED": 0, "UNKNOWN": 0}
+    score_errors = []
+
+    def gate_at_fill(idx):
+        timestamp = entry_bars[idx]["t"] + EG.tf_seconds(ltf)
+        news = CF._news_context(symbol, now=timestamp, calendar=calendar,
+                                calendar_coverage=calendar_coverage)
+        news_counts[news["status"]] += 1
+        # Unknown news permits only an explicitly unfiltered structural replay.
+        # Supplying an archive instead requires known coverage at the fill too.
+        allowed = news["status"] != "RED" and (calendar is None or news["status"] != "UNKNOWN")
+        reason = news["reason"]
+        if style == "sb_ny" and not EG.silver_bullet_window(timestamp)["in_window"]:
+            allowed = False
+            reason = "پرشدن بیرونِ پنجرهٔ ۰۹–۱۱ نیویورک است"
+        return {"allowed": allowed, "status": news["status"], "reason": reason,
+                "time": timestamp, "coverage": news["coverage"]}
+
     i = start
     while i < end:
         t_now = entry_bars[i]["t"]
+        t_decision = t_now + EG.tf_seconds(ltf)
+        if style == "sb_ny" and not EG.silver_bullet_window(t_decision)["in_window"]:
+            i += 1
+            continue
         d = _build_d(series, tfs, t_now)
         if d is None:
             i += 1
             continue
         try:
-            r = CF.score(symbol, tfs, d=d)
-        except Exception:
+            r = CF.score(symbol, tfs, d=d, now=t_decision, calendar=calendar,
+                         calendar_coverage=calendar_coverage)
+        except Exception as ex:
+            if len(score_errors) < 5:
+                score_errors.append(str(ex))
             i += 1
             continue
 
         plan = r.get("plan")
         grade = r.get("grade")
         stamp = (r.get("entry_stamp") or {}).get("stamped", False)
+        status = r.get("news_gate") or "UNKNOWN"
+        news_counts[status if status in news_counts else "UNKNOWN"] += 1
+        if (status == "RED" or (calendar is not None and status == "UNKNOWN") or
+                (r.get("data") or {}).get("state") not in (None, "open") or
+                (r.get("data") or {}).get("forming")):
+            i += 1
+            continue
         # اگر require_stamp روشن باشد، فقط سیگنال‌هایی که مهرِ تاییدِ ورود خورده‌اند
         # (نمره>۷۰٪ + نفوذِ ۳۰٪ + تاییدِ چرخشِ LTF) وارد می‌شوند — دقیقاً همان مدلِ
         # عرضه/تقاضای ویدیو. این راهِ سنجشِ لبه‌ی ستاپِ افزوده است.
@@ -427,19 +552,24 @@ def backtest(symbol, style="day", grades=("A+", "A", "B"),
             i += 1
             continue
         if plan and grade in grades and plan.get("rr", 0) >= 2.0:
+            if plan.get("direction") not in ("صعودی", "نزولی"):
+                i += 1
+                continue
             direction = 1 if plan["direction"] == "صعودی" else -1
             # فیلترِ جهت: side=long فقط صعودی، side=short فقط نزولی
             if (side == "long" and direction != 1) or (side == "short" and direction != -1):
                 i += 1
                 continue
+            state = {}
             sim = _simulate(entry_bars, i, direction,
                             plan["entry"], plan["sl"], plan["tp"],
                             plan.get("entry_type", "market"),
-                            fill_window=fill_window, max_hold=max_hold)
+                            fill_window=fill_window, max_hold=max_hold,
+                            state=state, fill_gate=gate_at_fill, min_rr=2.0)
             if sim is not None:
                 result, exitp, rr_real, held, filled_idx, fill_price, sl_used, diag = sim
                 t_sig = datetime.datetime.fromtimestamp(
-                    t_now, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
+                    t_decision, datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
                 trades.append({
                     "time": t_sig,
                     "grade": grade,
@@ -453,16 +583,45 @@ def backtest(symbol, style="day", grades=("A+", "A", "B"),
                     "bars_held": held,
                     "mfe_R": diag["mfe_R"],
                     "mae_R": diag["mae_R"],
+                    "signal_time": t_decision,
+                    "fill_time": entry_bars[filled_idx]["t"] + EG.tf_seconds(ltf),
+                    "exit_time": (entry_bars[filled_idx + held]["t"] + EG.tf_seconds(ltf)
+                                  if result != "open" else None),
+                    "news_gate_at_signal": status,
+                    "news_gate_at_fill": (state.get("fill_gate") or {}).get("status", "UNKNOWN"),
+                    "closed": result != "open",
                 })
+                if result == "open":
+                    trades[-1].update({key: diag[key] for key in
+                                       ("booked_R", "remaining", "mark_price", "unrealized_R", "censor_reason")})
+                    trades[-1]["observed_until_time"] = (entry_bars[diag["observed_until_idx"]]["t"]
+                                                          + EG.tf_seconds(ltf))
+                    break
                 # جلو بپر تا انتهای این معامله (بدونِ هم‌پوشانی)
                 i = filled_idx + held + 1
                 continue
+            orders.append({"signal_time": t_decision, "status": state.get("status"),
+                           "reason": state.get("reason"),
+                           "reserved_until_time": entry_bars[state["reserved_until_idx"]]["t"] + EG.tf_seconds(ltf)})
+            i = state["reserved_until_idx"] + 1
+            continue
         i += 1
 
-    return _summarize(disp, style, tfs, trades)
+    result = _summarize(disp, style, tfs, trades)
+    checked = sum(news_counts.values())
+    result.update(order_log=orders, score_errors=score_errors,
+                  news_coverage={"available": calendar is not None and checked > 0 and news_counts["UNKNOWN"] == 0,
+                                 "mode": "archived_calendar" if calendar is not None else "unavailable",
+                                 "fully_news_filtered": calendar is not None and checked > 0 and news_counts["UNKNOWN"] == 0,
+                                 "gate_counts": news_counts},
+                  silver_bullet_time_gate=style == "sb_ny")
+    return result
 
 
 def _summarize(disp, style, tfs, trades):
+    all_trades = trades
+    open_trades = [t for t in all_trades if t.get("result") == "open"]
+    trades = [t for t in all_trades if t.get("result") != "open"]
     n = len(trades)
     # فیکس C18: با اسکیل‌اوت، «برد» یعنی هر بستنِ با R مثبت (شاملِ پله‌ی TP1 که
     # مابقی سربه‌سر خورد). «باخت» = R منفی. سربه‌سرِ کامل (R≈0) جدا شمرده می‌شود.
@@ -504,7 +663,7 @@ def _summarize(disp, style, tfs, trades):
     MIN_TRADES = 20
     if n == 0:
         sample = {"ok": False, "level": "empty", "trades": n, "min": MIN_TRADES,
-                  "msg": "هیچ معامله‌ای در این بازه پیدا نشد — نمونه‌ی خالی؛ "
+                  "msg": "هیچ معاملهٔ بسته‌ای در این بازه نیست — نمونهٔ بسته‌ها خالی است؛ "
                          "بازه را بزرگ‌تر کن یا سبک/تایم‌فریمِ دیگری امتحان کن."}
     elif n < MIN_TRADES:
         sample = {"ok": False, "level": "low", "trades": n, "min": MIN_TRADES,
@@ -513,15 +672,20 @@ def _summarize(disp, style, tfs, trades):
                           f"بازه‌ی بک‌تست را بزرگ‌تر کن یا عمقِ پیمایش را افزایش بده.")}
     else:
         sample = {"ok": True, "level": "ok", "trades": n, "min": MIN_TRADES,
-                  "msg": f"نمونه‌ی کافی ({n} معامله) — نتیجه آماری قابلِ‌اتکاست."}
+                  "msg": f"حداقلِ شمارِ نمونه فراهم است ({n} معامله)؛ این به‌تنهایی اثباتِ سودآوری نیست."}
 
     return {
         "symbol": disp,
         "style": style,
         "timeframes": tfs,
-        "range_from": trades[0]["time"] if trades else None,
-        "range_to": trades[-1]["time"] if trades else None,
-        "trades": n,
+        "range_from": all_trades[0]["time"] if all_trades else None,
+        "range_to": all_trades[-1]["time"] if all_trades else None,
+        "trades": len(all_trades),
+        "closed_trades": n,
+        "open_trades": len(open_trades),
+        "winrate_denominator": "closed_trades",
+        "open_booked_R": round(sum(t.get("booked_R", 0) for t in open_trades), 4),
+        "open_unrealized_R": round(sum(t.get("unrealized_R", 0) for t in open_trades), 4),
         "wins": wins,
         "losses": losses,
         "scratch": scratch,
@@ -535,7 +699,14 @@ def _summarize(disp, style, tfs, trades):
         "by_direction": by_dir,
         "by_grade": by_grade,
         "sample": sample,
-        "trade_log": trades,
+        "trade_log": all_trades,
+        "costs": {"included": False, "spread": 0.0, "commission": 0.0,
+                  "swap": 0.0, "slippage": 0.0, "basis": "gross_R"},
+        "limitations": ["نتایج ناخالص‌اند؛ اسپرد، کمیسیون، سوآپ و اسلیپیج مدل نشده‌اند",
+                        "بدونِ تقویمِ تاریخیِ معتبر، نتیجه فقط ساختاری است و فیلترِ کاملِ خبر نیست",
+                        "معاملهٔ باز در لاگ می‌ماند؛ وین‌ریت و اکسپکتنسی فقط بر معاملاتِ بسته‌اند",
+                        "ترتیبِ درونِ کندل و پرشدنِ واقعیِ کارگزار معلوم نیست؛ استاپ در ابهام مقدم است",
+                        "تأییدِ پولبک، استاپِ داینامیک و خروجِ پله‌ای مدلِ شبیه‌سازی‌اند؛ ارسالِ سفارشِ زنده نیستند"],
     }
 
 
@@ -547,6 +718,7 @@ def _fmt_fa(res):
              + " ".join(res["timeframes"]))
     L.append("-" * 56)
     L.append(f"تعدادِ معاملات:        {res['trades']}")
+    L.append(f"بسته / هنوز باز:       {res.get('closed_trades', res['trades'])} / {res.get('open_trades', 0)}")
     L.append(f"برد / باخت:           {res['wins']} / {res['losses']}")
     L.append(f"وین‌ریت:              {res['winrate_pct']}٪")
     L.append(f"مجموعِ R:             {res['total_R']}")
@@ -560,9 +732,10 @@ def _fmt_fa(res):
     else:
         L.append("چند معامله‌ی آخر:")
         for t in res["trade_log"][-8:]:
-            mark = "برد " if t["result"] == "win" else "باخت"
+            mark = "باز " if t["result"] == "open" else "برد " if t["result"] == "win" else "باخت"
             L.append(f"  {t['time']}  {t['dir']:<5} {mark} "
-                     f"R={t['r']:<5} (پلن {t['planned_rr']}, {t['entry_type']})")
+                     f"R={str(t['r']):<5} (پلن {t['planned_rr']}, {t['entry_type']})")
+    L.extend("⚠ " + note for note in res.get("limitations", []))
     return "\n".join(L)
 
 

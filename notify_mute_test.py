@@ -41,6 +41,7 @@
 import datetime
 import io
 import json
+import re
 import os
 import shutil
 import socket as _socket
@@ -87,7 +88,7 @@ COMMENT_ONLY = "    # " + MUTE + "=0 — فقط یادداشت، بدونِ کد
 # دو تکّهٔ لنگرِ یکتا در app.py (شمارشِ needle صریح چک می‌شود تا جهشِ بی‌اثر
 # به‌جای «سبزِ خاموش»، خطا بدهد).
 GATE = '    if _notify_muted():\n        return\n'
-OSA_TAIL = ('             f\'display notification "{m}" with title "{t}" '
+OSA_TAIL = ('             f\'display notification {m} with title {t} '
             'sound name "Glass"\'],\n            capture_output=True, timeout=5)')
 ENV_LINE = '    env["%s"] = "0"\n' % MUTE
 OFF_SET = '_NOTIFY_OFF_VALUES = {"0", "off", "false", "no", "خاموش"}'
@@ -205,9 +206,10 @@ check("قاعده: گامِ CIِ app.py هم خفه است",
 
 # اپِ زنده باید **روشن** بماند: لانچرِ واقعیِ کاربر (`make_app.py`) نباید خفه کند.
 launcher = io.open(os.path.join(HERE, "make_app.py"), encoding="utf-8").read()
+server_launch = re.search(r"^.*nohup[^\n]*app\.py[^\n]*$", launcher, re.M)
 check("لانچرِ واقعی هنوز خفه نمی‌کند (اپِ زنده روشن می‌مانَد)",
-      "app.py --port" in launcher and MUTE not in launcher,
-      "کلیدِ خفه در make_app.py دیده شد" if MUTE in launcher else "لنگرِ پرتاب نبود")
+      bool(server_launch) and not re.search(r"(?:export\s+)?" + MUTE + r"\s*=\s*[\"']?(?:0|off|false|no)\b", launcher),
+      "لانچر باید محیطِ کاربر را به سرور بدهد، نه مقدارِ خاموش را تحمیل کند")
 
 # ═══════════════════════ ۲) جهش‌آزماییِ قاعده ═══════════════════════
 if NO_MUT:

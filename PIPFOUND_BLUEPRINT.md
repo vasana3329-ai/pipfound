@@ -2,7 +2,7 @@
 
 > **Purpose of this file.** This is the single cornerstone document for the *pipfound* project. It is written for **any agent, model, or human** picking up the work cold, with zero prior context. Read this top to bottom and you will fully grasp: what the app is, how it is built, every design decision made so far, the full change history, the known-open problems, and the roadmap. **Keep this file updated** — whenever you change architecture, fix a class of bug, or make a decision, append to the relevant section and to the Changelog. Treat it as both blueprint (forward) and log (backward).
 >
-> **Last updated:** 2026-09-29 (see Changelog for the precise commit trail).
+> **Last updated:** 2026-11-22 (see Changelog and PIPFOUND_VERIFICATION.md).
 > **Repo:** `github.com/vasana3329-ai/pipfound` (**PUBLIC** — anyone can read it; the personal data dir `~/pipfound/` is deliberately outside this repo and never committed). Auth via `gh` CLI as `vasana3329-ai`.
 > **Local path:** `~/.hermes/skills/trading/smc-ict-analysis/scripts/` (this is the app folder).
 
@@ -10,13 +10,15 @@
 
 ## 0. Non-negotiable constraints (read before touching anything)
 
+> **Verified stability release:** current findings, fixes, reproducible tests, packaging and explicit research/data limits are in `PIPFOUND_VERIFICATION.md`. Historical baseline numbers below are not a profitability claim. Complete Python suites run with `python3 test_all.py`; browser regressions are separate real executions. Personal data and live caches stay outside the source delivery.
+
 These are hard project rules. Violating them breaks the product for the user.
 
 1. **Output language: FULL Farsi, transliterated.** All user-facing strings (UI, analysis output, backtest labels) are in **Persian script**. ICT/SMC jargon is **transliterated by sound into Persian script** (not translated by meaning), because mixing Latin + Farsi breaks RTL rendering. Prices stay as digits.
    - اردر بلاک = Order Block · فیرولیوگپ = FVG · لیکوئیدیتی سوئیپ = liquidity sweep · بایاس = bias · بی او اس = BOS · چاک = CHoCH · پریمیوم/دیسکانت = premium/discount · کیل‌زون = killzone · اکسپکتنسی = expectancy.
 2. **Pure Python stdlib only.** No third-party packages except `certifi` (SSL) which is optional/graceful-fallback. No pip installs, no frameworks.
 3. **Free data, no API keys.** Binance public REST (crypto) + Yahoo Finance chart API (FX/metals/oil) + gold-api.com (spot metals) + faireconomy ForexFactory mirror (news calendar). All keyless.
-4. **Localhost only, no auth.** The web app binds `127.0.0.1:8787`. It is a personal local tool; no authentication layer by design (acceptable because it is loopback-only and never network-exposed).
+4. **Local-first.** Default bind is `127.0.0.1:8787`. Explicit `--lan` enables HTTPS and a random access token; writes also validate origin, body shape/length and resource limits. Do not expose a tokenless server on a network.
 5. **Zero logic duplication between live analysis and backtest.** The backtest MUST call the exact same `confluence.score()` and `smc_engine.analyze_bars()` used live. No parallel/forked scoring logic — otherwise backtest winrate stops reflecting what the app actually recommends.
 6. **No look-ahead in backtest.** Each walk step slices every timeframe strictly up to the "now" bar's timestamp.
 7. **Git workflow:** auto-commit locally after each code change (Farsi commit messages, stage only relevant source files). **Push to remote ONLY with explicit user approval each time.** Never push to `main` without permission. Global git config untouched.
@@ -127,11 +129,11 @@ Sibling module reused (not in this folder): `../../trade-journal/scripts/journal
 
 | Style | Live app (`app.STYLES`) | Backtest (`backtest.tf_map`) | Entry TF |
 |---|---|---|---|
-| scalp | `1h, 30m, 15m, 5m` | `1h, 15m, 5m, 1m` | 5m / 1m |
+| scalp | `1h, 30m, 15m, 5m` | `1h, 30m, 15m, 5m` | 5m |
 | day | `1d, 4h, 1h, 15m` | `1d, 4h, 1h, 15m` | 15m |
 | swing | `1w, 1d, 4h, 1h` | `1w, 1d, 4h, 1h` | 1h |
 
-> **Note the scalp mismatch:** live app uses `1h,30m,15m,5m`; backtest uses `1h,15m,5m,1m`. This is a known inconsistency (see §6, item S1) — backtest scalp numbers do not reflect the live scalp stack exactly.
+> **Scalp stack reconciled:** live and replay use the same stack. Bias comes from the highest frame; the tradeable dealing range uses the configured higher-than-entry refinement frame (`pd_tf`, MTF then HTF), never an arbitrary entry-frame range.
 
 ### 2.5 The confluence checklist (`confluence.score`)
 
@@ -238,6 +240,9 @@ Weighted, rules-based. Points normalized to % of max, so adding factors never in
 ---
 
 ## 5. Full history / Changelog
+
+### Verified stability audit
+The stability changes preserve prior work and add deterministic regressions for candle/spot caches, source provenance and DST, replay timing/open trades, risk precision, journal/alarm races, HTTP limits, stored text security, token cookies, PWA namespace/dirty revisions and relocatable packaging. Real market retrieval exposed a missing OpenSSL CA file on macOS; the fix reads public system roots while keeping peer/hostname verification enabled. No provider result, historical calendar or broker cost was invented. See `PIPFOUND_VERIFICATION.md` and the delivery's machine-readable test logs for the evidence. Publish only with explicit user consent; the delivery receipt records the read-back branch and commit.
 
 Commits are on `main`, remote `origin`. Farsi commit messages (summarized here in English).
 
@@ -367,11 +372,11 @@ Commits are on `main`, remote `origin`. Farsi commit messages (summarized here i
 - **D2 — ✅ RESOLVED (`این دور`).** بک‌تست کندلِ HTFِ هنوز-باز را با کلوزِ **نهاییِ** خودش تحلیل می‌کرد (نگاه به آینده). حالا با `drop_unclosed(now=t_decision)` همان چیزی دیده می‌شود که در لحظهٔ تصمیم وجود داشت.
 - **D3 — ✅ RESOLVED (۲۰۲۶-۰۹-۲۹). بازنمونه‌گیریِ ۴ساعته هم‌تراز شد:** `resample()` گروه‌ها را از ابتدای آرایه می‌چید، نه از مرزِ ساعت (روی XAUUSD سنجیده شد: **۲۲۸/۳۰۰ کندل روی شبکهٔ ۴ساعته، نه** — فاز `hour%4=2`)؛ حالا کلیدِ هر سبد `t // tf_sec * tf_sec` است و **زمانِ بازشدنِ کندلِ خروجی همان مرزِ UTC** می‌شود. سبدِ ناقصِ ابتدا/میانه/انتها منتشر نمی‌شود (هم‌راستا با `drop_unclosed`). مسیرِ زندهٔ Yahoo و بک‌تست هر دو از همان `resample` می‌گذرند، پس دیلینگ‌رنج/OTE حالا روی همان چارتی می‌نشیند که کارگزار نشان می‌دهد. تست: `h4_alignment_test.py` (۷۴ بررسی، لایهٔ ۴.۱۴). کریپتو از قبل سالم بود (۴ساعتهٔ Binance بومی). جزئیات در changelog همین دور.
 - **D4 — ⏳ OPEN. تولرانس‌های نسبتیِ ثابت:** `tol=0.0007` (equal-high) و `tol=0.0015` (الگو) با نوسان مقیاس نمی‌خورند → روی USDJPY ≈ ۱۰ پیپ و روی NAS100 ≈ ۳۰ پوینت «هم‌سطح» حساب می‌شود. باید ATR-محور شود.
-- **D5 — ⏳ OPEN. گیتِ خبر در بک‌تست با ساعتِ دیوار:** `news_gate()` از `now_et()` می‌خواند (نه تایم‌استمپِ کندل) و آفستِ ET را `-4` ثابت گرفته (بدونِ DST) → بک‌تست ناتکرارپذیر و در زمستان یک ساعت جابه‌جا.
-- **D6 — ⏳ OPEN. کیل‌زونِ London Close (۱۰–۱۲ ET) عملاً مرده است:** بازه‌ها به‌ترتیب چک می‌شوند و `NY AM (8.5–11)` در ۱۰:۰۰–۱۱:۰۰ آن را می‌بلعد؛ برچسبِ رِنجِ آسیا هم برای ۰۰:۳۰ ET اشتباه است.
-- **D7 — ⏳ OPEN. صفر واقع‌گراییِ اجرا در بک‌تست:** نه اسپرد، نه کمیسیون، نه سوآپ، نه اسلیپیج (جست‌وجو خالی). برای اسکالپِ ۵m/۱m بزرگ‌ترین عاملِ فریبِ RR است. ضمناً معامله‌ی ناتمام `None` می‌شود و **کلاً از آمار حذف** می‌شود (سوگیریِ خوش‌بینانه).
+- **D5 — ✅ RESOLVED.** گیت، زمانِ تصمیم/پرشدن را می‌گیرد و زمانِ نیویورک تابستانی/زمستانی است. نبودِ آرشیوِ تاریخی با خبرِ امروز پر نمی‌شود؛ بازپخشِ بدونِ پوشش صریحاً ساختاری است، نه تأییدِ فاندمنتال.
+- **D6 — ✅ RESOLVED.** هم‌پوشانیِ نیویورک صبح و کلوزِ لندن هر دو نمایش داده می‌شوند؛ برچسبِ آسیا با شرطِ ۱۹–۰۲ همخوان است. تستِ تابستان/زمستان نگه‌دارندهٔ این قرارداد است؛ پارامترِ ورود برای بهتر جلوه دادنِ متریک عوض نشده است.
+- **D7 — PARTIAL / explicit research limit.** معاملهٔ باز، آرِ محقق/نامحقق، سفارشِ منتظر و آمارِ بسته‌ها حفظ و جدا نمایش داده می‌شوند؛ معاملهٔ باز یا سربه‌سر باخت نیست. هزینه‌های واقعیِ کارگزار هنوز مدل نشده‌اند و رابط صریحاً خروجی را ناخالص می‌نامد؛ دادهٔ هزینه جعل نمی‌شود.
 - **D8 — ✅ RESOLVED (`این دور`).** مدلِ ریسک اضافه شد: سرمایه/درصدِ ریسک/سقف‌ها، سایزِ پوزیشن (لات/کانترکت/سهم/واحد) در کارتِ پلن، سقفِ ضررِ روزانه و ریسکِ باز از ژورنال، و هشدارِ هم‌بستگی/تمرکز با گیتِ سخت. جزئیات در changelog همین دور. **تکمیل (۲۰۲۶-۰۹-۲۸):** هم‌بستگی‌های عددی هم آمد — جدولِ ۱۹ ضریبِ مرجع + سه کلاسِ تذکرِ عددی (ریسکِ تکراری · تضادِ منطقی · هجِ ناخواسته) + تذکر در لحظهٔ ثبتِ معامله (`correlation_test.py`، ۱۸۰ بررسی، لایهٔ ۴.۱۳). **باقی‌ماندهٔ مرتبط:** هم‌بستگیِ *زنده* (محاسبه از دادهٔ تاریخی به‌جای جدولِ ثابت) و سایزِ خودکارِ سفارش (ارسال به کارگزار) — این‌ها Tier 3اند.
-- **D9 — ⏳ OPEN. تایم‌فریمِ میانیِ استک‌ها بی‌نقش است:** `score()` فقط `tfs[0]`، `tfs[1]`، `tfs[-1]` را می‌بیند (۱۵m در اسکالپ، ۱h در روزانه).
+- **D9 — ✅ RESOLVED.** هم‌راستاییِ همهٔ تایم‌فریم‌های استک در نمره/تضاد بررسی می‌شود؛ استکِ تکراری، نامعتبر یا خارج از ترتیب بی‌صدا اصلاح نمی‌شود.
 - **D10 — ⏳ OPEN. سطوحِ HTF ناقص:** PWH/PWL، PMH/PML، IPDA ۲۰/۴۰/۶۰ روزه، NDOG/NWOG، و اوپنِ ۰۰:۰۰ ET نیستند؛ SMT/جوتاس/کلاسترهای همبستگی فقط **متنِ آموزشی**اند (`macro_context.py`) و محاسبه نمی‌شوند. سطوحِ روزانه برای اندیکس/استاک هم روی تعریفِ سشنِ تقویمی حساب می‌شود (سشنِ آتی ۱۸:۰۰ ET باز می‌شود).
 - **D11 — ✅ RESOLVED (تستِ عددیِ طلایی + تستِ کندلِ ناقص).** `engine_golden_test.py` (۵۸ بررسی روی سریِ ثابتِ ۳۸کندلی، لایهٔ ۴.۱۱ CI) سوینگ/FVG/OB/ساختار/PD/لیکوییدیتی/الگو/سوئیپ را با مقادیرِ دقیق + مرزهای عددیِ لبه‌ای + ۱۲ جهشِ سرخ/سبز قفل می‌کند؛ حالا `disp_mult=1.5→1.4` (و FVG/OB/EQH/OTE) تست را می‌شکند. **تکمیل (۲۰۲۶-۰۹-۲۸):** تستِ «کندلِ ناقص» هم آمد — `partial_candle_test.py` (۶۱ بررسی، لایهٔ ۴.۱۲) به‌همراهِ گیتِ هستهٔ `analyze_bars` (خطای صریح روی کندلِ بسته‌نشده) و گیتِ گریدر روی فلگِ `data.forming` (سقفِ C + `executable_now=False` + بی‌مهر). **تکمیل (۲۰۲۶-۰۹-۲۹):** آخرین بخش هم بسته شد — `h4_alignment_test.py` (۷۴ بررسی، لایهٔ ۴.۱۴) هم‌ترازیِ H4 را روی دادهٔ ثابت قفل می‌کند و فیکسِ D3/P0-3 را نگه می‌دارد. **باقی‌ماندهٔ مرتبط:** هیچ (D11 کامل بسته شد).
 - **D12 — ✅ CLOSED (PR #20، `main = d249d17`). نصب روی «هر دستگاه» برپا شد:** `--lan` = host 0.0.0.0 + **HTTPSِ خودگواهی‌شده** (openssl؛ سرویس‌ورکر/نصب فقط روی https) + **توکنِ تصادفی** با ورودِ کوکییِ HttpOnly (POST/DELETE بی‌توکن → 401) + پورتِ بوت‌استرپِ HTTP برای ورودِ آسان؛ پنلِ «📲 نصب روی دستگاه» با `beforeinstallprompt` (نصبِ مستقیم کروم/اج)، آدرسِ LAN از `/api/install`، راهنمای هر پلتفرم؛ بنرِ «نسخهٔ تازه» روی `controllerchange`. تستِ ۳۹بررسی‌ایِ `pwa_test.py` لایهٔ ۴.۷ در CI. **برون‌بری/درون‌بریِ دادهٔ کاربر هم ✅ انجام شد** (P2-3؛ لایهٔ ۴.۹ و شرحِ کامل در §۵ changelog). **پشتیبانِ خودکارِ زمان‌بندی‌شده با نگه‌داشتِ چند نسخهٔ اخیر هم ✅ انجام شد** (لایهٔ ۴.۱۰؛ اسنپ‌شاتِ دوره‌ای + هرسِ ایمنِ فقط فایل‌های خودِ اپ + برگردانِ یک‌کلیکی — پس «ماندن بدونِ پشتیبان» دیگر ممکن نیست). مانده: QR، Docker.

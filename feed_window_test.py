@@ -24,9 +24,11 @@
 آفلاین است (فقط متنِ کد + تقویمِ ساختگی؛ شبکه‌ای در کار نیست).
 PF_FEEDWIN_NO_MUT=1 بخشِ جهش را رد می‌کند (فرارِ سریعِ CI محدود).
 """
+import ast
 import datetime
 import io
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -50,7 +52,7 @@ def copy_repo():
     d = tempfile.mkdtemp(prefix="pf_feedwin_")
     dst = os.path.join(d, "app")
     shutil.copytree(HERE, dst, ignore=shutil.ignore_patterns(
-        ".git", "__pycache__", ".ff_cache.json", ".te_actuals.json",
+        ".git", "__pycache__", "node_modules", ".ff_cache.json", ".te_actuals.json",
         "*.log", ".DS_Store", "fundamental_report.md"))
     return dst
 
@@ -67,6 +69,39 @@ def edit(d, name, old, new):
         raise AssertionError("لنگرِ جهش در %s %d بار پیدا شد (باید ۱ باشد): %r"
                              % (name, n, old[:70]))
     io.open(p, "w", encoding="utf-8").write(txt.replace(old, new, 1))
+
+
+def edit_function(d, name, function, old, new):
+    """لنگرِ درونِ تابع، نه امضایِ کامل یا یک خطِ تصادفیِ فایل."""
+    p = os.path.join(d, name)
+    txt = io.open(p, encoding="utf-8").read()
+    nodes = [n for n in ast.parse(txt).body
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and n.name == function]
+    if len(nodes) != 1:
+        raise AssertionError("تابعِ جهش %s در %s یکتا نیست" % (function, name))
+    lines = txt.splitlines(keepends=True)
+    node = nodes[0]
+    a = sum(map(len, lines[:node.lineno - 1]))
+    z = sum(map(len, lines[:node.end_lineno]))
+    region = txt[a:z]
+    if region.count(old) != 1:
+        raise AssertionError("لنگرِ جهش در تابع %s یکتا نیست: %r" % (function, old))
+    io.open(p, "w", encoding="utf-8").write(
+        txt[:a] + region.replace(old, new, 1) + txt[z:])
+
+
+def unguard_loading(d):
+    """نگهبانِ نویسندهٔ واقعیِ #list را بردار؛ paint/متنِ ساعت لنگر نیست."""
+    fund = (SC.page_sources(d) or {}).get("FUND_PAGE") or ""
+    body = SC._js_fn_bodies(fund).get("load")
+    if not body:
+        raise AssertionError("بدنهٔ load در FUND_PAGE پیدا نشد")
+    pattern = r'''\bif\s*\(\s*!\s*DATA\s*\)(?=\s*\$\(\s*["']#list["']\s*\)\s*\.innerHTML\s*=)'''
+    changed, n = re.subn(pattern, "", body)
+    if n != 1:
+        raise AssertionError("نگهبانِ بارگذاری در load %d بار پیدا شد (باید ۱ باشد)" % n)
+    edit(d, "app.py", body, changed)
 
 
 def scan(d):
@@ -162,8 +197,8 @@ if not NO_MUT:
                        "PAST_WINDOWS = (6,)"))
     red("past_window از کد رفته",
         "حذف شده",
-        lambda d: edit(d, "fundamental.py", "def past_window(v):",
-                       "def past_window_gone(v):"))
+        lambda d: edit_function(d, "fundamental.py", "past_window",
+                                "def past_window(", "def past_window_gone("))
     red("پنجرهٔ نامعتبر قطعی نمی‌شود",
         "نزدیک‌ترین پنجرهٔ مجاز",
         lambda d: edit(d, "fundamental.py",
@@ -179,16 +214,14 @@ if not NO_MUT:
                        "hours=max(0, int(past_hours))"))
     red("build پنجره را قطعی نمی‌کند",
         "قطعی نمی‌کند",
-        # لنگر عمداً سرِ `build` را هم دارد؛ در `one_event` هم همین خط هست.
-        lambda d: edit(d, "fundamental.py",
-                       "def build(hours=180, past_hours=6):\n    past_hours = past_window(past_hours)\n",
-                       "def build(hours=180, past_hours=6):\n"))
+        # one_event هم این دستور را دارد؛ AST جهش را فقط به build محدود می‌کند.
+        lambda d: edit_function(d, "fundamental.py", "build",
+                                "    past_hours = past_window(past_hours)\n", ""))
     red("پنجرهٔ مؤثر در پاسخ نمی‌آید",
         "نمی‌آید",
         # لنگر باید مخصوصِ `build` باشد؛ در پاسخِ تک‌رویداد هم همین کلید هست.
-        lambda d: edit(d, "fundamental.py",
-                       '        "count_past": len(passed),\n        "past_hours": past_hours,\n',
-                       '        "count_past": len(passed),\n'))
+        lambda d: edit_function(d, "fundamental.py", "build",
+                                '        "past_hours": past_hours,\n', ""))
     red("مسیرِ API پارامترِ past را نمی‌خواند",
         "را نمی‌خواند",
         lambda d: edit(d, "app.py", "FUND.build(hours=hours, past_hours=past_hours)",
@@ -233,9 +266,7 @@ if not NO_MUT:
         lambda d: edit(d, "app.py", "openKeys.has(evKey(e))", "false"))
     red("جای‌گیرِ بارگذاری در هر بازخوانی فهرست را خالی می‌کند",
         "بازخوانی فهرست را خالی",
-        lambda d: edit(d, "app.py",
-                       'if(!DATA) $("#list").innerHTML=\'<div class="empty">در حالِ بارگذاریِ تقویم…</div>\';',
-                       '$("#list").innerHTML=\'<div class="empty">در حالِ بارگذاریِ تقویم…</div>\';'))
+        unguard_loading)
 
     # بی‌گناه‌ها: نباید قرمز شوند
     d = copy_repo()

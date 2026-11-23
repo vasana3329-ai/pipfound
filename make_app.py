@@ -1,187 +1,195 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""می‌سازد: pipfound.app روی دسکتاپ + آیکونِ اختصاصی (.icns)."""
-import os, sys, subprocess, shutil, math
-from PIL import Image, ImageDraw, ImageFont
+"""Build a relocatable pipfound.app using only Python's standard library.
 
-HOME = os.path.expanduser("~")
-DESKTOP = os.path.join(HOME, "Desktop")
-APP = os.path.join(DESKTOP, "pipfound.app")
-SCRIPTS = os.path.join(HOME, ".hermes", "skills", "trading",
-                       "smc-ict-analysis", "scripts")
-VENV_PY = os.path.join(HOME, ".hermes", "hermes-agent", "venv", "bin", "python3")
+The app embeds the project sources and checked-in PNG assets. Python 3.11+ is
+an explicit external runtime prerequisite; it is not bundled. The launcher
+uses --python/PIPFOUND_PYTHON when available, then discovers a supported Python.
+Only launching on macOS needs its native bash/curl/open tools. Building needs
+neither Pillow, sips, iconutil, Hermes paths nor a running server/browser.
+
+For an isolated smoke build, pass --output /path/to/scratch/pipfound.app.
+Existing bundles are never replaced without --replace. The generated launcher
+supports --check (stdlib-only preflight; no server, browser or notifications).
+"""
+import argparse
+import os
+from pathlib import Path
+import plistlib
+import shlex
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+
+from make_icons import checked_png
+
+ROOT = Path(__file__).resolve().parent
 PORT = 8787
+SKIP_NAMES = {".git", "__pycache__", "node_modules", ".DS_Store", ".ff_cache.json",
+              ".te_actuals.json", "fundamental_report.md", ".pytest_cache"}
 
-# ---------- 1) آیکون ----------
-def make_icon(png_path, size=1024):
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    # پس‌زمینه‌ی گرد با گرادیانِ عمودی (تیره -> آبیِ اسمارت‌مانی)
-    top = (13, 20, 33)      # #0d1421
-    bot = (20, 60, 110)     # آبی
-    rad = int(size * 0.22)
-    grad = Image.new("RGB", (1, size))
-    for y in range(size):
-        t = y / (size - 1)
-        r = int(top[0] + (bot[0]-top[0]) * t)
-        g = int(top[1] + (bot[1]-top[1]) * t)
-        b = int(top[2] + (bot[2]-top[2]) * t)
-        grad.putpixel((0, y), (r, g, b))
-    grad = grad.resize((size, size))
-    mask = Image.new("L", (size, size), 0)
-    md = ImageDraw.Draw(mask)
-    md.rounded_rectangle([0, 0, size-1, size-1], radius=rad, fill=255)
-    img.paste(grad, (0, 0), mask)
-    d = ImageDraw.Draw(img)
+LAUNCHER = r'''#!/bin/bash
+set -u
+# Resources/app is relative to this executable: moving the .app keeps it usable.
+SCRIPTS="$(cd "$(dirname "$0")/../Resources/app" && pwd -P)" || exit 1
+PREFERRED_PY=@@PYTHON@@
+PORT="${PIPFOUND_PORT:-@@PORT@@}"
+CHECK_ONLY=0
+if [ "${1:-}" = "--check" ]; then CHECK_ONLY=1; fi
 
-    # کندلِ صعودی + نزولی (سبک SMC)
-    cx = size // 2
-    # کندل سبز (صعودی)
-    green = (34, 211, 165)
-    red = (239, 68, 68)
-    bw = int(size * 0.11)
-    # کندل چپ (نزولی/قرمز)
-    x1 = int(size*0.30)
-    d.line([(x1, int(size*0.24)), (x1, int(size*0.72))], fill=red, width=int(size*0.020))
-    d.rounded_rectangle([x1-bw//2, int(size*0.34), x1+bw//2, int(size*0.60)],
-                        radius=int(bw*0.25), fill=red)
-    # کندل راست (صعودی/سبز)
-    x2 = int(size*0.62)
-    d.line([(x2, int(size*0.20)), (x2, int(size*0.80))], fill=green, width=int(size*0.020))
-    d.rounded_rectangle([x2-bw//2, int(size*0.36), x2+bw//2, int(size*0.66)],
-                        radius=int(bw*0.25), fill=green)
-
-    # خطِ روند صعودی (نمادِ pip/سود)
-    d.line([(int(size*0.20), int(size*0.66)), (int(size*0.50), int(size*0.50)),
-            (int(size*0.80), int(size*0.30))],
-           fill=(255, 255, 255), width=int(size*0.018), joint="curve")
-    # نوکِ فلش
-    ax, ay = int(size*0.80), int(size*0.30)
-    d.polygon([(ax, ay-int(size*0.02)), (ax+int(size*0.055), ay),
-               (ax, ay+int(size*0.055))], fill=(255, 255, 255))
-
-    # حروفِ pf پایین
-    try:
-        fnt = ImageFont.truetype("/System/Library/Fonts/SFNSRounded.ttf", int(size*0.16))
-    except Exception:
-        try:
-            fnt = ImageFont.truetype("/Library/Fonts/Arial Bold.ttf", int(size*0.16))
-        except Exception:
-            fnt = ImageFont.load_default()
-    txt = "pf"
-    bbox = d.textbbox((0, 0), txt, font=fnt)
-    tw = bbox[2]-bbox[0]
-    d.text(((size-tw)//2, int(size*0.80)), txt, font=fnt, fill=(180, 200, 230))
-    img.save(png_path)
-
-def build_icns(work):
-    png = os.path.join(work, "icon_1024.png")
-    make_icon(png)
-    iconset = os.path.join(work, "pipfound.iconset")
-    os.makedirs(iconset, exist_ok=True)
-    specs = [(16,1),(16,2),(32,1),(32,2),(128,1),(128,2),(256,1),(256,2),(512,1),(512,2)]
-    for base, scale in specs:
-        px = base*scale
-        name = f"icon_{base}x{base}{'@2x' if scale==2 else ''}.png"
-        subprocess.run(["sips", "-z", str(px), str(px), png,
-                        "--out", os.path.join(iconset, name)],
-                       check=True, capture_output=True)
-    icns = os.path.join(work, "pipfound.icns")
-    subprocess.run(["iconutil", "-c", "icns", iconset, "-o", icns],
-                   check=True, capture_output=True)
-    return icns
-
-# ---------- 2) اسکریپتِ راه‌انداز ----------
-LAUNCHER = f'''#!/bin/bash
-# راه‌اندازِ pipfound — اول سلامتِ کد را چک می‌کند، بعد سرور را بالا می‌آورد و مرورگر را باز می‌کند
-SCRIPTS="{SCRIPTS}"
-VENV_PY="{VENV_PY}"
-PORT={PORT}
-URL="http://127.0.0.1:$PORT"
-GUARD_LOG="/tmp/pipfound-selfcheck.log"
-
-# اگر پایتونِ venv نبود، از پایتونِ سیستم استفاده کن
-if [ ! -x "$VENV_PY" ]; then VENV_PY="$(command -v python3)"; fi
-
-# 🩺 نگهبانِ سلامت: اگر کدِ اپ خراب شده باشد، همین‌جا نسخه‌ی سالمِ قبلی برمی‌گردد
-if [ -f "$SCRIPTS/selfcheck.py" ]; then
-  GUARD_OUT="$("$VENV_PY" "$SCRIPTS/selfcheck.py" --guard 2>&1)"
-  printf '%s\n%s\n\n' "── $(date '+%Y-%m-%d %H:%M:%S')" "$GUARD_OUT" >> "$GUARD_LOG"
-  case "$GUARD_OUT" in
-    *"❌"*)
-      osascript -e 'display dialog "نگهبانِ سلامتِ pipfound یک اشکال در کد پیدا کرد و نتوانست خودش ترمیم کند.\\n\\nلاگ: /tmp/pipfound-selfcheck.log" buttons {{"باشه"}} default button 1 with icon caution with title "pipfound"' >/dev/null 2>&1
-      open -a TextEdit "$GUARD_LOG" >/dev/null 2>&1
-      exit 1
-      ;;
-  esac
+report() {
+  printf '%s\n' "$1" >&2
+  # Preflight/tests never open an app or show a desktop dialog.
+  if [ "$CHECK_ONLY" = 0 ] && [ "${PIPFOUND_NOTIFY:-1}" != 0 ] && command -v osascript >/dev/null 2>&1; then
+    osascript -e 'display dialog "pipfound نتوانست اجرا شود. گزارش در لاگِ pipfound است." buttons {"باشه"} default button 1 with icon caution with title "pipfound"' >/dev/null 2>&1 || true
+  fi
+  exit 1
+}
+python_ok() {
+  [ -n "$1" ] && "$1" -S -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1
+}
+PY=""
+if [ -n "${PIPFOUND_PYTHON:-}" ]; then
+  if python_ok "$PIPFOUND_PYTHON"; then PY="$PIPFOUND_PYTHON";
+  else report "PIPFOUND_PYTHON must be an executable Python 3.11+."; fi
+else
+  for candidate in "$PREFERRED_PY" python3 python3.13 python3.12 python3.11 /opt/homebrew/bin/python3 /usr/local/bin/python3; do
+    if python_ok "$candidate"; then PY="$candidate"; break; fi
+  done
+fi
+[ -n "$PY" ] || report "pipfound needs Python 3.11+ (not bundled); set PIPFOUND_PYTHON to its executable."
+case "$PORT" in ''|*[!0-9]*) report "PIPFOUND_PORT must be between 1 and 65535.";; esac
+if [ "$PORT" -lt 1 ] || [ "$PORT" -gt 65535 ]; then report "PIPFOUND_PORT must be between 1 and 65535."; fi
+if [ "$CHECK_ONLY" = 1 ]; then
+  exec "$PY" -S "$SCRIPTS/selfcheck.py"
 fi
 
-# اگر سرور از قبل بالا نیست، بالا بیاور
-if ! curl -s "$URL/api/health" >/dev/null 2>&1; then
-  cd "$SCRIPTS" || exit 1
-  nohup "$VENV_PY" -u app.py --port $PORT >/tmp/pipfound.log 2>&1 &
-  # صبر تا آماده شدن
-  for i in $(seq 1 40); do
-    if curl -s "$URL/api/health" >/dev/null 2>&1; then break; fi
+LOG_DIR="${PIPFOUND_LOG_DIR:-${XDG_STATE_HOME:-$HOME/Library/Logs}/pipfound}"
+mkdir -p "$LOG_DIR" || report "Cannot create pipfound log directory: $LOG_DIR"
+GUARD_LOG="$LOG_DIR/selfcheck.log"
+SERVER_LOG="$LOG_DIR/server.log"
+if ! "$PY" "$SCRIPTS/selfcheck.py" --guard >"$GUARD_LOG" 2>&1; then
+  report "pipfound preflight failed: $GUARD_LOG"
+fi
+command -v curl >/dev/null 2>&1 || report "Launching pipfound on macOS needs its native curl."
+URL="http://127.0.0.1:$PORT"
+healthy() {
+  curl -fsS --max-time 2 "$URL/api/health" 2>/dev/null | "$PY" -S -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("ok") is True else 1)' >/dev/null 2>&1
+}
+if ! healthy; then
+  cd "$SCRIPTS" || report "Missing bundled sources: $SCRIPTS"
+  nohup "$PY" -u app.py --host 127.0.0.1 --port "$PORT" >"$SERVER_LOG" 2>&1 &
+  for ((i=0; i<40; i++)); do
+    if healthy; then break; fi
     sleep 0.3
   done
 fi
-
-# اگر سرور بالا نیامد (مثلاً خودِ اپ جلوی سروِ کدِ خراب را گرفته) واضح بگو
-if ! curl -s "$URL/api/health" >/dev/null 2>&1; then
-  osascript -e 'display dialog "سرورِ pipfound بالا نیامد. لاگِ سرور: /tmp/pipfound.log" buttons {{"باشه"}} default button 1 with icon caution with title "pipfound"' >/dev/null 2>&1
-  open -a TextEdit /tmp/pipfound.log >/dev/null 2>&1
-  exit 1
+healthy || report "pipfound server did not become healthy: $SERVER_LOG"
+if [ "${PIPFOUND_OPEN_BROWSER:-1}" != 0 ]; then
+  command -v open >/dev/null 2>&1 || report "Opening pipfound needs macOS open (or PIPFOUND_OPEN_BROWSER=0)."
+  open "$URL"
 fi
-
-open "$URL"
 '''
 
-def build_app(icns):
-    if os.path.exists(APP):
-        shutil.rmtree(APP)
-    macos = os.path.join(APP, "Contents", "MacOS")
-    res = os.path.join(APP, "Contents", "Resources")
-    os.makedirs(macos, exist_ok=True)
-    os.makedirs(res, exist_ok=True)
 
-    launcher = os.path.join(macos, "pipfound")
-    with open(launcher, "w") as f:
-        f.write(LAUNCHER)
-    os.chmod(launcher, 0o755)
+def build_icns(work, source=ROOT):
+    """Modern macOS ICNS accepts a PNG-backed 512px (ic09) icon element."""
+    png = checked_png(Path(source) / "icon-512.png", 512)
+    element = b"ic09" + struct.pack(">I", len(png) + 8) + png
+    content = b"icns" + struct.pack(">I", len(element) + 8) + element
+    target = Path(work) / "pipfound.icns"
+    target.write_bytes(content)
+    return target
 
-    shutil.copy(icns, os.path.join(res, "pipfound.icns"))
 
-    plist = '''<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleName</key><string>pipfound</string>
-  <key>CFBundleDisplayName</key><string>pipfound</string>
-  <key>CFBundleIdentifier</key><string>com.local.pipfound</string>
-  <key>CFBundleVersion</key><string>1.0</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleExecutable</key><string>pipfound</string>
-  <key>CFBundleIconFile</key><string>pipfound.icns</string>
-  <key>LSMinimumSystemVersion</key><string>10.13</string>
-  <key>NSHighResolutionCapable</key><true/>
-  <key>LSUIElement</key><false/>
-</dict>
-</plist>
-'''
-    with open(os.path.join(APP, "Contents", "Info.plist"), "w") as f:
-        f.write(plist)
+def supported_python(executable):
+    executable = str(executable or sys.executable)
+    resolved = shutil.which(executable)
+    if not resolved:
+        raise ValueError("Python executable not found: %s" % executable)
+    result = subprocess.run(
+        [resolved, "-S", "-c", "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)"],
+        capture_output=True, text=True, timeout=10)
+    if result.returncode:
+        raise ValueError("Python 3.11+ is required: %s" % executable)
+    return str(Path(resolved).resolve())
 
-def main():
-    work = "/tmp/pipfound_build"
-    os.makedirs(work, exist_ok=True)
-    icns = build_icns(work)
-    build_app(icns)
-    # رفرشِ آیکون در Finder
-    subprocess.run(["touch", APP], check=False)
-    print(f"OK — ساخته شد: {APP}")
-    print(f"icns: {icns}")
+
+def ignore_sources(directory, names):
+    return [name for name in names if name in SKIP_NAMES or name.endswith(".log")
+            or Path(directory, name).is_symlink()]
+
+
+def build_app(output, scripts=ROOT, python=None, port=PORT, replace=False):
+    scripts = Path(scripts).resolve(strict=True)
+    output = Path(output).expanduser().absolute()
+    if output.is_symlink() or output.suffix.lower() != ".app":
+        raise ValueError("Output must be a non-symlink .app path")
+    if output.resolve().is_relative_to(scripts):
+        raise ValueError("Output must be outside the source tree")
+    if output.exists() and (not replace or not output.is_dir()):
+        raise ValueError("Output exists; use --replace explicitly: %s" % output)
+    if isinstance(port, bool) or not 1 <= int(port) <= 65535:
+        raise ValueError("Port must be between 1 and 65535")
+    for name in ("app.py", "selfcheck.py", "selfcheck-baseline.json", "sw.js", "manifest.webmanifest"):
+        if not (scripts / name).is_file():
+            raise ValueError("Missing project source: %s" % (scripts / name))
+    preferred = supported_python(python)
+    # Validate all source assets before making or replacing an output bundle.
+    from make_icons import copy_icons
+    copy_icons(scripts, scripts, check_only=True)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".pipfound-build-", dir=output.parent) as work:
+        staged = Path(work) / output.name
+        contents = staged / "Contents"
+        macos, resources = contents / "MacOS", contents / "Resources"
+        macos.mkdir(parents=True)
+        resources.mkdir()
+        shutil.copytree(scripts, resources / "app", ignore=ignore_sources)
+        icon = build_icns(resources, scripts)
+        launcher = macos / "pipfound"
+        launcher.write_text(LAUNCHER.replace("@@PYTHON@@", shlex.quote(preferred))
+                            .replace("@@PORT@@", str(int(port))), encoding="utf-8")
+        launcher.chmod(0o755)
+        plist = {"CFBundleName": "pipfound", "CFBundleDisplayName": "pipfound",
+                 "CFBundleIdentifier": "com.local.pipfound", "CFBundleVersion": "1.0",
+                 "CFBundleShortVersionString": "1.0", "CFBundlePackageType": "APPL",
+                 "CFBundleExecutable": "pipfound", "CFBundleIconFile": icon.name,
+                 "LSMinimumSystemVersion": "10.13", "NSHighResolutionCapable": True,
+                 "LSUIElement": False}
+        with (contents / "Info.plist").open("wb") as stream:
+            plistlib.dump(plist, stream)
+        previous = Path(work) / "previous.app"
+        if output.exists():
+            output.rename(previous)
+        try:
+            staged.rename(output)
+        except OSError:
+            if previous.exists():
+                previous.rename(output)
+            raise
+    return output
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, default=Path.home() / "Desktop" / "pipfound.app")
+    parser.add_argument("--scripts", type=Path, default=ROOT, help="project sources to embed")
+    parser.add_argument("--python", help="external Python 3.11+ executable (default: this interpreter)")
+    parser.add_argument("--port", type=int, default=PORT)
+    parser.add_argument("--replace", action="store_true", help="explicitly replace an existing bundle")
+    args = parser.parse_args(argv)
+    try:
+        output = build_app(args.output, args.scripts, args.python, args.port, args.replace)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        parser.exit(1, "Build failed: %s\n" % exc)
+    print("Built: %s" % output)
+    print("Requires external Python 3.11+; sources/icons are embedded; no Pillow required.")
+    print("Preflight without launching: %s --check" % shlex.quote(str(output / "Contents/MacOS/pipfound")))
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
