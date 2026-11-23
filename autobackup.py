@@ -40,9 +40,20 @@
     python3 autobackup.py
 """
 import datetime
+import contextlib
+import errno
 import json
+import math
 import os
 import re
+import stat
+import tempfile
+import threading
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 HOME = os.path.expanduser("~")
 
@@ -59,7 +70,82 @@ MAX_KEEP = 50
 MAX_PROBLEMS = 8
 
 # نامِ استانداردِ نسخه: pipfound-backup-YYYYmmdd-HHMMSS.json (+ پسوندِ یکتا در برخورد)
-NAME_RE = re.compile(r"^pipfound-backup-\d{8}-\d{6}(?:-\d+)?\.json$")
+NAME_RE = re.compile(r"pipfound-backup-(\d{8})-(\d{6})(?:-(\d+))?\.json", re.ASCII)
+_LOCK_NAME = ".pipfound-backups.lock"
+_LOCKS = {}
+_LOCKS_GUARD = threading.Lock()
+_LOCK_DEPTH = threading.local()
+_LOCK_FDS = set()
+
+
+def _after_fork():
+    """A child must not inherit a locked Python mutex or a held flock fd."""
+    global _LOCKS, _LOCKS_GUARD, _LOCK_DEPTH, _LOCK_FDS
+    for fd in _LOCK_FDS:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    _LOCKS = {}
+    _LOCKS_GUARD = threading.Lock()
+    _LOCK_DEPTH = threading.local()
+    _LOCK_FDS = set()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork)
+
+
+@contextlib.contextmanager
+def _directory_lock(directory):
+    """Serialize snapshot + retention across threads and cooperating processes.
+
+    Keep the lock inode in place: unlinking it would let a second process lock
+    a different inode. Nested calls in snapshot reuse the outer flock.
+    """
+    d = os.path.realpath(os.path.abspath(os.fspath(directory)))
+    os.makedirs(d, exist_ok=True)
+    with _LOCKS_GUARD:
+        lock = _LOCKS.setdefault(d, threading.RLock())
+    with lock:
+        depths = getattr(_LOCK_DEPTH, "depths", None)
+        if depths is None:
+            depths = _LOCK_DEPTH.depths = {}
+        if depths.get(d, 0):
+            depths[d] += 1
+            try:
+                yield
+            finally:
+                depths[d] -= 1
+            return
+        fd = os.open(os.path.join(d, _LOCK_NAME), os.O_RDWR | os.O_CREAT
+                     | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError("فایلِ قفلِ پشتیبان باید فایلِ معمولی باشد")
+            with _LOCKS_GUARD:
+                _LOCK_FDS.add(fd)
+            if os.name == "nt":
+                if os.fstat(fd).st_size == 0:
+                    os.write(fd, b"\0")
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            depths[d] = 1
+            try:
+                yield
+            finally:
+                depths.pop(d, None)
+                if os.name == "nt":
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            with _LOCKS_GUARD:
+                _LOCK_FDS.discard(fd)
+            os.close(fd)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -98,9 +184,9 @@ def _num(v):
         return None
     try:
         f = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    if f != f or f in (float("inf"), float("-inf")):
+    if not math.isfinite(f):
         return None
     return f
 
@@ -164,7 +250,7 @@ def normalize(cfg):
         if f is not None and MIN_INTERVAL_H <= f <= MAX_INTERVAL_H:
             out["interval_h"] = float(f)
         k = _num(cfg.get("keep"))
-        if k is not None and MIN_KEEP <= k <= MAX_KEEP:
+        if k is not None and k == int(k) and MIN_KEEP <= k <= MAX_KEEP:
             out["keep"] = int(k)
     return out
 
@@ -186,8 +272,12 @@ def is_backup_name(name):
     سخت‌گیرانه است چون همین تابع تعیین می‌کند چه چیزی *قابلِ حذف* است: هر
     فایلِ ناشناخته در پوشه (یادداشت، دفتر، فایلِ موقت) باید دست‌نخورده بمانَد.
     """
-    s = str(name or "")
-    return bool(s) and NAME_RE.match(s) is not None
+    return isinstance(name, str) and len(name) <= 255 and NAME_RE.fullmatch(name) is not None
+
+
+def _name_key(name):
+    match = NAME_RE.fullmatch(name)
+    return (match[1], match[2], int(match[3] or "1"))
 
 
 def plan_prune(names, keep):
@@ -199,7 +289,7 @@ def plan_prune(names, keep):
     """
     k = _num(keep)
     k = MIN_KEEP if k is None else max(MIN_KEEP, int(k))
-    safe = sorted({str(n) for n in (names or []) if is_backup_name(n)}, reverse=True)
+    safe = sorted({n for n in (names or []) if is_backup_name(n)}, key=_name_key, reverse=True)
     return safe[:k], safe[k:]
 
 
@@ -209,18 +299,18 @@ def due(last_run_ts, now_ts, interval_h, enabled=True):
     «هرگز پشتیبان نگرفته» (`last_run_ts` تهی) یعنی همین حالا — همان چیزی که
     کاری می‌کند یک نصبِ تازه هم از همان اولین اجرا پشتیبان داشته باشد.
     """
-    if not enabled:
+    if enabled is not True:
         return False
     iv = _num(interval_h)
     if iv is None or iv <= 0:
         iv = DEFAULTS["interval_h"]
     iv = min(max(iv, MIN_INTERVAL_H), MAX_INTERVAL_H)
-    last = _num(last_run_ts)
-    if last is None:
-        return True
     now = _num(now_ts)
     if now is None:
         return False
+    last = _num(last_run_ts)
+    if last is None:
+        return True
     return (now - last) >= iv * 3600.0
 
 
@@ -241,16 +331,49 @@ def effective_last_run(state_ts, backups):
 # ═══════════════════════════════════════════════════════════════════
 #  I/O — همه اتمیک
 # ═══════════════════════════════════════════════════════════════════
-def _write_json(p, obj):
-    """نوشتنِ اتمیکِ JSON (tmp + os.replace) — الگوی همهٔ فایل‌های وضعیتِ اپ."""
-    d = os.path.dirname(p)
-    if d and not os.path.exists(d):
-        os.makedirs(d, exist_ok=True)
-    tmp = p + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(obj, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, p)
+def _write_json(p, obj, overwrite=True):
+    """Unique same-directory temp; publish complete JSON, never a partial file.
+
+    Mutable settings/state use os.replace (atomic last-writer-wins). Snapshots
+    use an exclusive hard-link publication so even an uncooperative creator
+    cannot make us overwrite an existing name. Only our own temp is cleaned.
+    """
+    p = os.fspath(p)
+    d = os.path.dirname(os.path.abspath(p))
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(p) + "-", suffix=".tmp", dir=d)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False, indent=2, allow_nan=False)
+            f.flush()
+            os.fsync(f.fileno())
+        if overwrite:
+            if os.path.islink(p):
+                raise OSError("روی پیوندِ نمادینِ فایلِ وضعیت نمی‌نویسیم")
+            os.replace(tmp, p)
+        else:
+            os.link(tmp, p)
+        _sync_directory(d)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
     return p
+
+
+def _sync_directory(d):
+    if os.name == "nt":
+        return
+    fd = os.open(d, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        try:
+            os.fsync(fd)
+        except OSError as exc:
+            if exc.errno not in (errno.EINVAL, errno.ENOTSUP, errno.EBADF):
+                raise
+    finally:
+        os.close(fd)
 
 
 def load_settings(path=None):
@@ -303,35 +426,45 @@ def list_backups(dir=None):
     d = dir or backup_dir()
     out = []
     try:
-        names = os.listdir(d)
-    except Exception:
+        with os.scandir(d) as it:
+            entries = list(it)
+    except OSError:
         return []
-    for n in names:
+    for entry in entries:
+        n = entry.name
         if not is_backup_name(n):
             continue
         try:
-            stt = os.stat(os.path.join(d, n))
+            stt = entry.stat(follow_symlinks=False)
         except OSError:
+            continue
+        if not stat.S_ISREG(stt.st_mode):
             continue
         out.append({"name": n, "bytes": stt.st_size, "mtime": stt.st_mtime,
                     "at": _fmt(stt.st_mtime), "file": os.path.join(d, n)})
-    return sorted(out, key=lambda x: x["name"], reverse=True)
+    return sorted(out, key=lambda x: _name_key(x["name"]), reverse=True)
 
 
 def write_snapshot(bundle, dir=None, now=None):
     """یک نسخه می‌نویسد و مسیرش را برمی‌گرداند (هرگز روی نسخهٔ موجود نمی‌نویسد)."""
     d = dir or backup_dir()
-    if not os.path.exists(d):
-        os.makedirs(d, exist_ok=True)
-    base = filename(now)
-    stem, ext = base[:-len(".json")], ".json"
-    name, n = base, 2
-    while os.path.exists(os.path.join(d, name)):
-        name = "%s-%d%s" % (stem, n, ext)
-        n += 1
-    p = os.path.join(d, name)
-    _write_json(p, bundle if isinstance(bundle, dict) else {})
-    return p
+    with _directory_lock(d):
+        base = filename(now)
+        stem = base[:-len(".json")]
+        prefix = _name_key(base)[:2]
+        sequences = [_name_key(n)[2] for n in os.listdir(d)
+                     if is_backup_name(n) and _name_key(n)[:2] == prefix]
+        n = max(sequences, default=0) + 1
+        while True:
+            # New names carry a padded sequence; legacy base/-N names remain
+            # readable. Padded names keep older lexical clients ordered too.
+            name = "%s-%020d.json" % (stem, n)
+            p = os.path.join(d, name)
+            try:
+                _write_json(p, bundle if isinstance(bundle, dict) else {}, overwrite=False)
+                return p
+            except FileExistsError:
+                n += 1
 
 
 def prune(dir=None, keep=None):
@@ -343,37 +476,40 @@ def prune(dir=None, keep=None):
     d = dir or backup_dir()
     k = _num(keep)
     keep = DEFAULTS["keep"] if k is None else int(k)
-    try:
-        names = os.listdir(d)
-    except Exception:
+    if not os.path.isdir(d):
         return {"kept": [], "deleted": [], "freed": 0}
-    kept, doomed = plan_prune(names, keep)
-    deleted, freed = [], 0
-    for n in doomed:
-        if not is_backup_name(n):
-            continue
-        p = os.path.join(d, n)
-        try:
-            sz = os.path.getsize(p)
-            os.remove(p)
-        except OSError:
-            continue
-        deleted.append(n)
-        freed += sz
-    return {"kept": kept, "deleted": deleted, "freed": freed}
+    with _directory_lock(d):
+        names = [b["name"] for b in list_backups(d)]
+        kept, doomed = plan_prune(names, keep)
+        deleted, freed = [], 0
+        for n in doomed:
+            if not is_backup_name(n):
+                continue
+            p = os.path.join(d, n)
+            try:
+                stt = os.stat(p, follow_symlinks=False)
+                if not stat.S_ISREG(stt.st_mode):
+                    continue
+                os.remove(p)
+            except OSError:
+                continue
+            deleted.append(n)
+            freed += stt.st_size
+        if deleted:
+            _sync_directory(os.path.realpath(os.path.abspath(d)))
+        return {"kept": kept, "deleted": deleted, "freed": freed}
 
 
 def snapshot(bundle, dir=None, keep=None, now=None):
     """نوشتن + هرس، در یک قدم (چیزی که زمان‌بند صدا می‌زند)."""
-    p = write_snapshot(bundle, dir=dir, now=now)
-    pr = prune(dir=dir, keep=keep)
-    try:
+    d = dir or backup_dir()
+    with _directory_lock(d):
+        p = write_snapshot(bundle, dir=d, now=now)
         size = os.path.getsize(p)
-    except OSError:
-        size = 0
-    return {"ok": True, "file": p, "name": os.path.basename(p), "bytes": size,
-            "kept": len(pr["kept"]), "deleted": len(pr["deleted"]),
-            "freed": pr["freed"], "deleted_names": pr["deleted"]}
+        pr = prune(dir=d, keep=keep)
+        return {"ok": True, "file": p, "name": os.path.basename(p), "bytes": size,
+                "kept": len(pr["kept"]), "deleted": len(pr["deleted"]),
+                "freed": pr["freed"], "deleted_names": pr["deleted"]}
 
 
 # ═══════════════════════════════════════════════════════════════════

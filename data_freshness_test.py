@@ -14,6 +14,7 @@ import datetime
 import os
 import sys
 import time
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -189,7 +190,13 @@ for state in ("open", "delayed", "closed"):
                                             src="yahoo", now=T0)
     row = None
     try:
-        r = CF.score("XAUUSD", ["15m"], d=d)
+        # This is a data-freshness unit test, not a live economic-calendar test.
+        class FreshnessMacroFixture:
+            get_calendar = staticmethod(lambda: [])
+            symbol_ccys = staticmethod(lambda symbol: {"USD"})
+            news_gate = staticmethod(lambda cal, ccys: ("GREEN", "hermetic fixture", []))
+        with patch.object(CF, "M", FreshnessMacroFixture):
+            r = CF.score("XAUUSD", ["15m"], d=d)
         row = next((c for c in r["checklist"] if "تازگیِ داده" in c["name"]), None)
     except Exception as ex:
         r = {"error": str(ex)}

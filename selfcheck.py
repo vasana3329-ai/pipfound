@@ -1486,7 +1486,7 @@ def backup_problems(root, pages=None):
                          "می‌تواند نیمه‌کاره اعمال شود")
         stats["validate_first"] = bool(vm) and (wm is None or vm.start() < wm.start())
 
-    jw = _py_block(src, re.compile(r"^\s*def _journal_write\("))
+    jw = _py_block(_code_only(src), re.compile(r"^\s*def _journal_write\("))
     if jw is None:
         probs.append("نوشتارِ اتمیکِ دفتر (_journal_write) در app.py نیست")
     elif "os.replace(" not in jw:
@@ -1695,7 +1695,7 @@ def _app_launch_lines(text, name):
                 hits.append(i + 1)
             continue
         if _LAUNCH_VERB_RE.search(ln) and any(
-                re.search(r"\b%s\b" % re.escape(a), ln) for a in aliases):
+                re.search(r"\b%s\b" % re.escape(a), "\n".join(lines[i:i + 5])) for a in aliases):
             hits.append(i + 1)
     return hits
 
@@ -2658,8 +2658,20 @@ def feed_flip_problems(root, pages=None):
     # پسوندِ مقیاس را نفهمد، کارتِ سوییچ‌شده همیشه «عدد در دسترس نیست» می‌مانَد
     # (دقیقاً همان چیزی که این سوییچ برای رفعش ساخته شده).
     nreg = _py_region(fsrc, "def _num(", "\ndef _realized_effect")
+    constant_numeric_return = False
+    try:
+        number_function = next(n for n in ast.parse(fsrc).body
+                               if isinstance(n, ast.FunctionDef) and n.name == "_num")
+        # A parser's numeric result must come from its input, never a hard-coded
+        # successful number. This also catches an early bare-suffix fallback.
+        constant_numeric_return = any(
+            isinstance(n, ast.Return) and isinstance(n.value, ast.Constant)
+            and isinstance(n.value.value, (int, float))
+            for n in ast.walk(number_function))
+    except (SyntaxError, StopIteration):
+        constant_numeric_return = True
     if _FF_NUM_MULT_RE.search(fsrc) and _FF_NUM_USE_RE.search(nreg) \
-            and _FF_NUM_EMPTY_RE.search(nreg):
+            and _FF_NUM_EMPTY_RE.search(nreg) and not constant_numeric_return:
         stats["num_mult"] = True
     else:
         probs.append("fundamental.py · خوانندهٔ عدد پسوندِ مقیاس (K/M/B/T) را نمی‌فهمد "

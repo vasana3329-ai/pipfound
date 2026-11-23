@@ -7,6 +7,7 @@ __pycache__/
 
 # کشِ داده‌ی زنده (ForexFactory و ...) — نباید کامیت شود
 .ff_cache.json
+.te_actuals.json
 *.cache
 *_cache.json
 
@@ -14,6 +15,8 @@ __pycache__/
 venv/
 .venv/
 env/
+node_modules/
+.test-results/
 
 # فایل‌های راز — هرگز کامیت نشوند
 .env

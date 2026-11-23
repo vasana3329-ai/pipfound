@@ -50,6 +50,8 @@ const PORT = Number(arg("port", "8795"));
 const URL = `http://127.0.0.1:${PORT}/`;
 const SKIP_DIRS = new Set([".git", "__pycache__", "node_modules"]);
 const VICTIM = "/icon-192-mask.png";        // آیکونی که نسخه‌ی تازه سرِ نصب نمی‌گیرد
+const FOREIGN_CACHE = "other-app-cache-pwa-audit";
+const FOREIGN_MARKER = "unrelated-cache-fixture:";
 const INJECT_ANCHOR = '        if u.path in ("/manifest.webmanifest", "/sw.js", "/icon-180.png",';
 /* هر «نسخه» باید بازنگریِ *متمایز* داشته باشد؛ وگرنه sw.js سرو‌شده بیت‌به‌بیت
    مثلِ نسخه‌ی قبلی است و مرورگر هیچ به‌روزرسانی‌ای نمی‌بیند (تلاشِ اول همین‌جا
@@ -113,10 +115,11 @@ async function waitFor(fn, ms, what) {
   const srvLog = path.join(work, "server.log");
   const portOpen = (p) => new Promise((res) => {
     const s = net.connect({ port: p, host: "127.0.0.1" });
-    const fin = (v) => { try { s.destroy(); } catch (e) { /* بسته شد */ } res(v); };
+    const timer = setTimeout(() => fin(false), 1500);
+    const fin = (v) => { clearTimeout(timer); try { s.destroy(); } catch (e) { /* بسته شد */ } res(v); };
     s.once("connect", () => fin(true));
     s.once("error", () => fin(false));
-    setTimeout(() => fin(false), 1500);
+
   });
   const tailLog = () => {
     try {
@@ -141,6 +144,7 @@ async function waitFor(fn, ms, what) {
       // را می‌سنجد؛ بدونِ این کلید روی دسکتاپِ کاربر نوتیفِ واقعی می‌زند.
       { cwd: app, env: { ...process.env, HOME: home, PIPFOUND_NOTIFY: "0" },
         stdio: ["ignore", out, out] });
+    fs.closeSync(out);
     const s = server;
     srvDied = null;
     s.once("exit", (code, sig) => { srvDied = `code=${code} signal=${sig || "-"}`; });
@@ -160,6 +164,10 @@ async function waitFor(fn, ms, what) {
     const done = new Promise((r) => s.once("exit", r));
     s.kill("SIGTERM");
     await Promise.race([done, wait(6000)]);            // هرگز بی‌سبب معلق نمان
+    if (s.exitCode === null && !s.signalCode) {
+      s.kill("SIGKILL");
+      await Promise.race([done, wait(6000)]);
+    }
     await waitPortFree();
   };
   // استقرارِ یک «نسخه‌ی تازه»: بازنگریِ تازه (کامنتِ بی‌اثر) + اختیاری، ۴۰۴ِ
@@ -197,7 +205,8 @@ async function waitFor(fn, ms, what) {
       const reg = await navigator.serviceWorker.ready;
       const ctrl = navigator.serviceWorker.controller;
       return { active: !!reg.active, ctrl: ctrl ? ctrl.scriptURL : null,
-               waiting: !!reg.waiting, keys: await caches.keys() };
+               waiting: !!reg.waiting,
+               keys: (await caches.keys()).filter((k) => k.startsWith("pipfound-")) };
     });
     const askWho = () => page.evaluate(() => new Promise((res) => {
       const ctrl = navigator.serviceWorker.controller;
@@ -238,7 +247,7 @@ async function waitFor(fn, ms, what) {
         return m ? [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]) : [];
       }));
     const cacheFill = (paths) => page.evaluate(async (ps) => {
-      const keys = await caches.keys();
+      const keys = (await caches.keys()).filter((k) => k.startsWith("pipfound-"));
       const out = {};
       for (const k of keys) {
         const c = await caches.open(k);
@@ -255,6 +264,7 @@ async function waitFor(fn, ms, what) {
     }, [name, p]);
     const dropFromAllCaches = (p) => page.evaluate(async (pp) => {
       for (const k of await caches.keys()) {
+        if (!k.startsWith("pipfound-")) continue;
         const c = await caches.open(k);
         await c.delete(pp);
       }
@@ -291,11 +301,33 @@ async function waitFor(fn, ms, what) {
       return off;
     };
     const upgrade = async (label) => {
+      const before = await askWho();
+      if (!before || !before.cache) throw new Error(`${label}: نسخهٔ قبلی پاسخ نداد`);
       const nav = page.waitForNavigation({ timeout: 25000 }).catch(() => null);
       await page.click("#pfSwBtn");
       await nav;
-      await waitFor(async () => (await swState()).ctrl, 20000, `${label}: جانشینیِ نسخه`);
-      await wait(1500);                     // نشستنِ activate و تصمیمِ آن
+      await waitFor(async () => {
+        const st = await swState(), who = await askWho();
+        return st.ctrl && !st.waiting && who && who.cache !== before.cache ? who : null;
+      }, 25000, `${label}: جانشینیِ نسخه و پایانِ activate`);
+    };
+    const ordinaryUpdate = () => page.evaluate(async () => {
+      const reg = await navigator.serviceWorker.getRegistration("/");
+      if (!reg || !reg.active || new URL(reg.active.scriptURL).search)
+        throw new Error("ارتقا باید روی همان /sw.jsِ بدونِ query آزموده شود");
+      await reg.update();
+    });
+    const foreignUntouched = async (label, shell) => {
+      const intact = await page.evaluate(async ([name, marker, paths]) => {
+        if (!(await caches.keys()).includes(name)) return false;
+        const c = await caches.open(name);
+        for (const p of paths) {
+          const hit = await c.match(p);
+          if (!hit || (await hit.text()) !== marker + p) return false;
+        }
+        return true;
+      }, [FOREIGN_CACHE, FOREIGN_MARKER, shell]);
+      if (!intact) fail(`${label}: کشِ اپِ نامرتبط حذف یا دست‌کاری شد`);
     };
 
     // ── نسخه‌ی ۱: سالم ─────────────────────────────────────────────────────
@@ -313,10 +345,17 @@ async function waitFor(fn, ms, what) {
     const b1 = await banner();
     if (b1.visible) fail("در نسخه‌ی سالم بنر/هشدار دیده شد (هشدارِ الکی)");
     notes.push(`نسخه‌ی ۱ (سالم): کشِ ${v1} با ${shell.length} مسیر · وضعیت: سالم · بنر پنهان`);
+    // fixtureِ کش، نه دادهٔ بازار/API: عمداً همهٔ مسیرهای پوسته را دارد تا نه
+    // منبعِ ترمیم شود، نه فالبکِ آفلاین از HTMLِ اپِ دیگری جواب بدهد.
+    await page.evaluate(async ([name, marker, paths]) => {
+      const c = await caches.open(name);
+      for (const p of paths) await c.put(p, new Response(marker + p, { status: 200 }));
+    }, [FOREIGN_CACHE, FOREIGN_MARKER, shell]);
 
     // ── نسخه‌ی ۲: نصبِ ناقص + کشِ قبلی سالم ⇒ باید ترمیم کند ────────────────
     await deploy("۲", true);
     await page.reload({ waitUntil: "load", timeout: 30000 });
+    await ordinaryUpdate();
     const w2 = await waitFor(async () => (await swState()).waiting, 25000, "نسخه‌ی ۲ در انتظار");
     if (w2) {
       if (!(await banner()).visible)
@@ -335,6 +374,7 @@ async function waitFor(fn, ms, what) {
     const b2 = await banner();
     if (b2.visible) fail("بعد از ترمیمِ کامل، هشدارِ برگردان روی صفحه ماند (هشدارِ الکی)");
     const off2 = await offlineStillWorks("ترمیم‌شده");
+    await foreignUntouched("پس از ترمیم", shell);
     notes.push(`نسخه‌ی ۲ (نصبِ ناموفق · کشِ قبلی سالم): ${s2.fill[s2.keys[0]]}/${shell.length} ` +
       `مسیر از کشِ قبلی ترمیم شد · کهنه‌ها پاک شدند · آفلاین با ${off2.chips} چیپ باز شد`);
 
@@ -344,6 +384,7 @@ async function waitFor(fn, ms, what) {
     if (!left) fail("آماده‌سازیِ نسخه‌ی ۳: حذفِ آیکون از کش‌ها ناموفق بود");
     await deploy("۳", true);
     await page.reload({ waitUntil: "load", timeout: 30000 });
+    await ordinaryUpdate();
     await waitFor(async () => (await swState()).waiting, 25000, "نسخه‌ی ۳ در انتظار");
     await upgrade("نسخه‌ی ۳");
     const s3 = await swState();
@@ -387,6 +428,8 @@ async function waitFor(fn, ms, what) {
     else
       notes.push("پیامِ «برگردانِ نسخه» با وجودِ «بعداً»ی همان بازدید هم دوباره دیده شد");
     const off3 = await offlineStillWorks("برگردانِ نسخه");
+    await foreignUntouched("پس از برگردان", shell);
+    notes.push("کشِ fixtureِ اپِ نامرتبط در ارتقا/ترمیم/برگردان دست‌نخورده ماند و فالبک از آن نخواند");
     notes.push(`نسخه‌ی ۳ (نصبِ ناموفق · کشِ قبلیِ ناقص): برگردان انجام شد · کشِ قبلی ` +
       `(${active}) نگه داشته شد · رکورد: shell_ok=false, kept=${who3 ? who3.kept : "?"} · ` +
       `آفلاین با ${off3.chips} چیپ باز شد · به کاربر خبر داده شد`);

@@ -284,8 +284,8 @@ if not NO_MUT:
     red("خوانندهٔ عدد مقدارِ فقط-پسوند («K») را هم عدد می‌گیرد",
         "پسوندِ مقیاس",
         lambda d: edit(d, "fundamental.py",
-                       "    if not s:\n        return None\n    try:\n        return float(s) * mult",
-                       "    try:\n        return float(s or 1) * mult"))
+                       "def _num(v):",
+                       "def _num(v):\n    if v == 'K': return 1000.0"))
 
     # جهشِ رفتاری: ادعای «دقتِ ثانیه‌ای» باید دندان داشته باشد — گِردکردنِ ساعتی
     # (همان `in_hours`ِ قبلی) باید سناریوی رفتاری را بشکند، نه فقط متن را.

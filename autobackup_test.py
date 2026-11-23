@@ -571,17 +571,17 @@ red("برداشتنِ فیلترِ نام از تصمیمِ هرس",
 # نگهبانِ سالم بی‌دلیل سبز می‌مانْد (یک بار همین اتفاق افتاد).
 red("برداشتنِ نوارِ ایمنیِ دوم پیش از os.remove",
     "پیش از os.remove نام را دوباره نمی‌سنجد",
-    ab_src=ABSOURCE.replace("    for n in doomed:\n        if not is_backup_name(n):\n"
-                            "            continue\n",
-                            "    for n in doomed:\n", 1))
+    ab_src=ABSOURCE.replace("        for n in doomed:\n            if not is_backup_name(n):\n"
+                            "                continue\n",
+                            "        for n in doomed:\n", 1))
 red("غیرِاتمیک‌کردنِ نوشتن",
     "اتمیک نیست",
     ab_src=ABSOURCE.replace("    os.replace(tmp, p)", "    os.rename(tmp, p)", 1))
 red("دور زدنِ مسیرِ اتمیک در رونوشتِ اسنپ‌شات",
     "از مسیرِ اتمیکِ _write_json استفاده نمی‌کند",
-    ab_src=ABSOURCE.replace("    _write_json(p, bundle if isinstance(bundle, dict) else {})",
-                            "    with open(p, \"w\", encoding=\"utf-8\") as f:\n"
-                            "        json.dump(bundle, f)", 1))
+    ab_src=ABSOURCE.replace("                _write_json(p, bundle if isinstance(bundle, dict) else {}, overwrite=False)",
+                            "                with open(p, \"w\", encoding=\"utf-8\") as f:\n"
+                            "                    json.dump(bundle, f)", 1))
 red("حذفِ تابعِ due از ماژول",
     "autobackup.py ناقص است",
     ab_src=ABSOURCE.replace("def due(last_run_ts", "def due_disabled(last_run_ts", 1))

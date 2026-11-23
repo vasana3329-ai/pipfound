@@ -22,6 +22,7 @@
 آفلاین است (فقط متنِ کد سنجیده می‌شود؛ شبکه‌ای در کار نیست). PF_ARCHIVE_NO_MUT=1
 بخشِ جهش را رد می‌کند (فرارِ سریعِ CI محدود).
 """
+import ast
 import io
 import os
 import re
@@ -48,7 +49,7 @@ def copy_repo():
     d = tempfile.mkdtemp(prefix="pf_archive_")
     dst = os.path.join(d, "app")
     shutil.copytree(HERE, dst, ignore=shutil.ignore_patterns(
-        ".git", "__pycache__", ".ff_cache.json", ".te_actuals.json",
+        ".git", "__pycache__", "node_modules", ".ff_cache.json", ".te_actuals.json",
         "*.log", ".DS_Store", "fundamental_report.md"))
     return dst
 
@@ -65,6 +66,38 @@ def edit(d, name, old, new):
         raise AssertionError("لنگرِ جهش در %s %d بار پیدا شد (باید ۱ باشد): %r"
                              % (name, n, old[:60]))
     io.open(p, "w", encoding="utf-8").write(txt.replace(old, new, 1))
+
+
+def edit_function(d, name, function, transform):
+    """جهش فقط در تابعِ نام‌دار؛ تغییرِ امضا نباید لنگر را بشکند."""
+    p = os.path.join(d, name)
+    txt = io.open(p, encoding="utf-8").read()
+    nodes = [n for n in ast.parse(txt).body
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+             and n.name == function]
+    if len(nodes) != 1:
+        raise AssertionError("تابعِ جهش %s در %s یکتا نیست" % (function, name))
+    lines = txt.splitlines(keepends=True)
+    node = nodes[0]
+    a = sum(map(len, lines[:node.lineno - 1]))
+    z = sum(map(len, lines[:node.end_lineno]))
+    old = txt[a:z]
+    new = transform(old)
+    if new == old:
+        raise AssertionError("جهشِ تابع %s بی‌اثر بود" % function)
+    io.open(p, "w", encoding="utf-8").write(txt[:a] + new + txt[z:])
+
+
+def rename_function(d, name, function):
+    """فقط توکنِ نامِ def را عوض کن؛ آرگومان/بدنه دست‌نخورده می‌ماند."""
+    def rename(region):
+        new, n = re.subn(r"^(\s*(?:async\s+)?def\s+)" + re.escape(function)
+                         + r"(?=\s*\()", r"\g<1>" + function + "_gone", region,
+                         count=1)
+        if n != 1:
+            raise AssertionError("نامِ def برای %s پیدا نشد" % function)
+        return new
+    edit_function(d, name, function, rename)
 
 
 def scan(d):
@@ -141,8 +174,7 @@ if not NO_MUT:
     print("═══ ۲) جهش‌آزماییِ قاعده (قرمز/بی‌گناه) ═══")
     red("گیرنده‌ی Actual (get_actuals) حذف شده",
         "گیرنده‌ی Actual",
-        lambda d: edit(d, "macro_context.py", "def get_actuals(max_age=3600):",
-                       "def get_actuals_gone(max_age=3600):"))
+        lambda d: rename_function(d, "macro_context.py", "get_actuals"))
     red("الگوی ستونِ Actual در پارسر نیست",
         "الگوی ستونِ Actual",
         lambda d: edit(d, "macro_context.py", "<span id='actual'>",
@@ -153,8 +185,7 @@ if not NO_MUT:
                        "src_ok = True"))
     red("تابعِ حکم (_verdict) حذف شده",
         "تابعِ حکم",
-        lambda d: edit(d, "fundamental.py", "def _verdict(actual, forecast, previous, mode, ccy=None):",
-                       "def _verdict_gone(actual, forecast, previous, mode, ccy=None):"))
+        lambda d: rename_function(d, "fundamental.py", "_verdict"))
     red("آرشیو v.found را نمی‌سنجد",
         "v.found را نمی‌سنجد",
         lambda d: edit(d, "app.py", "if(v.found){", "if(false){"))
@@ -186,8 +217,7 @@ if not NO_MUT:
         lambda d: edit(d, "app.py", 'arc-i">تأثیرِ همین نتیجه:', 'arc-i">اثر:'))
     red("سازندهٔ تأثیرِ محقَق حذف شد",
         "سازندهٔ تأثیرِ محقَق",
-        lambda d: edit(d, "fundamental.py", "def _realized_effect(ccy, direction):",
-                       "def _realized_effect_gone(ccy, direction):"))
+        lambda d: rename_function(d, "fundamental.py", "_realized_effect"))
     red("بارِ آرشیو باز هم شاخهٔ شرطی (analysis) را می‌فرستد",
         "شاخهٔ شرطی (analysis)",
         lambda d: edit(d, "fundamental.py", '            "icon": icon,',

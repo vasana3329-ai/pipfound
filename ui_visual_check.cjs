@@ -62,6 +62,32 @@ function loadPuppeteer() {
   throw new Error("puppeteer-core در دسترس نیست (PF_PUPPETEER_DIR را ست کن): " + last);
 }
 
+function feedResponse(page, past) {
+  const pending = page.waitForResponse((r) => {
+    const u = new globalThis.URL(r.url());
+    return u.pathname === "/api/fundamental" && !u.searchParams.has("event") &&
+      u.searchParams.get("past") === String(past);
+  }, { timeout: 100000 });
+  // اگر navigation پیش‌تر شکست خورد، waiterِ مصرف‌نشده نباید ردِ بی‌هندلر بسازد.
+  pending.catch(() => {});
+  return pending;
+}
+
+async function settleFeed(page, pending, past) {
+  const response = await pending;
+  if (!response.ok()) throw new Error(`پاسخِ فید HTTP ${response.status()}`);
+  const data = await response.json();
+  if (data.error || data.past_hours !== past)
+    throw new Error(`فیدِ ${past} ساعته پاسخِ معتبر نداد: ${data.error || data.past_hours}`);
+  // دریافتِ هدر/مشاهدهٔ request کافی نیست: خواندنِ بدنه و renderِ صفحه هم باید تمام شود.
+  await page.waitForFunction((p) => {
+    const list = document.getElementById("list");
+    return typeof DATA !== "undefined" && DATA && DATA.past_hours === p &&
+      Array.isArray(DATA.events) && list && !/در حالِ بارگذاری/.test(list.textContent);
+  }, { timeout: 15000 }, past);
+  return response.url();
+}
+
 (async () => {
   const puppeteer = loadPuppeteer();
   const opts = {
@@ -1418,9 +1444,22 @@ function loadPuppeteer() {
           باید سالم بمانَد)؛
        ۳) کارتِ بازِ کاربر از رندرِ دوره‌ای (که هر ۶۰ ثانیه رخ می‌دهد) جانِ
           سالم می‌برد — همان چیزی که مثلِ «رفرشِ صفحه» حس می‌شد. */
+  let feedLoaderHook = null;
   try {
+    // این باند بارخوانی را با کلیک می‌سنجد؛ بارخوانیِ دوره‌ای نباید DATAِ تزریق‌شده
+    // را وسطِ دو گام عوض کند. tickBadges و ساعتِ jget همچنان واقعی اجرا می‌شوند.
+    feedLoaderHook = await page.evaluateOnNewDocument(() => {
+      const interval = window.setInterval.bind(window);
+      window.setInterval = (fn, ...args) => {
+        if (location.pathname === "/fundamental" && typeof fn === "function" && fn.name === "load")
+          return 0;
+        return interval(fn, ...args);
+      };
+    });
     const feedUrl2 = String(URL).replace(/\/+$/, "") + "/fundamental";
+    const initialFeed = feedResponse(page, 6);
     await page.goto(feedUrl2, { waitUntil: "domcontentloaded", timeout: 45000 });
+    await settleFeed(page, initialFeed, 6);
     const apiReqs = [];
     const onReq = (r) => {
       const u = r.url();
@@ -1457,21 +1496,10 @@ function loadPuppeteer() {
         if (segInfo.active.length !== 1)
           fail("فیدِ زنده: در انتخابگرِ گذشته دقیقاً یک گزینه باید فعال باشد");
         // کلیک روی «۲۴ ساعت» باید واقعاً پارامترِ past=24 را به سرور بفرستد
-        const n0 = apiReqs.length;
-        await page.evaluate(() => {
-          const b = document.querySelector('#pastSeg button[data-p="24"]');
-          if (b) b.click();
-        });
-        let sent = "";
-        for (let i = 0; i < 40; i++) {
-          const hit = apiReqs.slice(n0).find((u) => u.indexOf("past=24") >= 0);
-          if (hit) { sent = hit; break; }
-          await new Promise((r) => setTimeout(r, 250));
-        }
-        if (!sent)
-          fail("فیدِ زنده: کلیکِ «۲۴ ساعت» درخواستی با `past=24` نفرستاد — انتخابگر به سرور وصل نیست");
-        else
-          notes.push("فیدِ زنده: پنجرهٔ گذشته → " + sent.replace(/^.*\/api/, "api"));
+        const selectedFeed = feedResponse(page, 24);
+        await page.click('#pastSeg button[data-p="24"]');
+        const sent = await settleFeed(page, selectedFeed, 24);
+        notes.push("فیدِ زنده: پنجرهٔ گذشته (پاسخ و رندر تمام شد) → " + sent.replace(/^.*\/api/, "api"));
       }
 
       /* ۲) بجِ زنده بدونِ رفرش + ۳) کارتِ بازِ ماندگار */
@@ -1597,6 +1625,10 @@ function loadPuppeteer() {
   } catch (e) {
     fail("بررسیِ فیدِ زنده (پنجرهٔ گذشته + بج) ممکن نشد: " + e.message);
   } finally {
+    if (feedLoaderHook) {
+      try { await page.removeScriptToEvaluateOnNewDocument(feedLoaderHook.identifier); }
+      catch (e) { fail("پاک‌سازیِ مهارِ بارخوانیِ فید ممکن نشد: " + e.message); }
+    }
     try {
       await page.goto(URL, { waitUntil: "domcontentloaded", timeout: 45000 });
     } catch (e) {

@@ -13,9 +13,12 @@
 هستهٔ تحلیل همان confluence.py + smc_engine.py + macro_context.py است.
 """
 import sys, os, json, argparse, traceback, threading, time, datetime, re, hashlib, subprocess, hmac
+import math, tempfile, uuid, socket, ipaddress, ssl
+from http.cookies import SimpleCookie
+from typing import Any
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote, unquote
 
 HOME = os.path.expanduser("~")
 ALARMS_FILE = os.path.join(HOME, "pipfound", "alarms.json")
@@ -27,6 +30,82 @@ _ALLOWED_IMG = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
                 "webp": "image/webp", "gif": "image/gif"}
 _MAX_UPLOAD = 12 * 1024 * 1024  # 12MB
 _MAX_IMPORT = 16 * 1024 * 1024  # 16MB — سقفِ فایلِ پشتیبانِ JSON (برون‌بری/درون‌بری)
+_MAX_UPLOAD_BODY = 4 * ((_MAX_UPLOAD + 2) // 3) + 200000
+_journal_lock = threading.RLock()
+_autobackup_lock = threading.RLock()
+_BG_SLOTS = threading.BoundedSemaphore(2)
+_BG_LOCK = threading.Lock()
+_BG_KEYS = set()
+_HEAVY_SLOTS = threading.BoundedSemaphore(2)
+_HEAVY_PATHS = {"/api/analyze", "/api/backtest", "/api/suggest-range", "/api/gap"}
+
+
+class _BodyError(ValueError):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+
+
+def _origin_allowed(handler):
+    origin = handler.headers.get("Origin")
+    if not origin:
+        return True
+    try:
+        parsed = urlparse(origin)
+    except ValueError:
+        return False
+    return parsed.scheme in ("http", "https") and parsed.netloc.lower() == (handler.headers.get("Host") or "").lower()
+
+
+def _host_allowed(handler):
+    host = handler.headers.get("Host")
+    if not host:
+        return handler.client_address[0] in ("127.0.0.1", "::1")
+    try:
+        name = urlparse("//" + host).hostname
+    except ValueError:
+        return False
+    if name == "localhost":
+        return True
+    try:
+        addr = ipaddress.ip_address(name or "")
+        return addr.is_loopback or bool(_ACCESS_TOKEN)
+    except ValueError:
+        return bool(_ACCESS_TOKEN) and name == socket.gethostname().lower()
+
+
+def _request_guard(fn):
+    def guarded(self):
+        if not _host_allowed(self):
+            return self._send(403, json.dumps({"error": "میزبانِ درخواست معتبر نیست"}, ensure_ascii=False))
+        if self.command == "DELETE" and not _origin_allowed(self):
+            return self._send(403, json.dumps({"error": "درخواستِ نوشتن از مبدأِ دیگری پذیرفته نیست"}, ensure_ascii=False))
+        heavy = urlparse(self.path).path in _HEAVY_PATHS
+        if heavy and not _HEAVY_SLOTS.acquire(blocking=False):
+            return self._send(503, json.dumps({"error": "دو محاسبه در جریان است؛ کمی بعد دوباره تلاش کن"}, ensure_ascii=False))
+        try:
+            return fn(self)
+        finally:
+            if heavy:
+                _HEAVY_SLOTS.release()
+    return guarded
+
+
+def _json_post(fn):
+    def guarded(self):
+        path = urlparse(self.path)
+        if not _host_allowed(self) or not _origin_allowed(self):
+            return self._send(403, json.dumps({"error": "مبدأِ درخواستِ نوشتن معتبر نیست"}, ensure_ascii=False))
+        if _ACCESS_TOKEN and not _check_auth(self, parse_qs(path.query)):
+            return self._send(401, json.dumps({"error": "دسترسی لازم است"}, ensure_ascii=False))
+        cap = _MAX_UPLOAD_BODY if path.path == "/api/screenshot" else (_MAX_IMPORT if path.path == "/api/import" else 256 * 1024)
+        try:
+            self._post_doc = self._read_json(cap)
+            return fn(self)
+        except _BodyError as e:
+            self.close_connection = True
+            return self._send(e.status, json.dumps({"error": str(e)}, ensure_ascii=False))
+    return guarded
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import confluence as C
@@ -52,9 +131,12 @@ except Exception:
     FUND = None
 try:
     import risk as RK          # مدلِ ریسک: سایزِ پوزیشن، سقفِ روزانه، هم‌بستگی
-    import smt as SMT          # SMT دایورجنس: شکستِ همبستگیِ دو نمادِ همبسته
 except Exception:
     RK = None
+try:
+    import smt as SMT          # SMT دایورجنس: شکستِ همبستگیِ دو نمادِ همبسته
+except Exception:
+    SMT = None
 try:
     import backup as BK        # برون‌بری/درون‌بریِ دادهٔ کاربر (ژورنال/آلارم/تنظیمات)
 except Exception:
@@ -120,7 +202,7 @@ class _JournalFallback:
     def _read(self, path):
         return _journal_rows(path) or []
 
-    def cmd_add(self, a):
+    def cmd_add(self, a, emit=True):
         import csv as _csv
         import datetime as _dt
         rows = self._read(a.file)
@@ -151,17 +233,11 @@ class _JournalFallback:
             "lesson": getattr(a, "lesson", None) or "",
             "notes": getattr(a, "notes", "") or "",
         })
-        d = os.path.dirname(a.file)
-        if d and not os.path.exists(d):
-            os.makedirs(d, exist_ok=True)
-        with open(a.file, "w", newline="", encoding="utf-8") as fh:
-            w = _csv.DictWriter(fh, fieldnames=_JR_FIELDS)
-            w.writeheader()
-            for r in rows:
-                w.writerow({f: r.get(f, "") for f in _JR_FIELDS})
-            w.writerow(row)
-        print(json.dumps({"added": row["id"], "symbol": row["symbol"], "file": a.file},
-                         ensure_ascii=False))
+        _journal_write(rows + [row], _JR_FIELDS, path=a.file)
+        result = {"added": row["id"], "symbol": row["symbol"], "file": a.file}
+        if emit:
+            print(json.dumps(result, ensure_ascii=False))
+        return result
 
 
 _JR = J if J is not None else _JournalFallback()
@@ -232,7 +308,7 @@ def _journal_migrate(path):
     return added
 
 
-def _journal_write(rows, fields=None):
+def _journal_write(rows, fields=None, path=None):
     """بازنویسیِ اتمیکِ کلِ دفتر (temp + os.replace) — مسیرِ درون‌بری.
 
     چرا اتمیک: اگر وسطِ بازنویسی خطایی بخورد، دفترِ کاربر نباید بریده بمانَد؛
@@ -241,26 +317,42 @@ def _journal_write(rows, fields=None):
     """
     import csv as _csv
     fields = list(fields or _journal_fields())
-    path = _JR_FILE
+    path = path or _JR_FILE
     d = os.path.dirname(path)
     if d and not os.path.exists(d):
         os.makedirs(d, exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", newline="", encoding="utf-8") as fh:
-        w = _csv.DictWriter(fh, fieldnames=fields)
-        w.writeheader()
-        for r in rows:
-            w.writerow({f: (r.get(f, "") or "") for f in fields})
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(prefix=".journal-", suffix=".tmp", dir=d or ".")
+    try:
+        with os.fdopen(fd, "w", newline="", encoding="utf-8") as fh:
+            w = _csv.DictWriter(fh, fieldnames=fields)
+            w.writeheader()
+            for r in rows:
+                w.writerow({f: (r.get(f, "") or "") for f in fields})
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
     return path
+
+
+def _journal_add(a):
+    """ثبتِ اتمیک و سری‌شده؛ stdout مشترکِ سرور هرگز جابه‌جا نمی‌شود."""
+    with _journal_lock:
+        if os.path.exists(a.file) and _journal_rows(a.file) is None:
+            raise ValueError("دفتر خوانده نشد؛ برای حفظِ داده بازنویسی انجام نشد")
+        writer = _JR if isinstance(_JR, _JournalFallback) else _JournalFallback()
+        return writer.cmd_add(a, emit=False)
 
 
 def _backup_bundle():
     """بستهٔ برون‌بری: ژورنال + آلارم‌ها + تنظیمات (آمادهٔ JSON)."""
     if BK is None:
         raise RuntimeError("ماژولِ پشتیبان بار نشد")
-    return BK.build(_journal_rows(_JR_FILE) or [], _journal_fields(),
-                    _load_alarms(), _risk_settings())
+    with _journal_lock, _alarms_lock:
+        return BK.build(_journal_rows(_JR_FILE) or [], _journal_fields(),
+                        _load_alarms(), _risk_settings())
 
 
 def _backup_by_name(name):
@@ -302,9 +394,12 @@ def _autobackup_run_now():
     فایلِ پشتیبانِ خودکار **دقیقاً** همان چیزی است که `POST /api/import`
     می‌خوانَد و نسخهٔ خودکار هرگز به قالبِ ناسازگار تبدیل نمی‌شود.
     """
-    res = AB.snapshot(_backup_bundle(), keep=AB.load_settings()["keep"])
-    _autobackup_record(res)
-    return res
+    if AB is None:
+        raise RuntimeError("ماژولِ پشتیبانِ خودکار در دسترس نیست")
+    with _autobackup_lock:
+        res = AB.snapshot(_backup_bundle(), keep=AB.load_settings()["keep"])
+        _autobackup_record(res)
+        return res
 
 
 def _autobackup_status():
@@ -460,13 +555,27 @@ def _setup_statuses(r):
                         "why": smt.get("reason", "SMT تأیید شد") + " — سوئیپ هم روی همان نماد انجام شده"})
         else:
             out.append({"state": "yellow",
-                        "why": (smt.get("reason", "SMT") ) + " — اما سوئیپِ سمتِ این نماد تازه نیست؛ ورود را روی نمادِ سوئیپ‌کننده بگیر"})
+                        "why": (smt.get("reason", "SMT") ) + " — سوئیپِ تازه روی این نماد تأیید نشده؛ بدونِ تأییدِ مستقل وارد هیچ‌کدام نشو"})
     elif smt.get("available") is False:
         out.append({"state": "red",
                     "why": "این نماد جفتِ همبسته‌ی شناخته‌شده ندارد (جدولِ SMT) — ستاپ قابلِ ارزیابی نیست"})
     else:
         out.append({"state": "red",
                     "why": smt.get("reason") or "SMT دایورجنس بین دو جفتِ همبسته دیده نشد"})
+    gate = r.get("execution_gate") or {}
+    plan = r.get("plan") or {}
+    reason = plan.get("blocked_reason") if plan.get("executable_now") is False else None
+    if gate.get("allowed") is False:
+        reason = gate.get("reason") or reason or "ورودِ فعلی تأیید نشده"
+    if (r.get("macro") or {}).get("gate") in ("RED", "UNKNOWN"):
+        reason = reason or "خبرِ نزدیک یا وضعیتِ نامعلومِ تقویم؛ ورود تأیید نشده"
+    if (r.get("data") or {}).get("state") in ("closed", "delayed"):
+        reason = reason or "دادهٔ تازه و بازارِ باز تأیید نشده"
+    if reason:
+        for item in out:
+            if item["state"] == "green":
+                item["state"] = "yellow"
+                item["why"] = str(reason) + " — تأییدِ ساختاری، اجازهٔ ورودِ فعلی نیست"
     return out
 
 
@@ -533,11 +642,20 @@ def _bg(fn, *a, **kw):
     نمی‌شود (نخ‌های بی‌کارِ استخر تجمع می‌کنند) و نخِ دیمن نه خروجِ اپ را معطل
     می‌کند و نه خطای شبکه‌اش به کاربر می‌رسد؛ این کار فقط یک بهینه‌سازی است.
     """
+    key = (fn, repr(a), repr(sorted(kw.items())))
+    with _BG_LOCK:
+        if key in _BG_KEYS or not _BG_SLOTS.acquire(blocking=False):
+            return None
+        _BG_KEYS.add(key)
     def _run():
         try:
             fn(*a, **kw)
         except Exception:
             pass
+        finally:
+            with _BG_LOCK:
+                _BG_KEYS.discard(key)
+            _BG_SLOTS.release()
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     return t
@@ -652,6 +770,8 @@ def analyze(symbol, style):
         عمداً همین‌جاست نه در confluence: به دانلودِ نمادِ دوم نیاز دارد (شبکه)
         و بک‌تست نباید به‌خاطرِ SMT عوض شود. هر خطایی = بدونِ SMT، نه شکست.
         """
+        if SMT is None:
+            return {"available": False, "partners": [], "checked": None, "error": "ماژولِ واگرایی در دسترس نیست"}
         try:
             if _dir:
                 def _smt_fetch(sym):
@@ -695,6 +815,7 @@ def analyze(symbol, style):
     # بعد از همه‌ی گیت‌ها می‌آید تا پلنِ نهایی (و درجه‌ای که ممکن است سقف خورده
     # باشد) را ببیند؛ خودش هم می‌تواند درجه را سقف بزند.
     r["risk"] = _risk_block(symbol, r)
+    r["setup_statuses"] = _setup_statuses(r)
     r["is_sb_mode"] = (style == "sb_ny")
     return r
 
@@ -766,7 +887,8 @@ _alarms_lock = threading.Lock()
 def _load_alarms():
     try:
         with open(ALARMS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f, parse_constant=lambda _: None)
+            return [a for a in data if isinstance(a, dict)] if isinstance(data, list) else []
     except Exception:
         return []
 
@@ -775,7 +897,7 @@ def _save_alarms(alarms):
     os.makedirs(os.path.dirname(ALARMS_FILE), exist_ok=True)
     tmp = ALARMS_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(alarms, f, ensure_ascii=False, indent=2)
+        json.dump(alarms, f, ensure_ascii=False, indent=2, allow_nan=False)
     os.replace(tmp, ALARMS_FILE)
 
 
@@ -835,11 +957,11 @@ def _notify_mac(title, message):
         return
     try:
         import subprocess
-        t = title.replace('"', "'")
-        m = message.replace('"', "'")
+        t = json.dumps(str(title).replace("\n", " "), ensure_ascii=False)
+        m = json.dumps(str(message).replace("\n", " "), ensure_ascii=False)
         subprocess.run(
             ["osascript", "-e",
-             f'display notification "{m}" with title "{t}" sound name "Glass"'],
+             f'display notification {m} with title {t} sound name "Glass"'],
             capture_output=True, timeout=5)
     except Exception:
         pass
@@ -852,60 +974,71 @@ def _alarm_num(v):
     یک آلارمِ بد، بررسیِ بقیهٔ آلارم‌ها را هم در همان دور می‌خوابانَد.
     """
     try:
-        return float(v)
-    except (TypeError, ValueError):
+        if isinstance(v, bool):
+            return None
+        n = float(v)
+        return n if math.isfinite(n) else None
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
+def _alarm_once():
+    """یک دور: قیمت یک‌بار برای هر نماد؛ ادغام روی فهرستِ فعلی، نه اسنپ‌شاتِ کهنه."""
+    with _alarms_lock:
+        alarms = _load_alarms()
+    updates, prices = {}, {}
+    identity = ("symbol", "mode", "target", "cross", "low", "high", "direction", "style")
+    for a in alarms:
+        if a.get("mode") not in ("price", "ote") or a.get("triggered") or not a.get("active", True):
+            continue
+        sym = str(a.get("symbol") or "").strip().upper()
+        if not sym:
+            continue
+        if sym not in prices:
+            prices[sym] = _alarm_num(_live_price(sym))
+        px = prices[sym]
+        if px is None:
+            continue
+        change = {"last_price": round(px, 5), "last_check": time.strftime("%Y-%m-%d %H:%M:%S")}
+        hit_reason = None
+        if a.get("mode") == "ote":
+            lo, hi = _alarm_num(a.get("low")), _alarm_num(a.get("high"))
+            if lo is not None and hi is not None and lo < hi and lo <= px <= hi:
+                hit_reason = f"قیمت {round(px,5)} واردِ ناحیه‌ی OTE ({lo}–{hi}) شد؛ لمسِ ناحیه، تأییدِ ورود نیست"
+        else:
+            tgt = _alarm_num(a.get("target"))
+            cross = a.get("cross", "any")
+            if tgt is not None and ((cross == "above" and px >= tgt) or (cross == "below" and px <= tgt) or (cross == "any" and abs(px - tgt) <= abs(tgt) * 0.0003)):
+                hit_reason = f"قیمت {round(px,5)} به هدفِ {tgt} رسید"
+        if hit_reason:
+            change.update(triggered=True, triggered_at=change["last_check"], hit_reason=hit_reason)
+        updates[str(a.get("id"))] = (tuple(a.get(k) for k in identity), change)
+    notices, changed = [], False
+    with _alarms_lock:
+        current = _load_alarms()
+        for a in current:
+            update = updates.get(str(a.get("id")))
+            if not update or a.get("triggered") or not a.get("active", True):
+                continue
+            signature, change = update
+            if tuple(a.get(k) for k in identity) != signature:
+                continue
+            a.update(change)
+            changed = True
+            if change.get("triggered"):
+                notices.append((f"پیپ‌فاند — {a.get('symbol')} به هدف رسید", change["hit_reason"]))
+        if changed:
+            _save_alarms(current)
+    for title, message in notices:
+        _notify_mac(title, message)
+    return {"updated": len(updates), "notified": len(notices), "symbols": len(prices)}
+
+
 def _alarm_worker():
-    """هر ۹۰ ثانیه آلارم‌های فعال را بررسی می‌کند؛ اگر قیمتِ زنده داخلِ OTE بیفتد
-    یا از حدِ تعیین‌شده رد شود، آن آلارم را triggered علامت می‌زند."""
+    """هر ۹۰ ثانیه آلارم‌های قیمت/ناحیه را بدونِ ازبین‌بردنِ ویرایشِ هم‌زمان می‌سنجد."""
     while True:
         try:
-            with _alarms_lock:
-                alarms = _load_alarms()
-            changed = False
-            for a in alarms:
-                if a.get("triggered") or not a.get("active", True):
-                    continue
-                sym = str(a.get("symbol") or "").strip()
-                if not sym:
-                    continue
-                px = _live_price(sym)
-                if px is None:
-                    continue
-                # فقط وقتی قیمت واقعاً تکان خورده «تغییر» حساب می‌شود؛ وگرنه
-                # هر دور ۹۰ ثانیه‌ای بی‌دلیل کلِ alarms.json روی دیسک بازنویسی می‌شد.
-                _prev_px = _alarm_num(a.get("last_price"))
-                a["last_price"] = round(px, 5)
-                a["last_check"] = time.strftime("%Y-%m-%d %H:%M:%S")
-                if _prev_px is None or abs(_prev_px - px) > max(1e-9, abs(px) * 1e-4):
-                    changed = True
-                hit = False
-                if a.get("mode") == "ote":
-                    lo, hi = _alarm_num(a.get("low")), _alarm_num(a.get("high"))
-                    if lo is not None and hi is not None and lo <= hi and lo <= px <= hi:
-                        hit = True
-                        a["hit_reason"] = f"قیمت {round(px,5)} واردِ ناحیه‌ی OTE ({lo}–{hi}) شد"
-                elif a.get("mode") == "price":
-                    tgt = _alarm_num(a.get("target"))
-                    d = a.get("cross", "any")
-                    if tgt is not None:
-                        if (d == "above" and px >= tgt) or (d == "below" and px <= tgt) \
-                           or (d == "any" and abs(px - tgt) <= abs(tgt) * 0.0003):
-                            hit = True
-                            a["hit_reason"] = f"قیمت {round(px,5)} به هدفِ {tgt} رسید"
-                if hit:
-                    a["triggered"] = True
-                    a["triggered_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
-                    changed = True
-                    _nt = (f"pipfound — {sym} به هدفِ قیمتی رسید"
-                           if a.get("mode") == "price"
-                           else f"pipfound — {sym} به ناحیه‌ی OTE رسید")
-                    _notify_mac(_nt, a.get("hit_reason", f"قیمت {round(px,5)}"))
-            if changed:
-                with _alarms_lock:
-                    _save_alarms(alarms)
+            _alarm_once()
         except Exception:
             traceback.print_exc()
         time.sleep(90)
@@ -918,7 +1051,8 @@ _shots_lock = threading.Lock()
 # `/api/selfcheck` کلِ چک‌ها (شاملِ سینتکسِ JS با node) را اجرا می‌کند؛ بدونِ کش،
 # هر درخواست چند ثانیه CPU می‌گیرد. نتیجه ۶۰ ثانیه معتبر است (فایل‌ها را خودِ اپ
 # هنگامِ تغییر ری‌استارت می‌کند، پس این تأخیر کدِ کهنه را پنهان نمی‌کند).
-_SC_CACHE = {"rep": None, "ts": 0.0}
+_SC_CACHE: dict[str, Any] = {"rep": None, "ts": 0.0, "signature": None}
+_SC_LOCK = threading.Lock()
 
 
 def _shots_meta_file():
@@ -1364,7 +1498,7 @@ def _rev_state_write(rec):
 # کش به یادِ آدم وابسته است؛ اگر یادت برود، `activate` هیچ کشی را پاک نمی‌کند،
 # پوستهٔ کهنه با تازه قاطی می‌شود و کاربرِ آفلاین هم نمی‌فهمد نسخهٔ تازه‌ای آمده.
 CACHE_REV_TOKEN = "__CACHE_REV__"
-_CACHE_REV_MEM = {"val": None}
+_CACHE_REV_MEM: dict[str, str | None] = {"val": None}
 
 
 def cache_rev():
@@ -1381,7 +1515,17 @@ def cache_rev():
         disk = code_rev().get("disk") or {}
         sha = (disk.get("sha") or "").strip()
         if sha:
-            rev = sha[:7] + ("-d" if disk.get("dirty") else "")
+            rev = sha[:7]
+            if disk.get("dirty"):
+                h = hashlib.sha256()
+                for name in REV_TRACKED:
+                    h.update(name.encode("utf-8") + b"\0")
+                    try:
+                        with open(os.path.join(REV_ROOT, name), "rb") as f:
+                            h.update(f.read())
+                    except OSError:
+                        h.update(b"missing")
+                rev += "-d-" + h.hexdigest()[:12]
     except Exception:
         rev = ""
     if not rev:                       # بدونِ گیت: هشِ محتوا (همیشه در دسترس)
@@ -2651,8 +2795,8 @@ if(refreshBtn){
     rfSay("در حالِ بروزرسانی…");
     let ok=false;
     try{
-      await run();
-      ok=true;
+      ok=await run();
+      if(!ok) throw new Error("تحلیل ناموفق بود");
       refreshBtn.classList.add("ok");
       refreshBtn.title="بروزرسانی شد — «"+sym+"» با دیتای تازه دوباره تحلیل شد.";
       rfSay("بروزرسانی شد");
@@ -2736,19 +2880,22 @@ async function runBacktest(){
 }
 
 function renderBacktest(d){
+  d=pfSafeText(d);
   const wr = d.winrate_pct;
   const wrColor = wr>=55?"var(--good)":wr>=45?"var(--half)":"var(--bad)";
   const expColor = d.expectancy_R>0?"var(--good)":"var(--bad)";
   let rows="";
   (d.trade_log||[]).slice(-15).reverse().forEach(t=>{
     const win = t.result==="win";
+    const label=({win:"برد",loss:"باخت",be:"سربه‌سر",open:"باز"})[t.result]||"نامعلوم";
+    const color=t.result==="open"||t.result==="be"?"var(--muted)":(win?"var(--good)":"var(--bad)");
     rows+=`<tr>
       <td>${t.time}</td>
       <td>${t.dir}</td>
       <td>${t.entry_type==="market"?"بازار":"لیمیت OTE"}</td>
       <td>${t.entry}</td><td>${t.sl}</td><td>${t.tp}</td>
-      <td style="color:${win?'var(--good)':'var(--bad)'}">${win?"برد":"باخت"}</td>
-      <td style="color:${win?'var(--good)':'var(--bad)'}">${t.r>0?"+":""}${t.r}R</td>
+      <td style="color:${color}">${label}</td>
+      <td style="color:${color}">${t.r==null?"—":((t.r>0?"+":"")+t.r+"R")}</td>
     </tr>`;
   });
   const empty = d.trades===0
@@ -2810,13 +2957,17 @@ function renderBacktest(d){
       این وین‌ریت از همان منطقِ ورودی‌ای می‌آید که اپ الان زنده پیشنهاد می‌دهد
       (walk-forward، بدونِ نگاه به آینده). سیگنال‌های هم‌پوشان حذف شده‌اند.</p>
     <p style="color:var(--muted);font-size:12px;margin:0 0 8px">🎯 ${sideTxt} · 📅 ${rangeTxt}</p>
+    <div class="warn" style="margin:8px 0">محاسبه ناخالص است؛ هزینه‌های واقعیِ اسپرد، کمیسیون و سوآپِ کارگزار در این مدل نیست.
+      ${d.news_coverage&&d.news_coverage.fully_news_filtered===true?"تقویمِ تاریخیِ معتبر در تصمیم‌ها اعمال شده است.":"تقویمِ تاریخیِ معتبر در دسترس نیست؛ این بازپخش ساختاری است، نه بک‌تستِ کاملِ خبر."}
+      ${d.open_trades?` · ${d.open_trades} معامله باز مانده؛ آرِ محقق‌شدهٔ بخشِ باز ${d.open_booked_R||0} و آرِ نامحقق ${d.open_unrealized_R||0} جدا از آمارِ بسته‌هاست.`:""}
+    </div>
     ${sampleBanner}
     ${styleWarn}
     <div class="pgrid">
       <div class="pcell"><span>تعدادِ معاملات</span><b>${d.trades}</b></div>
       <div class="pcell"><span>برد / باخت</span><b>${d.wins} / ${d.losses}</b></div>
-      <div class="pcell"><span>وین‌ریت</span><b style="color:${wrColor}">${wr}٪</b></div>
-      <div class="pcell"><span>مجموعِ R</span><b>${d.total_R>0?"+":""}${d.total_R}</b></div>
+      <div class="pcell"><span>وین‌ریتِ معاملاتِ بسته</span><b style="color:${wrColor}">${wr}٪</b></div>
+      <div class="pcell"><span>مجموعِ آرِ معاملاتِ بسته</span><b>${d.total_R>0?"+":""}${d.total_R}</b></div>
       <div class="pcell"><span>میانگینِ R</span><b>${d.avg_R_per_trade}</b></div>
       <div class="pcell"><span>اکسپکتنسی</span><b style="color:${expColor}">${d.expectancy_R}R</b></div>
     </div>
@@ -2850,7 +3001,7 @@ async function jfetch(url, ms, onTick){
 
 async function run(){
   const sym=symIn.value.trim();
-  if(!sym){symIn.focus();return;}
+  if(!sym){symIn.focus();return false;}
   goBtn.disabled=true;
   const paint=s=>{
     const hint = s>=15 ? " — شبکه کند است؛ همان چهار تایم‌فریم موازی خوانده می‌شوند" : "";
@@ -2859,17 +3010,21 @@ async function run(){
   try{
     const d=await jfetch(`/api/analyze?symbol=${encodeURIComponent(sym)}&style=${style}`,
                          ANALYZE_TIMEOUT_MS, paint);
-    if(d.error){res.innerHTML=`<div class="err">خطا در تحلیلِ «${sym}»: ${d.error}</div>`;return;}
+    if(d.error){res.innerHTML=`<div class="err">خطا در تحلیلِ «${pfEscape(sym)}»: ${pfEscape(d.error)}</div>`;return false;}
     render(d);
     showLiveChart(d.symbol);
+    return true;
   }catch(err){
     res.innerHTML = (err && err.name==="AbortError")
       ? `<div class="err">تحلیل بیش از ${Math.round(ANALYZE_TIMEOUT_MS/1000)} ثانیه طول کشید و قطع شد — یعنی شبکه‌ی همین لحظه کند است. یک‌بارِ دیگر بزن؛ داده‌ی خوانده‌شده حالا کش شده و همان کلیک دوم سریع است.</div>`
-      : `<div class="err">ارتباط با سرور ناموفق بود: ${err}</div>`;
+      : `<div class="err">ارتباط با سرور ناموفق بود: ${pfEscape(err)}</div>`;
+    return false;
   }finally{goBtn.disabled=false;}
 }
 
 function render(d){
+  const rawD=d;
+  d=pfSafeText(d);
   const pct = d.max_score ? Math.round(d.score/d.max_score*100) : 0;
   const rows = d.checklist.map(c=>{
     const on = (c.status==="✓"||c.status==="◐");
@@ -2903,7 +3058,7 @@ function render(d){
     const ico = c.diverged ? (c.sweep ? "🟢" : "🟡") : "⚪";
     smtHtml = `<div class="datanote ${cls}">
       <b>${ico} SMT دایورجنس (${c.symbol} ↔ ${c.partner})</b> — ${c.reason}
-      ${c.diverged && !c.sweep ? `<div class="datanote-why">سوئیپِ لیکوئیدیتی روی این نماد تازه نیست — طبقِ مدل، ورود را روی نمادِ سوئیپ‌کننده (${c.symbol === c.symbol ? c.partner : c.symbol}) بگیر.</div>` : ""}
+      ${c.diverged && !c.sweep ? `<div class="datanote-why">سوئیپِ تازه روی این نماد تأیید نشده؛ جفتِ دیگر هم هنوز تأییدِ مستقل ندارد — فعلاً منتظر بمان.</div>` : ""}
     </div>`;
   } else if (smtBlk && smtBlk.available === false) {
     smtHtml = `<div class="datanote data-closed"><b>⚪ SMT</b> — این نماد در جدولِ جفت‌های همبسته نیست؛ ستاپِ SMT برایش ارزیابی نمی‌شود.</div>`;
@@ -3096,7 +3251,7 @@ function render(d){
       <span id="jmsg" class="jmsg"></span>
     </div>
   </div>`;
-  window._last = d;
+  window._last = rawD;
   if(refreshBtn) refreshBtn.disabled = false;
   const jb = document.getElementById("jbtn");
   if(jb) jb.onclick = saveJournal;
@@ -3429,7 +3584,7 @@ if(archiveBtn){
       archiveBtn.textContent="⏳ در حالِ خواندنِ آرشیو…";
       // سقفِ زمانیِ همان درخواست (مثلِ فید): دکمه هیچ‌وقت در «در حالِ خواندن»
       // گیر نمی‌ماند — یا آرشیو می‌آید یا پیامِ روشن می‌گیریم.
-      const data=await jfetch("/api/fundamental-archive?hours=6", 60000);
+      const data=pfSafeText(await jfetch("/api/fundamental-archive?hours=6", 60000));
       archiveBtn.textContent="📁 آرشیو اخبار ۶ ساعتِ گذشته";
       if(data.error){
         openModal("📁 آرشیو اقتصادی", `<div class="arc-empty">خطا: ${data.error}</div>`);
@@ -3470,7 +3625,7 @@ if(archiveBtn){
       const cut=(err && err.name==="AbortError");
       openModal("📁 آرشیو اقتصادی", `<div class="arc-empty">`+
         (cut ? "آرشیو در ۶۰ ثانیه برنگشت (منبع کند/در دسترس نیست) — یک‌بارِ دیگر بزن."
-             : `ارتباط ناموفق: ${err}`) + `</div>`);
+             : `ارتباط ناموفق: ${pfEscape(err)}`) + `</div>`);
     }finally{
       archiveBtn.disabled=false;
       archiveBtn.textContent="📁 آرشیو اخبار ۶ ساعتِ گذشته";
@@ -3532,6 +3687,17 @@ async function saveJournal(){
   }
 }
 
+function pfEscape(value){
+  return String(value == null ? "" : value).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function pfSafeText(value){
+  if(typeof value === "string") return pfEscape(value);
+  if(Array.isArray(value)) return value.map(pfSafeText);
+  if(value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key,v])=>[key,pfSafeText(v)]));
+  return value;
+}
+
 function fmt(x){
   if(x==null)return "—";
   const a=Math.abs(x);
@@ -3543,14 +3709,16 @@ function kzFa(k){
   if(!k)return "";
   const m={"London Open":"اوپنِ لندن","New York AM":"نیویورک صبح","London Close":"کلوزِ لندن",
     "New York PM":"نیویورک بعدازظهر","Asian Range":"رِنجِ آسیایی"};
-  for(const [en,fa] of Object.entries(m))if(k.includes(en))return "کیل‌زونِ "+fa;
+  const labels=Object.entries(m).filter(([en,fa])=>k.includes(en)).map(([en,fa])=>fa);
+  if(labels.length)return "کیل‌زونِ "+labels.join(" و ");
   return "خارج از کیل‌زونِ اصلی";
 }
 function gateFa(g){
   const s=(g||"").toUpperCase();
   if(s.includes("RED"))return "قرمز (ورود ممنوع)";
   if(s.includes("AMBER"))return "کهربایی (احتیاط)";
-  return "سبز (عادی)";
+  if(s === "GREEN")return "سبز (عادی)";
+  return "نامعلوم (تأیید خبری نداریم)";
 }
 
 // ── چارتِ زندهٔ TradingView ──
@@ -3609,12 +3777,12 @@ async function loadShots(){
     if(!list.length){grid.innerHTML='<div class="aempty">هنوز اسکرین‌شاتی آپلود نکرده‌ای.</div>';return;}
     grid.innerHTML=list.map(s=>{
       const src="/api/screenshot?id="+encodeURIComponent(s.id);
-      const sym=s.symbol?`<b>${s.symbol}</b> · `:"";
-      const note=s.note?`${s.note}`:"بدونِ یادداشت";
+      const sym=s.symbol?`<b>${pfEscape(s.symbol)}</b> · `:"";
+      const note=s.note?pfEscape(s.note):"بدونِ یادداشت";
       return `<div class="shot">
         <img src="${src}" data-full="${src}" alt="chart">
-        <div class="meta">${sym}${note}<br>${s.created||""}
-          <br><button class="sdel" data-id="${s.id}" title="این اسکرین‌شات را برای همیشه حذف کن.">حذف</button></div>
+        <div class="meta">${sym}${note}<br>${pfEscape(s.created||"")}
+          <br><button class="sdel" data-id="${pfEscape(s.id)}" title="این اسکرین‌شات را برای همیشه حذف کن.">حذف</button></div>
       </div>`;
     }).join("");
     grid.querySelectorAll("img").forEach(im=>{
@@ -3656,27 +3824,27 @@ async function loadAlarms(){
         const scanline=a.last_scan ? `آخرین پویش: ${a.last_scan}` : "در انتظارِ اولین پویش (تا ۵ دقیقه)";
         const px=a.last_price!=null ? `<span class="apx">فعلی: ${fmt(a.last_price)}</span>` : "";
         return `<div class="alarm-item">
-          <span class="asym">${a.symbol}</span>
-          <span class="arng">گپ‌بان · تایم‌فریم ${a.tf||"—"}</span>
+          <span class="asym">${pfEscape(a.symbol)}</span>
+          <span class="arng">گپ‌بان · تایم‌فریم ${pfEscape(a.tf||"—")}</span>
           ${px}
           <span class="astat"><span class="pill waiting">👁 زیرِ نظارت</span></span>
-          <button class="adel" data-id="${a.id}" title="این نظارتِ گپ را حذف کن؛ دیگر پویش نمی‌شود.">حذف</button>
+          <button class="adel" data-id="${pfEscape(a.id)}" title="این نظارتِ گپ را حذف کن؛ دیگر پویش نمی‌شود.">حذف</button>
           <div class="arng" style="width:100%">${scanline} · ${seeded}${a.alerts?` · 🧩 هشدارها: ${a.alerts}`:""}</div>
-          ${last?`<div class="arng" style="width:100%">🔔 آخرین گپِ قابلِ اتکا (${last.at||""}): <b>${last.grade||"—"}</b> — ${last.why||""}</div>`:""}
+          ${last?`<div class="arng" style="width:100%">🔔 آخرین گپِ قابلِ اتکا (${pfEscape(last.at||"")}): <b>${pfEscape(last.grade||"—")}</b> — ${pfEscape(last.why||"")}</div>`:""}
         </div>`;
       }
       const dirFa = (a.direction==="صعودی"||a.direction===1)?"خرید":((a.direction==="نزولی"||a.direction===-1)?"فروش":"—");
       const pill = trig
         ? `<span class="pill hit">✅ رسید!</span>`
         : `<span class="pill waiting">⏳ در انتظار</span>`;
-      const reason = trig && a.hit_reason ? `<div class="arng" style="width:100%">${a.hit_reason} · ${a.triggered_at||""}</div>` : "";
+      const reason = trig && a.hit_reason ? `<div class="arng" style="width:100%">${pfEscape(a.hit_reason)} · ${pfEscape(a.triggered_at||"")}</div>` : "";
       const px = a.last_price!=null ? `<span class="apx">فعلی: ${fmt(a.last_price)}</span>` : "";
       return `<div class="alarm-item ${trig?'trig':''}">
-        <span class="asym">${a.symbol}</span>
+        <span class="asym">${pfEscape(a.symbol)}</span>
         <span class="arng">${dirFa} · OTE ${fmt(a.low)}–${fmt(a.high)}</span>
         ${px}
         <span class="astat">${pill}</span>
-        <button class="adel" data-id="${a.id}" title="این آلارم را حذف کن؛ دیگر بررسی نمی‌شود.">حذف</button>
+        <button class="adel" data-id="${pfEscape(a.id)}" title="این آلارم را حذف کن؛ دیگر بررسی نمی‌شود.">حذف</button>
         ${reason}
       </div>`;
     }).join("");
@@ -3797,6 +3965,7 @@ function gapChecksHtml(checks){
 }
 function gapCardHtml(g){
   if(!g) return "";
+  g=pfSafeText(g);
   if(g.ok===false) return `<div class="err">${g.error||"خطای نامشخص"}</div>`;
   const q=g.query||{}, sc=g.score||{}, lv=g.levels||{};
   const lvl=(g.found&&lv.entry_low!=null)
@@ -3833,7 +4002,7 @@ function gapCardHtml(g){
     <div class="scorebar"><div class="scorefill" style="width:${sc.percent||0}%;background:${gapGradeColor(g.grade)}"></div></div>
     <div class="scoretxt">امتیازِ تأیید: <b>${sc.percent}٪</b> (${gapVal(sc.got)} از ${gapVal(sc.max)})`
       +`${(g.capped&&g.score&&g.score.grade_raw&&g.score.grade_raw!==g.grade)?` · درجهٔ خام: ${g.score.grade_raw}`:""}</div>
-    ${g.reliable?`<div class="badge g-green">✅ قابلِ اتکا برای ورود (تأییدِ کافی)</div>`
+    ${g.reliable?`<div class="badge g-green">✅ تأییدِ ساختاریِ کافی — اجازهٔ ورود نیازمندِ گیتِ خبر و دادهٔ تازه است</div>`
       :`<div class="badge g-amber">⚠️ تأییدِ ناکافی — به‌تنهایی برای ورود کافی نیست</div>`}
     ${g.verdict?`<div class="verdict">${g.verdict}</div>`:""}
     <div style="margin-top:12px">${gapChecksHtml(g.checks)}</div>
@@ -3896,7 +4065,7 @@ async function pfGapAsk(listMode){
     if(msg) msg.textContent="";
     if(d.ok===false){
       gapStateSet(d.error||"پرسش انجام نشد");
-      if(res) res.innerHTML=`<div class="err">${d.error||"پرسش انجام نشد"}</div>`;
+      if(res) res.innerHTML=`<div class="err">${pfEscape(d.error||"پرسش انجام نشد")}</div>`;
       return;
     }
     if(d.mode==="list"){
@@ -3904,8 +4073,8 @@ async function pfGapAsk(listMode){
       gapStateSet(gs.length?`${d.symbol} ${d.tf}: ${gs.length} گپِ باز`
                           :`${d.symbol} ${d.tf}: گپِ بازی نیست`);
       if(res) res.innerHTML = gs.length
-        ? `<div class="gap-near">${d.summary||""}</div>`+gs.map(gapCardHtml).join("")
-        : `<div class="err">در ${d.tf} گپِ بازی برای ${d.symbol} پیدا نشد — این تایم‌فریم ایمبالانسِ بازِ کمی دارد.</div>`;
+        ? `<div class="gap-near">${pfEscape(d.summary||"")}</div>`+gs.map(gapCardHtml).join("")
+        : `<div class="err">در ${pfEscape(d.tf)} گپِ بازی برای ${pfEscape(d.symbol)} پیدا نشد — این تایم‌فریم ایمبالانسِ بازِ کمی دارد.</div>`;
     }else{
       gapStateSet(d.found?`${d.symbol} ${d.tf}: ${d.grade||"—"} ${d.score&&d.score.percent!=null?d.score.percent+"%":""}`
                           :`${d.symbol} ${d.tf}: گپ پیدا نشد`);
@@ -3913,7 +4082,7 @@ async function pfGapAsk(listMode){
     }
   }catch(err){
     gapStateSet("ارتباط با سرور قطع شد");
-    if(res) res.innerHTML=`<div class="err">ارتباط با سرور ناموفق بود: ${err}</div>`;
+    if(res) res.innerHTML=`<div class="err">ارتباط با سرور ناموفق بود: ${pfEscape(err)}</div>`;
   }finally{ if(go) go.disabled=false; if(ls) ls.disabled=false; }
 }
 (function(){
@@ -4347,6 +4516,17 @@ let pastHours=6, T0=Date.now(), openKeys=new Set();
 const $=s=>document.querySelector(s);
 const evKey=e=>`${e.iso}|${e.title}`;
 
+function pfEscape(value){
+  return String(value == null ? "" : value).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function pfSafeText(value){
+  if(typeof value === "string") return pfEscape(value);
+  if(Array.isArray(value)) return value.map(pfSafeText);
+  if(value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key,v])=>[key,pfSafeText(v)]));
+  return value;
+}
+
 function dirClass(d){ if(d.includes("صعود"))return "dir-up"; if(d.includes("نزول"))return "dir-dn"; return "dir-neu"; }
 
 function pairRows(pairs){
@@ -4354,7 +4534,8 @@ function pairRows(pairs){
 }
 
 function scenCard(cls, s){
-  const g=s.gold;
+  s=pfSafeText(s);
+  const g=s.gold||["طلا و نقره", "نامعلوم", "دادهٔ کافی برای تفسیرِ جهت نداریم"];
   return `<div class="scard ${cls}">
     <div class="sh">${s.label}</div>
     <div class="cd-dir">${s.ccy_dir}</div>
@@ -4364,6 +4545,7 @@ function scenCard(cls, s){
 }
 
 function resCard(e, v){
+  v=pfSafeText(v);
   if(!v.found){
     const txt = (DATA && DATA.source_ok === false)
       ? "◇ منبعِ نتیجه پاسخ نداد — نتیجه و تأثیری برای گفتن نیست"
@@ -4373,7 +4555,7 @@ function resCard(e, v){
   const arr = v.outcome==="صعودی"?"▲":(v.outcome==="نزولی"?"▼":"◆");
   const dd = v.outcome==="صعودی"?"صعودی":(v.outcome==="نزولی"?"نزولی":"خنثی");
   const ff = v.beat?` · ${v.beat}`:"";
-  const dd2 = v.dir?` · ${e.country_fa||""} ${v.dir}`:"";
+  const dd2 = v.dir?` · ${pfEscape(e.country_fa||"")} ${v.dir}`:"";
   const ef = v.effect||{};
   const arw = x=>String(x||"").replace("صعود","").replace("نزول","").trim();
   const pr = (ef.pairs||[]).map(x=>`${x[0]} ${arw(x[1])}`).join(" · ");
@@ -4390,38 +4572,38 @@ function evCard(e,idx){
   const a=e.analysis||{};
   const v=e.verdict||{};
   const past=!!e.passed;
-  const fcBox = e.forecast?`<div class="box"><div class="k">پیش‌بینی</div><div class="v">${e.forecast}</div></div>`:"";
-  const prBox = e.previous?`<div class="box"><div class="k">قبلی</div><div class="v">${e.previous}</div></div>`:"";
-  const enTtl = e.title_fa? `<div class="en">${e.title}</div>` : "";
-  const faTtl = e.title_fa || e.title;
+  const fcBox = e.forecast?`<div class="box"><div class="k">پیش‌بینی</div><div class="v">${pfEscape(e.forecast)}</div></div>`:"";
+  const prBox = e.previous?`<div class="box"><div class="k">قبلی</div><div class="v">${pfEscape(e.previous)}</div></div>`:"";
+  const enTtl = e.title_fa? `<div class="en">${pfEscape(e.title)}</div>` : "";
+  const faTtl = pfEscape(e.title_fa || e.title);
   const badge = past
     ? (v.found?`✅ اعلام شد${e.minutes_ago!=null?` · ${e.minutes_ago} دقیقه پیش`:""}`:"⏳ نتیجه به‌زودی")
-    : `⏳ ${e.countdown}`;
+    : `⏳ ${pfEscape(e.countdown)}`;
   // سوییچِ فید: رویدادِ اعلام‌شده «نتیجه + تأثیرِ محقق» را می‌گیرد، نه دو سناریوی
   // شرطی — بارِ این رویدادها عمداً `analysis` ندارد (تحلیلِ شرطی فقط برای پیشِ‌رو).
   const body = past
     ? resCard(e, v)
-    : `<div class="why">💡 ${a.why}</div>
+    : `<div class="why">💡 ${pfEscape(a.why)}</div>
       <div class="scen">
         ${scenCard("beat", a.beat)}
         ${scenCard("miss", a.miss)}
       </div>`;
-  return `<div class="ev${openKeys.has(evKey(e))?" open":""}" data-i="${idx}" data-key="${evKey(e)}">
+  return `<div class="ev${openKeys.has(evKey(e))?" open":""}" data-i="${idx}" data-key="${pfEscape(evKey(e))}">
     <div class="ev-head">
-      <span class="ev-icon">${a.icon||e.icon||""}</span>
+      <span class="ev-icon">${pfEscape(a.icon||e.icon||"")}</span>
       <div class="ev-main">
         <div class="ev-title">${faTtl}${enTtl}</div>
-        <div class="ev-meta">${a.cat||e.cat||""} · ${e.et}<br>${e.tehran}</div>
+        <div class="ev-meta">${pfEscape(a.cat||e.cat||"")} · ${pfEscape(e.et)}<br>${pfEscape(e.tehran)}</div>
       </div>
-      <span class="ccy">${e.country_fa} (${e.country})</span>
-      <span class="imp ${e.impact}">${e.impact==="High"?"پرتأثیر":"متوسط"}</span>
+      <span class="ccy">${pfEscape(e.country_fa)} (${pfEscape(e.country)})</span>
+      <span class="imp ${pfEscape(e.impact)}">${e.impact==="High"?"پرتأثیر":"متوسط"}</span>
       <span class="cd-badge${past?" past":""}"${past&&v.found&&e.minutes_ago!=null?` data-m="${e.minutes_ago}" data-t0="${T0}"`:``}${!past&&e.in_s!=null?` data-in-s="${e.in_s}"`:``}>${badge}</span>
       <span class="chev">▾</span>
     </div>
     <div class="ev-body">
       <div class="times">
-        <span>🗽 <b>${e.et}</b></span>
-        <span>🇮🇷 <b>${e.tehran}</b></span>
+        <span>🗽 <b>${pfEscape(e.et)}</b></span>
+        <span>🇮🇷 <b>${pfEscape(e.tehran)}</b></span>
       </div>
       <div class="fc">${fcBox}${prBox}</div>
       ${body}
@@ -4431,7 +4613,7 @@ function evCard(e,idx){
 
 function render(){
   if(!DATA) return;
-  if(DATA.error){ $("#list").innerHTML=`<div class="err">خطا: ${DATA.error}</div>`; return; }
+  if(DATA.error){ $("#list").innerHTML=`<div class="err">خطا: ${pfEscape(DATA.error)}</div>`; return; }
   $("#gen").textContent="تولیدِ گزارش: "+(DATA.generated_tehran||"");
   $("#note").textContent="⚠️ "+(DATA.note||"");
   let evs=DATA.events||[];
@@ -4448,9 +4630,9 @@ function renderNext(){
   const nh=DATA && DATA.next_high;
   $("#nextWrap").innerHTML = (nh && nh.analysis) ? `<div class="next">
     <div class="lbl">نزدیک‌ترین خبرِ پرتأثیر</div>
-    <div class="ttl">${nh.analysis.icon} ${nh.title_fa||nh.title} — ${nh.country_fa}</div>
-    <div class="ev-meta" style="margin-top:6px">${nh.et} · 🇮🇷 ${nh.tehran}</div>
-    <div style="margin-top:6px">تا اعلام: <span class="cd">${nh.countdown}</span></div>
+    <div class="ttl">${pfEscape(nh.analysis.icon)} ${pfEscape(nh.title_fa||nh.title)} — ${pfEscape(nh.country_fa)}</div>
+    <div class="ev-meta" style="margin-top:6px">${pfEscape(nh.et)} · 🇮🇷 ${pfEscape(nh.tehran)}</div>
+    <div style="margin-top:6px">تا اعلام: <span class="cd">${pfEscape(nh.countdown)}</span></div>
   </div>` : "";
 }
 
@@ -4705,12 +4887,16 @@ def _check_auth(self, qs):
         return True
     def _same(a):
         """مقایسهٔ ثابت‌زمان (`==` روی رشته زودتر برمی‌گردد و زمانِ پاسخ لو می‌دهد)."""
-        return hmac.compare_digest(str(a or ""), str(_ACCESS_TOKEN))
+        return hmac.compare_digest(str(a or "").encode("utf-8"), str(_ACCESS_TOKEN).encode("utf-8"))
 
     cookies = (self.headers.get("Cookie") or "")
-    m = re.search(rf"{ _ACCESS_COOKIE }=([A-Za-z0-9_\-]+)", cookies)
-    if m and _same(m.group(1)):
-        return True
+    try:
+        parsed = SimpleCookie()
+        parsed.load(cookies)
+        if _ACCESS_COOKIE in parsed and _same(unquote(parsed[_ACCESS_COOKIE].value)):
+            return True
+    except Exception:
+        pass
     if _same(qs.get("token", [""])[0]):
         return True
     auth = self.headers.get("Authorization") or ""
@@ -4743,7 +4929,90 @@ def _auth_page(self, tried=False):
     return self._send(200, html, "text/html; charset=utf-8")
 
 
+class BoundedHTTPServer(ThreadingHTTPServer):
+    """سقفِ ثابتِ نخ و مهلتِ خواندن؛ مشتریِ کند نمی‌تواند نخِ بی‌مرز بسازد."""
+    daemon_threads = True
+    request_queue_size = 16
+    max_workers = 16
+    socket_timeout = 10
+    tls_context: ssl.SSLContext | None
+
+    def __init__(self, *args, **kwargs):
+        self._http_slots = threading.BoundedSemaphore(self.max_workers)
+        self.tls_context = None
+        super().__init__(*args, **kwargs)
+
+    def get_request(self):
+        request, address = super().get_request()
+        request.settimeout(self.socket_timeout)
+        if self.tls_context is not None:
+            request = self.tls_context.wrap_socket(request, server_side=True, do_handshake_on_connect=False)
+        return request, address
+
+    def process_request(self, request: Any, client_address):
+        if not self._http_slots.acquire(blocking=False):
+            try:
+                request.sendall(b"HTTP/1.0 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            except OSError:
+                pass
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._http_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._http_slots.release()
+
+
 class Handler(BaseHTTPRequestHandler):
+    _post_doc: dict[str, Any]
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(getattr(self.server, "socket_timeout", 10))
+
+    def _read_json(self, cap):
+        lengths = self.headers.get_all("Content-Length") or []
+        if self.headers.get("Transfer-Encoding"):
+            raise _BodyError(400, "کدگذاریِ بدنه پشتیبانی نمی‌شود")
+        if not lengths:
+            raise _BodyError(411, "طولِ بدنهٔ درخواست مشخص نشده است")
+        if len(lengths) > 1 or (lengths and not re.fullmatch(r"[0-9]+", lengths[0])):
+            raise _BodyError(400, "طولِ بدنه نامعتبر است")
+        if lengths and len(lengths[0]) > 9:
+            raise _BodyError(413, "بدنهٔ درخواست از سقفِ مجاز بزرگ‌تر است")
+        length = int(lengths[0]) if lengths else 0
+        if length > cap:
+            raise _BodyError(413, "بدنهٔ درخواست از سقفِ مجاز بزرگ‌تر است")
+        if length == 0:
+            return {}
+        if (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower() != "application/json":
+            raise _BodyError(415, "بدنه باید از نوعِ جی‌سان باشد")
+        try:
+            body = self.rfile.read(length)
+        except (TimeoutError, OSError):
+            raise _BodyError(408, "مهلتِ دریافتِ بدنه پایان یافت")
+        if len(body) != length:
+            raise _BodyError(400, "بدنه ناقص دریافت شد")
+        def finite_float(value):
+            n = float(value)
+            if not math.isfinite(n):
+                raise ValueError("عددِ نامتناهی")
+            return n
+        def no_constant(value):
+            raise ValueError("عددِ نامعتبر")
+        try:
+            doc = json.loads(body.decode("utf-8"), parse_float=finite_float, parse_constant=no_constant)
+        except (ValueError, UnicodeError, RecursionError):
+            raise _BodyError(400, "بدنهٔ جی‌سان خوانده نشد یا عددِ نامعتبر دارد")
+        if not isinstance(doc, dict):
+            raise _BodyError(400, "بدنهٔ جی‌سان باید یک شیء باشد")
+        return doc
     def log_message(self, *a):
         pass  # سکوت
 
@@ -4760,12 +5029,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            path = urlparse(self.path).path
+            if path == "/sw.js":
+                self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+                self.send_header("Service-Worker-Allowed", "/")
+            elif path.startswith("/api/") or ctype.startswith("text/html"):
+                self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(data)
-        except (BrokenPipeError, ConnectionResetError):
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
             # کلاینت وسطِ محاسبه‌ی سنگین اتصال را بست (تایم‌اوت/رفرش) — بی‌صدا رد کن
             pass
 
+    @_request_guard
     def do_GET(self):
         u = urlparse(self.path)
         qs = parse_qs(u.query)
@@ -4776,9 +5054,9 @@ class Handler(BaseHTTPRequestHandler):
                 # ورود موفق → کوکی بده و بدونِ token در URL برو (توکن در هیستوری نمی‌ماند)
                 self.send_response(302)
                 self.send_header("Location", "/")
-                _sec = "; Secure" if _TLS_PORT else ""   # فقط روی HTTPS، تا روی HTTP دور ریخته نشود
+                _sec = "; Secure" if isinstance(self.connection, ssl.SSLSocket) else ""
                 self.send_header("Set-Cookie",
-                                 f"{_ACCESS_COOKIE}={_ACCESS_TOKEN}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax{_sec}")
+                                 f"{_ACCESS_COOKIE}={quote(str(_ACCESS_TOKEN), safe='')}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Lax{_sec}")
                 self.send_header("Content-Length", "0")
                 self.end_headers()
                 return
@@ -5087,18 +5365,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(500, json.dumps({"error": str(e)}))
         # 🩺 سلامتِ اپ: سینتکس + قراردادِ «هیچ کلیدی گم نشود» + وجودِ اسنپ‌شات
         if u.path == "/api/selfcheck":
-            _now = time.time()
-            if _SC_CACHE["rep"] is not None and _now - _SC_CACHE["ts"] < 60:
-                return self._send(200, json.dumps(_SC_CACHE["rep"], ensure_ascii=False))
-            try:
-                import selfcheck as SC
-                _root = os.path.dirname(os.path.abspath(__file__))
-                rep = SC.run_checks(_root)
-                rep["snapshot_available"] = os.path.isdir(SC.GOOD)
-                rep["log"] = SC.LOG
-            except Exception as e:
-                rep = {"ok": False, "problems": [f"selfcheck در دسترس نیست: {e}"]}
-            _SC_CACHE["rep"], _SC_CACHE["ts"] = rep, _now
+            with _SC_LOCK:
+                _now = time.time()
+                signature = tuple(sorted(_rev_mtimes().items()))
+                if _SC_CACHE["rep"] is not None and _now - _SC_CACHE["ts"] < 60 and _SC_CACHE["signature"] == signature:
+                    rep = _SC_CACHE["rep"]
+                else:
+                    try:
+                        import selfcheck as SC
+                        _root = os.path.dirname(os.path.abspath(__file__))
+                        rep = SC.run_checks(_root)
+                        rep["snapshot_available"] = os.path.isdir(SC.GOOD)
+                        rep["log"] = SC.LOG
+                    except Exception as e:
+                        rep = {"ok": False, "problems": [f"selfcheck در دسترس نیست: {e}"]}
+                    _SC_CACHE.update(rep=rep, ts=_now, signature=signature)
             return self._send(200, json.dumps(rep, ensure_ascii=False))
         # PWA: مانیفست، سرویس‌ورکر و آیکون‌ها — از روی دیسک، بدونِ وابستگیِ بیرونی
         if u.path in ("/manifest.webmanifest", "/sw.js", "/icon-180.png",
@@ -5145,6 +5426,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, json.dumps({"error": str(e)}, ensure_ascii=False))
         return self._send(404, json.dumps({"error": "not found"}))
 
+    @_request_guard
     def do_DELETE(self):
         u = urlparse(self.path)
         qs = parse_qs(u.query)
@@ -5177,35 +5459,22 @@ class Handler(BaseHTTPRequestHandler):
         که dataurl یک data:image/...;base64,... است. فقط stdlib."""
         import base64, re as _re
         try:
-            ln = int(self.headers.get("Content-Length", 0))
-            if ln <= 0:
-                return self._send(200, json.dumps({"error": "بدنه خالی است"}, ensure_ascii=False))
-            if ln > _MAX_UPLOAD + 200000:
-                return self._send(200, json.dumps({"error": "فایل خیلی بزرگ است (سقف ۱۲ مگابایت)"}, ensure_ascii=False))
-            body = self.rfile.read(ln)
-            d = json.loads(body.decode("utf-8"))
+            d = self._post_doc
             dataurl = d.get("dataurl", "")
             m = _re.match(r"data:image/(png|jpe?g|webp|gif);base64,(.+)$", dataurl, _re.S)
             if not m:
                 return self._send(200, json.dumps({"error": "فرمتِ تصویر نامعتبر است (فقط png/jpg/webp/gif)"}, ensure_ascii=False))
             ext = m.group(1).lower()
             ext = "jpg" if ext in ("jpeg", "jpg") else ext
-            raw = base64.b64decode(m.group(2))
+            raw = base64.b64decode(m.group(2), validate=True)
             if len(raw) > _MAX_UPLOAD:
                 return self._send(200, json.dumps({"error": "فایل خیلی بزرگ است (سقف ۱۲ مگابایت)"}, ensure_ascii=False))
             os.makedirs(SHOTS_DIR, exist_ok=True)
             # شناسهٔ یکتا: دو آپلود در یک میلی‌ثانیه نباید فایل/متادیتای هم را
             # بازنویسی کنند (همان درسی که در آلارم‌ها با پسوندِ یکتا حل شد).
-            base = str(int(time.time() * 1000))
-            with _shots_lock:
-                taken = {str(s.get("id")) for s in _load_shots()}
-            taken |= {os.path.splitext(f)[0] for f in os.listdir(SHOTS_DIR)}
-            sid, n = base, 1
-            while sid in taken:
-                sid = f"{base}-{n}"
-                n += 1
+            sid = uuid.uuid4().hex
             fname = f"{sid}.{ext}"
-            with open(os.path.join(SHOTS_DIR, fname), "wb") as f:
+            with open(os.path.join(SHOTS_DIR, fname), "xb") as f:
                 f.write(raw)
             shot = {
                 "id": sid,
@@ -5239,11 +5508,12 @@ class Handler(BaseHTTPRequestHandler):
         if probs:
             return self._send(400, json.dumps({"ok": False, "errors": probs},
                                               ensure_ascii=False))
-        rows, j_add, j_skip = BK.merge_journal(_journal_rows(_JR_FILE) or [],
-                                               doc.get("journal") or [],
-                                               _journal_fields())
-        if j_add:
-            _journal_write(rows)
+        with _journal_lock:
+            rows, j_add, j_skip = BK.merge_journal(_journal_rows(_JR_FILE) or [],
+                                                   doc.get("journal") or [],
+                                                   _journal_fields())
+            if j_add:
+                _journal_write(rows)
         with _alarms_lock:
             alarms, a_add, a_skip = BK.merge_alarms(_load_alarms(),
                                                     doc.get("alarms") or [])
@@ -5259,6 +5529,7 @@ class Handler(BaseHTTPRequestHandler):
             "settings_applied": s_applied, "journal_file": _JR_FILE,
         }, ensure_ascii=False))
 
+    @_json_post
     def do_POST(self):
         u = urlparse(self.path)
         qs = parse_qs(u.query)
@@ -5272,9 +5543,7 @@ class Handler(BaseHTTPRequestHandler):
                 if RK is None:
                     return self._send(200, json.dumps(
                         {"error": "ماژولِ ریسک بار نشد"}, ensure_ascii=False))
-                ln = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(ln) if ln else b"{}"
-                d = json.loads(body.decode("utf-8"))
+                d = self._post_doc
                 cur = RK.load_settings()
                 for k in ("balance", "risk_pct", "daily_loss_limit_pct",
                           "max_open_risk_pct"):
@@ -5298,31 +5567,13 @@ class Handler(BaseHTTPRequestHandler):
                     {"error": str(e)}, ensure_ascii=False))
         if u.path == "/api/import":
             # بستهٔ برون‌بریِ خودِ اپ را بده؛ اعتبارسنجی کامل پیش از هر نوشتن
-            ln = int(self.headers.get("Content-Length", 0) or 0)
-            if ln > _MAX_IMPORT:
-                return self._send(413, json.dumps(
-                    {"error": "فایلِ پشتیبان خیلی بزرگ است"}, ensure_ascii=False))
-            try:
-                body = self.rfile.read(ln) if ln else b""
-                doc = json.loads(body.decode("utf-8"))
-            except Exception:
-                return self._send(400, json.dumps(
-                    {"error": "فایلِ JSON خوانده نشد — بستهٔ برون‌بریِ خودِ اپ را بده"},
-                    ensure_ascii=False))
-            return self._handle_import(doc)
+            return self._handle_import(self._post_doc)
         if u.path == "/api/autobackup":
             # تنظیماتِ زمان‌بندی (+ اجرای فوری با run_now) — اعتبارسنجی پیش از ذخیره
             if AB is None:
                 return self._send(500, json.dumps(
                     {"error": "ماژولِ پشتیبانِ خودکار بار نشد"}, ensure_ascii=False))
-            try:
-                ln = int(self.headers.get("Content-Length", 0) or 0)
-                body = self.rfile.read(ln) if ln else b""
-                d = json.loads(body.decode("utf-8")) if body.strip() else {}
-            except Exception:
-                return self._send(400, json.dumps(
-                    {"error": "تنظیماتِ پشتیبان خوانده نشد (JSON خراب است)"},
-                    ensure_ascii=False))
+            d = self._post_doc
             probs = AB.validate_settings(d)
             if probs:
                 return self._send(400, json.dumps({"ok": False, "errors": probs},
@@ -5344,9 +5595,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_upload()
         if u.path == "/api/alarm":
             try:
-                ln = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(ln) if ln else b"{}"
-                d = json.loads(body.decode("utf-8"))
+                d = self._post_doc
                 sym = str(d.get("symbol", "")).strip().upper()
                 if not sym:
                     return self._send(200, json.dumps({"error": "نماد خالی است"}, ensure_ascii=False))
@@ -5443,9 +5692,7 @@ class Handler(BaseHTTPRequestHandler):
         if u.path != "/api/journal":
             return self._send(404, json.dumps({"error": "not found"}))
         try:
-            ln = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(ln) if ln else b"{}"
-            d = json.loads(body.decode("utf-8"))
+            d = self._post_doc
             p = d.get("plan") or {}
             if not p:
                 return self._send(200, json.dumps(
@@ -5488,15 +5735,7 @@ class Handler(BaseHTTPRequestHandler):
                 mistake=None, lesson=None, notes="ثبت‌شده از اپلیکیشن pipfound",
                 datetime=None,
             )
-            import io
-            buf = io.StringIO()
-            old = sys.stdout
-            sys.stdout = buf
-            try:
-                _JR.cmd_add(ns)
-            finally:
-                sys.stdout = old
-            out = json.loads(buf.getvalue().strip() or "{}")
+            out = _journal_add(ns)
             if corr_before is not None and not out.get("error"):
                 # همین حالا که معامله ثبت شد، اگر با پوزیشن‌های بازِ قبلی
                 # هم‌بسته/متضاد باشد گوشزد می‌شود (نشان در رابط).
@@ -5565,7 +5804,9 @@ def main():
               % _REV_WATCH["interval"])
     else:
         print("   ♻️ ری‌استارتِ خودکارِ کهنه: خاموش")
-    srv = ThreadingHTTPServer((a.host, a.port), Handler)
+    srv = BoundedHTTPServer((a.host, a.port), Handler)
+    CURRENT_PORT = srv.server_port
+    a.port = srv.server_port
     url = f"http://{a.host}:{a.port}"
     # حالتِ LAN: HTTPSِ خودگواهی‌شده برای نصبِ PWA (سافاریِ iOS فقط روی https نصب می‌کند)
     if a.lan:
@@ -5575,15 +5816,15 @@ def main():
             _TLS_PORT = a.port
             ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
             ctx.load_cert_chain(_TLS_CERT, _TLS_KEY)
-            srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+            srv.tls_context = ctx
             url = f"https://{a.host}:{a.port}  (گواهیِ خودگواهی‌شده — اولین باز، هشدارِ مرورگر را بپذیر)"
             # بوت‌استرپ: یک پورتِ HTTPِ محلی برای «راه‌اندازیِ اولیه» — توکن را بدونِ
             # قبولِ گواهی می‌شود وارد کرد، بعد بقیه از HTTPS می‌رود.
             try:
-                bs = ThreadingHTTPServer(("127.0.0.1", a.port + 1), Handler)
+                bs = BoundedHTTPServer(("127.0.0.1", a.port + 1), Handler)
                 threading.Thread(target=bs.serve_forever, daemon=True).start()
                 print(f"   🚪 ورودِ آسان: http://127.0.0.1:{a.port + 1}  (فقط همین دستگاه — بعد از ورود، آدرسِ https را به دستگاه‌های دیگر بده)")
-            except OSError:
+            except (OSError, OverflowError):
                 pass
         except FileNotFoundError:
             print("⚠️ openssl پیدا نشد — بدونِ HTTPS ادامه می‌دهم (نصب روی سافاریِ iOS کار نمی‌کند)")
@@ -5626,6 +5867,8 @@ def main():
     except KeyboardInterrupt:
         print("\n👋 خاموش شد.")
         srv.shutdown()
+    finally:
+        srv.server_close()
 
 
 if __name__ == "__main__":

@@ -18,10 +18,15 @@
     قیمت‌گذاری‌شده باشد واکنش خنثی می‌شود. دورِ ±۱۵ تا ۳۰ دقیقه‌ی خبرِ پرتأثیر ورودِ تازه ممنوع.
 """
 import datetime
+import math
 import re
+from zoneinfo import ZoneInfo
 import macro_context as M
+from macro_context import (calendar_quality as _calendar_quality,
+                           actuals_quality as _actuals_quality,
+                           parse_event_time as _parse_event_time, SourceRows)
 
-ET = datetime.timezone(datetime.timedelta(hours=-4))          # New York (طبقِ macro_context)
+ET = ZoneInfo("America/New_York")
 TEHRAN = datetime.timezone(datetime.timedelta(hours=3, minutes=30))  # تهران
 
 _FA_DAYS = ["دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه", "شنبه", "یکشنبه"]
@@ -81,16 +86,16 @@ def _title_fa(t):
 def _classify(title, country):
     """دسته‌بندیِ خبر + منطقِ جهت‌گیری. خروجی: دسته، آیکن، جهتِ همیشگی(نرمال/معکوس)، توضیح."""
     t = (title or "").lower()
-    # نرخِ بهره / بیانیه‌ی بانکِ مرکزی — بالاترین تأثیر
-    if any(k in t for k in ("rate statement", "cash rate", "overnight rate",
-                            "monetary policy", "rate decision", "interest rate")):
+    # بیانیه/لحن، عددِ نرخ نیست؛ بدونِ متن/واکنشِ بازار جهت ساخته نمی‌شود.
+    if any(k in t for k in ("rate statement", "monetary policy", "press conference",
+                            "speaks", "testimony", "statement")):
+        return ("سخنرانیِ مقامِ پولی", "🎙️", "unknown",
+                "بازار دنبالِ سرنخِ لحن است؛ بدونِ دادهٔ لحن و واکنشِ قیمت، جهت معلوم نیست.")
+    if any(k in t for k in ("cash rate", "overnight rate", "rate decision",
+                            "interest rate", "federal funds rate")):
         return ("نرخِ بهره", "🏦", "normal",
-                "تصمیمِ نرخِ بهره و لحنِ بیانیه، پرتأثیرترین محرکِ ارز است. نرخِ بالاتر از "
-                "انتظار یا لحنِ هاوکیش (نگرانِ تورم) ارز را قوی می‌کند؛ لحنِ داویش (نگرانِ رشد) ضعیف.")
-    if any(k in t for k in ("press conference", "speaks", "testimony", "statement")):
-        return ("سخنرانیِ مقامِ پولی", "🎙️", "normal",
-                "بازار دنبالِ سرنخِ لحن است (هاوکیش/داویش). جمله‌های غیرمنتظره می‌تواند بیش از خودِ "
-                "دیتا نوسان بسازد؛ زمان‌بندیِ دقیق و بی‌ثبات.")
+                "نرخ در برابرِ انتظار مقایسه می‌شود، نه صرفاً نرخِ قبلی. فشارِ استنباطیِ عدد، "
+                "واکنشِ قطعیِ ارز یا طلا نیست؛ لحنِ سیاستی و بازده‌ها می‌توانند آن را تغییر دهند.")
     if "cpi" in t or "inflation" in t or "ppi" in t or "price" in t:
         return ("تورم", "📈", "normal",
                 "تورمِ بالاتر از انتظار = فشار بر بانکِ مرکزی برای نرخِ بالاتر → ارز کوتاه‌مدت قوی‌تر. "
@@ -116,8 +121,8 @@ def _classify(title, country):
     if "retail" in t:
         return ("خرده‌فروشی", "🛒", "normal",
                 "خرده‌فروشیِ بالاتر از انتظار = مصرفِ قوی → ارز قوی‌تر.")
-    return ("رویدادِ اقتصادی", "🗓️", "normal",
-            "رویدادِ تقویمِ اقتصادی؛ به انحراف از پیش‌بینی و لحنِ همراهش توجه کن.")
+    return ("رویدادِ اقتصادی", "🗓️", "unknown",
+            "نوع یا جهتِ تفسیرِ این شاخص معلوم نیست؛ از عدد یا نامِ ناقص، جهت نمی‌سازیم.")
 
 
 def _pair_effect(ccy, strong):
@@ -155,6 +160,10 @@ def _pair_effect(ccy, strong):
 def _analysis(title, country):
     cat, icon, mode, why = _classify(title, country)
     ccy = country
+    if mode not in ("normal", "inverse"):
+        empty={"label":"تفسیرِ عدد/لحن نامعلوم است", "ccy_dir":"", "pairs":[], "gold":None}
+        return {"cat":cat, "icon":icon, "why":why,
+                "beat":dict(empty), "miss":dict(empty), "status":"UNKNOWN"}
     normal = (mode == "normal")
     # «بهتر از انتظار» → ارز قوی (نرمال) یا ضعیف (معکوس)
     beat_pairs, beat_gold = _pair_effect(ccy, strong=normal)
@@ -221,6 +230,33 @@ def past_window(v):
     return min(PAST_WINDOWS, key=lambda w: (abs(w - n), w))
 
 
+def _calendar_snapshot():
+    try: cal=M.get_calendar()
+    except Exception as e:
+        cal=SourceRows([], {"source":"forexfactory", "fetched_at":None,
+                            "source_status":"unavailable", "error":str(e)})
+    if not isinstance(cal, list):
+        cal=SourceRows([], {"source":"forexfactory", "fetched_at":None,
+                            "source_status":"unavailable", "error":"پاسخِ تقویم معتبر نیست"})
+    return cal
+
+
+def _event_datetime(value):
+    utc=_parse_event_time(value)
+    if utc is None: return None
+    # Keep the existing ISO identity/offset; only naive ET needs localization.
+    if isinstance(value, str):
+        dt=datetime.datetime.fromisoformat(value)
+        return utc.astimezone(ET) if dt.tzinfo is None else dt
+    return utc
+
+
+def _event_sort_key(ev):
+    dt=_parse_event_time(ev.get("iso"))
+    if dt is None: raise ValueError("زمانِ رویداد برای مرتب‌سازی معتبر نیست")
+    return dt.timestamp()
+
+
 def _feed_past_event(e, dt, now, ccy):
     """رویدادِ گذشتهٔ فید (عددش اعلام شده یا دارد می‌شود) — بی‌`analysis`ِ دوشاخه‌ای.
 
@@ -258,26 +294,25 @@ def build_feed(hours=180, min_impact="Medium", past_hours=6):
     رویدادهای **گذشته**: `passed=True` + حکمِ قطعی (`verdict`) با «نتیجه + تأثیرِ
     محقق» و **بی‌`analysis`** — فید بعد از اعلام، خودکار سوییچ می‌کند؛ نه دو
     سناریوی همیشگی."""
-    cal = M.get_calendar()
+    cal = _calendar_snapshot()
     now = datetime.datetime.now(datetime.timezone.utc)
+    cal_quality = _calendar_quality(cal, now=now)
     horizon = now + datetime.timedelta(hours=hours)
     floor = now - datetime.timedelta(hours=past_window(past_hours))
     want = {"High"} if min_impact == "High" else {"High", "Medium"}
-    out, past = [], []
+    out, past = [], SourceRows()
     for e in cal:
+        if not isinstance(e, dict): continue
         if e.get("impact") not in want:
             continue
-        try:
-            dt = datetime.datetime.fromisoformat(e["date"])  # aware (offset در رشته)
-        except Exception:
-            continue
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=ET)
+        dt = _event_datetime(e.get("date"))
+        if dt is None: continue
         if not (floor <= dt <= horizon):
             continue
         ccy = e.get("country")
         if dt < now:
             past.append(_feed_past_event(e, dt, now, ccy))
+            past[-1]["calendar_quality"]=dict(cal_quality)
             continue
         et = dt.astimezone(ET)
         teh = dt.astimezone(TEHRAN)
@@ -300,13 +335,15 @@ def build_feed(hours=180, min_impact="Medium", past_hours=6):
             "in_s": int(max(0, (dt - now).total_seconds())),
             "countdown": _countdown_fa(dt - now),
             "passed": False,
+            "calendar_quality": dict(cal_quality),
             "analysis": _analysis(e.get("title"), ccy),
         })
     if past:
         _attach_verdicts(past)  # «نتیجه + تأثیرِ محقق» برای رویدادهای اعلام‌شده
         out.extend(past)
-    out.sort(key=lambda x: x["iso"])
-    return out
+    out.sort(key=_event_sort_key)
+    return SourceRows(out, {"calendar_quality":cal_quality,
+                            "source_quality":past.metadata.get("source_quality")})
 
 
 # رقم‌های حرفی که «بهتر/بدتر» عددی معنا ندارند (کنترلِ صداقتِ حکم).
@@ -317,124 +354,181 @@ _NUM_MULT = {"k": 1000.0, "m": 1000000.0, "b": 1000000000.0, "t": 1000000000000.
 
 
 def _num(v):
-    """«3.6%»/«15.2%»/«1,234K»/«1.2M» → شماره؛ نشدن → None (بدونِ حدس).
-
-    چرا پسوند هم خوانده می‌شود: عددهای اشتغال/GDP در منبعِ ستونِ Actual
-    به‌شکلِ «195K»/«1.2M» می‌آیند؛ پیش‌تر همین پسوند `None` می‌داد و حکمِ
-    «عددِ اعلام‌شده در دسترس نیست» صادر می‌شد درحالی‌که عدد رسیده بود (یعنی
-    کارتِ اعلام‌شده هیچ‌وقت نتیجه نمی‌گرفت).
-    """
-    s = (v or "").replace(",", "").replace("%", "").strip().lower()
-    # تطبیق باید **دقیق** باشد، نه زیررشته‌ای: نشانهٔ «داده نداریم» «-» است، ولی
-    # زیررشته‌گرفتن آن همهٔ عددهای **منفی** («-2.5%» = انقباض/افت) را هم
-    # «نامعلوم» می‌کرد و آن خبر هرگز نتیجه نمی‌گرفت.
+    """Strict finite scalar, preserving scale suffixes and valid signed values."""
+    if isinstance(v, bool): return None
+    if isinstance(v, (int, float)):
+        try: return float(v) if math.isfinite(v) else None
+        except (ValueError, OverflowError): return None
+    if not isinstance(v, str): return None
+    s = v.strip().lower()
     if not s or s in _VERDICT_SKIP_TOKENS:
         return None
+    if s.endswith("%"):
+        s=s[:-1].strip()
+    if "%" in s: return None
     mult = 1.0
     if s[-1:] in _NUM_MULT:
         mult = _NUM_MULT[s[-1:]]
         s = s[:-1].strip()
     if not s:
         return None
-    try:
-        return float(s) * mult
-    except ValueError:
+    # Commas are thousands separators, not an invitation to change "1,2" to 12.
+    if not re.fullmatch(r"[+-]?(?:(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?", s):
         return None
+    try:
+        value=float(s.replace(",", ""))*mult
+        return value if math.isfinite(value) else None
+    except (TypeError, ValueError, OverflowError): return None
+
+
+def _text(v):
+    return v.strip() if isinstance(v, str) else str(v) if isinstance(v, (int, float)) else ""
+
+
+def _quantity(v):
+    """Finite scalar/interest-rate interval with an explicit comparable unit.
+
+    No midpoint/upper-bound guess for a target range. A unitless TE number
+    cannot silently inherit %/K from an FF forecast.
+    """
+    scalar=_num(v)
+    if scalar is not None:
+        s=_text(v).lower()
+        unit="percent" if s.endswith("%") else "count" if s[-1:] in _NUM_MULT else "plain"
+        if unit=="percent" and s[:-1].strip()[-1:] in _NUM_MULT: return None
+        return {"low":scalar, "high":scalar, "unit":unit}
+    if not isinstance(v, str): return None
+    number=r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)"
+    match=re.fullmatch(r"\s*("+number+r")\s*(%?)\s*[-–—]\s*("+number+r")\s*(%?)\s*", v)
+    if not match: return None
+    # A final % applies to the whole interval; a left-only % is ambiguous.
+    if match.group(2) and not match.group(4): return None
+    low, high=_num(match.group(1)), _num(match.group(3))
+    if low is None or high is None or low>high: return None
+    return {"low":low, "high":high, "unit":"percent" if match.group(4) else "plain"}
 
 
 def _realized_effect(ccy, direction):
-    """تأثیرِ **محقق** روی جفت‌ارزها/طلا — فقط وقتی جهت قطعی است و ارز معلوم.
-
-    چرا جدا: آرشیو باید «نتیجه + تأثیرِ همان نتیجه» را نشان دهد، نه دو
-    سناریوی فرضیِ بالا/پایین. این تابع برخلافِ `_analysis` (که دو شاخهٔ شرطی
-    می‌سازد) فقط یک اثر می‌دهد: اثری که با عددِ اعلام‌شده واقعاً رخ داده."""
-    if not ccy or direction not in ("قوی‌تر", "ضعیف‌تر"):
+    """Compatibility name: inferred currency pressure, not measured price action."""
+    if ccy not in _CCY_FA or ccy=="All" or direction not in ("قوی‌تر", "ضعیف‌تر"):
         return {"pairs": [], "gold": None}  # جهت نامعلوم ⇒ اثر نمی‌سازیم (حدس ممنوع)
     pairs, gold = _pair_effect(ccy, strong=(direction == "قوی‌تر"))
     return {"pairs": pairs, "gold": gold}
 
 
 def _verdict(actual, forecast, previous, mode, ccy=None):
-    """حکمِ قطعیِ «نتیجه» از عددِ اعلام‌شده — نه گزاره‌ی شرطی.
+    """Actual vs forecast surprise and inferred pressure, NOT observed price action.
 
-    برمی‌گرداند: found (عددِ اعلام‌شده در دسترس است)، dir (قوی‌تر/ضعیف‌ترِ ارز)،
-    outcome (صعودی/نزولی برای همان ارز)، beat (بالاتر/پایین‌تر از انتظار)، و
-    effect: **تأثیرِ همان نتیجه** روی جفت‌ارزهای آن ارز و طلا/نقره.
-    مقایسه فقط با پیش‌بینیِ عددی است؛ اگر پیش‌بینی یا اعلام‌شده عدد نبود، حکمِ
-    «نامعلوم» صادر می‌شود (هرگز حدس نمی‌زنیم)."""
-    a, f, p = _num(actual), _num(forecast), _num(previous)
+    Preserve the existing found/dir/outcome/effect contract, but leave direction
+    empty for missing/ambiguous units, overlapping rate intervals or an unknown
+    indicator. Previous values never substitute for a missing forecast.
+    """
+    a, f=_quantity(actual), _quantity(forecast)
+    res={"found":a is not None, "actual":_text(actual) if a is not None else "",
+         "forecast":_text(forecast), "previous":_text(previous),
+         "outcome":"", "dir":"", "beat":"", "status":"UNKNOWN",
+         "basis":"actual_vs_forecast", "market_reaction_observed":False,
+         "effect":{"pairs":[], "gold":None}}
     if a is None:
-        return {"found": False, "outcome": "", "dir": "", "beat": "",
-                "effect": {"pairs": [], "gold": None}}
-    res = {"found": True, "actual": (actual or "").strip()}
+        res["reason"]="عددِ متناهی و معتبرِ اعلام‌شده در دسترس نیست"
+        return res
     if f is None:
-        # عدد اعلام شده ولی انتظارِ عددی نبوده: جهت را نمی‌سازیم (حدس ممنوع).
-        res["beat"] = "انتظارِ عددی ثبت نشده بود"
-        res["dir"] = ""
-        res["outcome"] = ""
+        res["beat"]="انتظارِ عددی ثبت نشده بود"
+        res["reason"]="بدونِ پیش‌بینیِ عددی، جهت نامعلوم است"
+    elif a["unit"]!=f["unit"]:
+        res["reason"]="واحد یا مقیاسِ اعلام‌شده و پیش‌بینی هم‌خوان نیست"
+    elif mode not in ("normal", "inverse"):
+        res["reason"]="تفسیرِ جهتِ شاخص یا لحنِ خبر معلوم نیست"
+    elif a["low"]==f["low"] and a["high"]==f["high"]:
+        res.update(beat="دقیقاً طبقِ انتظار", dir="طبقِ انتظار", outcome="خنثی", status="AS_EXPECTED")
+    elif a["low"]>f["high"] or a["high"]<f["low"]:
+        higher=a["low"]>f["high"]
+        strong=higher if mode=="normal" else not higher
+        res.update(beat="بالاتر از انتظار" if higher else "پایین‌تر از انتظار",
+                   dir="قوی‌تر" if strong else "ضعیف‌تر",
+                   outcome="صعودی" if strong else "نزولی", status="INFERRED")
     else:
-        if a > f:
-            res["beat"] = "بالاتر از انتظار"
-            res["dir"] = "ضعیف‌تر" if mode == "inverse" else "قوی‌تر"
-        elif a < f:
-            res["beat"] = "پایین‌تر از انتظار"
-            res["dir"] = "قوی‌تر" if mode == "inverse" else "ضعیف‌تر"
-        else:
-            res["beat"] = "دقیقاً طبقِ انتظار"
-            res["dir"] = "طبقِ انتظار"
-        res["outcome"] = ("صعودی" if res["dir"] == "قوی‌تر"
-                          else "نزولی" if res["dir"] == "ضعیف‌تر" else "خنثی")
-    res["forecast"] = (forecast or "").strip()
-    res["previous"] = (previous or "").strip()
+        res["reason"]="بازهٔ نرخ با انتظار هم‌پوشانی دارد؛ جهت را از میانگین یا کران حدس نمی‌زنیم"
     res["effect"] = _realized_effect(ccy, res.get("dir") or "")
     return res
 
 
 def _attach_verdicts(events):
-    """تزریقِ «حکمِ قطعی» به هر رویدادِ گذشته: تطبیقِ FF×TE روی (کشور، تاریخِ GMT،
-    دقیقه‌ی GMT ±۱۰)؛ عددِ اعلام‌شده فقط از منبعِ ستونِ Actual می‌آید و اگر منبع
-    در دسترس نبود، حکمِ «منبعِ اعلام‌شده در دسترس نبود» می‌مانَد — نه گزاره‌ی شرطی.
-    حکم شاملِ **تأثیرِ همان نتیجه** هم هست (`effect`)، پس آرشیو هیچ گزاره‌ی
-    «اگر بالاتر/پایین‌تر شد → …»ی نشان نمی‌دهد."""
-    try:
-        rows = M.get_actuals() or []
-    except Exception:
-        rows = []
-    src_ok = bool(rows)
+    """Require a fresh source and unique currency/time/title identity for Actual.
+
+    ±10m is only a scheduling tolerance, not permission to guess between core/
+    headline, periods, regions, surveys or conflicting rows. Missing identity,
+    stale data and ambiguous matches remain explicitly UNKNOWN.
+    """
+    try: rows = M.get_actuals()
+    except Exception: rows = []
+    quality=_actuals_quality(rows)
+    src_ok=quality["ok"]
+    rows=rows if isinstance(rows, list) else []
+    if isinstance(events, SourceRows): events.metadata["source_quality"]=dict(quality)
     for ev in events:
-        try:
-            dt = datetime.datetime.fromisoformat(ev["iso"])
-        except Exception:
-            continue
-        utc = dt.astimezone(datetime.timezone.utc)
-        minute = utc.hour * 60 + utc.minute
-        v = {"found": False, "outcome": "", "dir": "", "beat": "",
-             "actual": "", "forecast": "", "previous": "",
-             "effect": {"pairs": [], "gold": None}}
-        for r in rows:
-            if (r.get("ccy") != ev.get("country") or r.get("date") != utc.date().isoformat()
-                    or r.get("minute") is None or abs(r["minute"] - minute) > 10):
-                continue
-            if r.get("event") and ev.get("title") and not _titles_match(r["event"], ev["title"]):
-                continue  # چند خبر در همان دقیقه؛ نام نزدیک‌ترین است
-            _cat, _icon, mode, _why = _classify(ev.get("title"), ev.get("country"))
-            # مقایسه با پیش‌بینیِ «همان تقویمی که کاربر دیده» (FF)؛ TE فقط عددِ Actual.
-            v = _verdict(r.get("actual"), (ev.get("forecast") or "").strip(),
-                         (ev.get("previous") or "").strip(), mode or "normal",
-                         ev.get("country"))
-            break
-        ev["verdict"] = v
+        if not isinstance(ev, dict): continue
+        v=_verdict("", ev.get("forecast"), ev.get("previous"), "unknown", ev.get("country"))
+        v["source_quality"]=dict(quality)
+        dt=_parse_event_time(ev.get("iso"))
+        cal_quality=ev.get("calendar_quality")
+        if not src_ok:
+            v["reason"]=quality["reason"]
+        elif isinstance(cal_quality, dict) and not cal_quality.get("ok"):
+            v["reason"]=cal_quality.get("reason") or "تقویمِ تازه معتبر نیست"
+        elif dt is None or not ev.get("title") or not ev.get("country"):
+            v["reason"]="هویت یا زمانِ رویداد معلوم نیست"
+        else:
+            candidates={}
+            for r in rows:
+                if r.get("ccy")!=ev.get("country") or not _titles_match(r.get("event"), ev.get("title")):
+                    continue
+                release=datetime.datetime.combine(datetime.date.fromisoformat(r["date"]),
+                                                   datetime.time(), datetime.timezone.utc)
+                release+=datetime.timedelta(minutes=r["minute"])
+                if abs((release-dt).total_seconds())>10*60: continue
+                identity=(r["date"], r["minute"], tuple(sorted(_title_tokens(r["event"]))), _text(r.get("actual")))
+                candidates[identity]=r
+            if len(candidates)==1:
+                r=next(iter(candidates.values()))
+                _cat, _icon, mode, _why=_classify(ev.get("title"), ev.get("country"))
+                # FF supplies the user's forecast; TE supplies only this unique Actual.
+                v=_verdict(r.get("actual"), ev.get("forecast"), ev.get("previous"), mode, ev.get("country"))
+                v["source_quality"]=dict(quality)
+                v["match"]={"event":r.get("event"), "date":r["date"], "minute":r["minute"]}
+            else:
+                v["reason"]="تطبیقِ نتیجه مبهم است" if candidates else "نتیجهٔ همان رویداد از منبع نرسیده است"
+        ev["verdict"]=v
     return src_ok
 
 
+def _title_tokens(title):
+    """Small explicit aliases, preserving period/core/survey/stage/geography."""
+    if not isinstance(title, str): return set()
+    t=title.lower().strip()
+    if not t: return set()
+    for pattern, replacement in (
+        (r"\by\s*/\s*y\b|\byear[ -]over[ -]year\b", " yoy "),
+        (r"\bm\s*/\s*m\b|\bmonth[ -]over[ -]month\b", " mom "),
+        (r"\bq\s*/\s*q\b|\bquarter[ -]over[ -]quarter\b", " qoq "),
+        (r"\bconsumer price index\b", "cpi"),
+        (r"\bproducer price index\b", "ppi"),
+        (r"\bfederal funds rate\b|\bfed interest rate decision\b", "fed policy rate"),
+        (r"\bnon[ -]?farm (?:employment change|payrolls?)\b", "payrolls"),
+        (r"\bism non[ -]manufacturing\b", "ism services"),
+        (r"\bunemployment claims\b|\binitial jobless claims\b", "initial claims"),
+    ):
+        t=re.sub(pattern, replacement, t)
+    tokens=set(re.findall(r"[a-z0-9]+", t))
+    tokens.discard("index")
+    # Legacy TE shorthand is explicitly supported, not general one-word overlap.
+    if "ppi" in tokens: tokens.discard("manufacturing")
+    return tokens
+
+
 def _titles_match(te_name, ff_title):
-    """نامِ کوتاهِ TE («ppi yoy») با عنوانِ FF («Manufacturing PPI y/y») هم‌خوان شمرده شود.
-    تطبیقِ واژه‌محور؛ فقط برای ردِّ نامشابه‌ها، نه برای ساختنِ حکم."""
-    te = set(re.findall(r"[a-z0-9]+", (te_name or "").lower()))
-    ff = set(re.findall(r"[a-z0-9]+", (ff_title or "").lower()))
-    if not te or not ff:
-        return True  # نبودِ نام ⇒ صرفِ زمان/کشور
-    return bool(te & ff)
+    te, ff=_title_tokens(te_name), _title_tokens(ff_title)
+    return bool(te and ff and te==ff)
 
 
 def archive(hours=6):
@@ -445,19 +539,17 @@ def archive(hours=6):
     همین نتیجه روی جفت‌ارزها/طلا» می‌گیرد؛ چون خبر اعلام شده، دیگر حدس و گزاره‌ی
     شرطی در کار نیست (نه شاخهٔ «اگر بالاتر شد» و نه «اگر پایین‌تر شد»). اگر منبعِ
     اعلام‌شده در دسترس نباشد، همان حالتِ شفافِ «نامعلوم» برمی‌گردد (هرگز حدس نمی‌زنیم)."""
-    cal = M.get_calendar()
+    cal = _calendar_snapshot()
     now = datetime.datetime.now(datetime.timezone.utc)
+    cal_quality = _calendar_quality(cal, now=now)
     start = now - datetime.timedelta(hours=max(1, int(hours)))
-    out = []
+    out = SourceRows()
     for e in cal:
+        if not isinstance(e, dict): continue
         if e.get("impact") not in ("High", "Medium"):
             continue
-        try:
-            dt = datetime.datetime.fromisoformat(e["date"])
-        except Exception:
-            continue
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=ET)
+        dt = _event_datetime(e.get("date"))
+        if dt is None: continue
         if not (start <= dt <= now):
             continue
         teh = dt.astimezone(TEHRAN)
@@ -478,9 +570,10 @@ def archive(hours=6):
             "forecast": (e.get("forecast") or "").strip(),
             "previous": (e.get("previous") or "").strip(),
             "when_fa": f"{_FA_DAYS[teh.weekday()]} {teh.strftime('%H:%M')} به‌وقتِ تهران",
+            "calendar_quality": dict(cal_quality),
             "minutes_ago": round((now - dt).total_seconds() / 60),
         })
-    out.sort(key=lambda x: x["iso"], reverse=True)
+    out.sort(key=_event_sort_key, reverse=True)
     src_ok = _attach_verdicts(out)
     now_teh = datetime.datetime.now(TEHRAN)
     return {
@@ -490,6 +583,8 @@ def archive(hours=6):
         "count": len(out),
         "verdicts": sum(1 for e in out if (e.get("verdict") or {}).get("found")),
         "source_ok": src_ok,
+        "source_quality": out.metadata.get("source_quality"),
+        "calendar_quality": cal_quality,
         "events": out,
         "note": ("هر خبر فقط «نتیجه‌ی قطعیِ اعلام‌شده» + «تأثیرِ همان نتیجه» را دارد "
                  "(عددِ Actual + صعودی/نزولی + اثرش روی جفت‌ارزها/طلا)؛ چون خبر اعلام "
@@ -506,12 +601,8 @@ def build(hours=180, past_hours=6):
     # اعلام‌شده دیگر «نزدیک‌ترین» نیست — نتیجه‌اش گرفته شده و در فهرست می‌مانَد.
     highs = [e for e in feed if e["impact"] == "High" and not e.get("passed")]
     passed = [e for e in feed if e.get("passed")]
-    src_ok = None
-    if passed:
-        try:
-            src_ok = bool(M.get_actuals() or [])
-        except Exception:
-            src_ok = False
+    source_quality = feed.metadata.get("source_quality")
+    src_ok = bool(source_quality and source_quality.get("ok")) if passed else None
     now_teh = datetime.datetime.now(TEHRAN)
     return {
         "generated_tehran": f"{_FA_DAYS[now_teh.weekday()]} {now_teh.strftime('%Y-%m-%d %H:%M')} تهران",
@@ -521,6 +612,8 @@ def build(hours=180, past_hours=6):
         "count_high": len(highs),
         "next_high": highs[0] if highs else None,
         "source_ok": src_ok,
+        "source_quality": source_quality,
+        "calendar_quality": feed.metadata.get("calendar_quality"),
         "events": feed,
         "note": ("آنچه بازار را تکان می‌دهد «انحراف از پیش‌بینی» است، نه خودِ عدد. دورِ "
                  "±۱۵ تا ۳۰ دقیقه‌ی هر خبرِ پرتأثیر، ورودِ تازه ممنوع؛ اجازه بده فِیک‌اوتِ اولیه پاک شود. "
@@ -549,6 +642,8 @@ def one_event(iso, hours=180, past_hours=6):
         "event": ev,
         "next_high": highs[0] if highs else None,
         "past_hours": past_hours,
+        "calendar_quality": feed.metadata.get("calendar_quality"),
+        "source_quality": feed.metadata.get("source_quality"),
         "generated_tehran": f"{_FA_DAYS[datetime.datetime.now(TEHRAN).weekday()]} "
                             f"{datetime.datetime.now(TEHRAN).strftime('%Y-%m-%d %H:%M')} تهران",
     }
